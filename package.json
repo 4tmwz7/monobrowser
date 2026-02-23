@@ -1,0 +1,46 @@
+{
+  "name": "monobrowser",
+  "version": "0.1.0",
+  "description": "Electron Browser MVP",
+  "main": "dist/main/main.js",
+  "author": "",
+  "license": "MIT",
+  "scripts": {
+    "clean": "rimraf dist",
+    "gen:icon": "node scripts/generate-icon.mjs",
+    "build:main": "tsc -p tsconfig.main.json",
+    "build:renderer": "esbuild src/renderer/app.ts --bundle --platform=browser --format=iife --outfile=dist/renderer/app.js",
+    "copy:html": "node scripts/copy-renderer-html.mjs",
+    "build": "npm run clean && npm run gen:icon && npm run build:main && npm run build:renderer && npm run copy:html",
+    "dev": "npm run build && electron .",
+    "start": "electron .",
+    "dist": "npm run build && electron-builder"
+  },
+  "build": {
+    "appId": "com.zlf.monobrowser",
+    "publish": [
+      {
+        "provider": "github",
+        "owner": "4tmwz7",
+        "repo": "monobrowser"
+      }
+    ],
+    "files": [
+      "dist/**/*",
+      "package.json"
+    ],
+    "directories": {
+      "buildResources": "assets"
+    }
+  },
+  "dependencies": {
+    "electron-updater": "^6.6.2"
+  },
+  "devDependencies": {
+    "electron": "^30.0.9",
+    "electron-builder": "^24.13.3",
+    "esbuild": "^0.25.0",
+    "rimraf": "^6.0.1",
+    "typescript": "^5.8.2"
+  }
+}

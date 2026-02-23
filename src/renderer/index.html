@@ -1,0 +1,429 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta
+      name="viewport"
+      content="width=device-width, initial-scale=1.0" />
+    <title>MonoBrowser</title>
+    <style>
+      :root {
+        --chrome-bg: #1e1f22;
+        --chrome-surface: #2b2d30;
+        --chrome-border: #3c3f41;
+        --chrome-hover: #3a3d40;
+        --chrome-active-tab: #2b2d30;
+        --chrome-inactive-tab: #1e1f22;
+        --text-primary: #dde1e6;
+        --text-secondary: #8c9198;
+        --accent: #4a9eff;
+        --accent-hover: #6ab4ff;
+        --address-bg: #3c3f41;
+        --address-border: #4a4d50;
+        --address-focus: #4a9eff;
+        font-family:
+          "Segoe UI",
+          system-ui,
+          -apple-system,
+          sans-serif;
+      }
+
+      * {
+        box-sizing: border-box;
+        margin: 0;
+        padding: 0;
+      }
+
+      body {
+        background: #000;
+        color: var(--text-primary);
+        overflow: hidden;
+      }
+
+      /* ── Tab strip ─────────────────────────────────────────── */
+      #tab-strip {
+        position: fixed;
+        top: 0;
+        left: 0;
+        right: 0;
+        height: 38px;
+        background: var(--chrome-bg);
+        display: flex;
+        align-items: flex-end;
+        padding: 0 4px;
+        gap: 1px;
+        user-select: none;
+        -webkit-app-region: drag;
+        z-index: 10;
+      }
+
+      #tabs {
+        display: flex;
+        align-items: flex-end;
+        gap: 1px;
+        flex: 1;
+        overflow-x: auto;
+        overflow-y: hidden;
+        scrollbar-width: none;
+        -webkit-app-region: no-drag;
+      }
+
+      #tabs::-webkit-scrollbar {
+        display: none;
+      }
+
+      .tab-btn {
+        display: inline-flex;
+        align-items: center;
+        gap: 6px;
+        height: 32px;
+        max-width: 220px;
+        min-width: 80px;
+        padding: 0 10px 0 12px;
+        background: var(--chrome-inactive-tab);
+        border: 1px solid transparent;
+        border-bottom: none;
+        border-radius: 8px 8px 0 0;
+        color: var(--text-secondary);
+        font-size: 12px;
+        font-family: inherit;
+        cursor: pointer;
+        transition:
+          background 0.1s,
+          color 0.1s;
+        -webkit-app-region: no-drag;
+        white-space: nowrap;
+        position: relative;
+      }
+
+      .tab-btn:hover {
+        background: var(--chrome-hover);
+        color: var(--text-primary);
+      }
+
+      .tab-btn.active {
+        background: var(--chrome-active-tab);
+        border-color: var(--chrome-border);
+        color: var(--text-primary);
+        z-index: 1;
+      }
+
+      .tab-favicon {
+        width: 14px;
+        height: 14px;
+        flex-shrink: 0;
+        border-radius: 2px;
+        display: flex;
+        align-items: center;
+        justify-content: center;
+        opacity: 0.7;
+      }
+
+      .tab-title {
+        flex: 1;
+        overflow: hidden;
+        text-overflow: ellipsis;
+        white-space: nowrap;
+        font-size: 12px;
+      }
+
+      .tab-loading {
+        width: 12px;
+        height: 12px;
+        flex-shrink: 0;
+        border: 2px solid var(--text-secondary);
+        border-top-color: var(--accent);
+        border-radius: 50%;
+        animation: spin 0.7s linear infinite;
+        display: none;
+      }
+
+      .tab-btn.loading .tab-loading {
+        display: block;
+      }
+      .tab-btn.loading .tab-favicon {
+        display: none;
+      }
+
+      @keyframes spin {
+        to {
+          transform: rotate(360deg);
+        }
+      }
+
+      .close-tab {
+        width: 18px;
+        height: 18px;
+        flex-shrink: 0;
+        display: flex;
+        align-items: center;
+        justify-content: center;
+        border: none;
+        background: transparent;
+        color: var(--text-secondary);
+        border-radius: 4px;
+        cursor: pointer;
+        font-size: 14px;
+        line-height: 1;
+        transition:
+          background 0.1s,
+          color 0.1s;
+        padding: 0;
+      }
+
+      .close-tab:hover {
+        background: rgba(255, 255, 255, 0.12);
+        color: var(--text-primary);
+      }
+
+      #new-tab {
+        width: 28px;
+        height: 28px;
+        flex-shrink: 0;
+        display: flex;
+        align-items: center;
+        justify-content: center;
+        border: none;
+        background: transparent;
+        color: var(--text-secondary);
+        border-radius: 6px;
+        cursor: pointer;
+        font-size: 18px;
+        line-height: 1;
+        transition:
+          background 0.1s,
+          color 0.1s;
+        margin-bottom: 2px;
+        -webkit-app-region: no-drag;
+      }
+
+      #new-tab:hover {
+        background: var(--chrome-hover);
+        color: var(--text-primary);
+      }
+
+      /* ── Nav bar ───────────────────────────────────────────── */
+      #nav-bar {
+        position: fixed;
+        top: 38px;
+        left: 0;
+        right: 0;
+        height: 46px;
+        background: var(--chrome-surface);
+        border-bottom: 1px solid var(--chrome-border);
+        display: flex;
+        align-items: center;
+        padding: 0 8px;
+        gap: 4px;
+        z-index: 10;
+      }
+
+      .nav-btn {
+        width: 32px;
+        height: 32px;
+        display: flex;
+        align-items: center;
+        justify-content: center;
+        border: none;
+        background: transparent;
+        color: var(--text-secondary);
+        border-radius: 8px;
+        cursor: pointer;
+        flex-shrink: 0;
+        transition:
+          background 0.1s,
+          color 0.1s;
+      }
+
+      .nav-btn:hover:not(:disabled) {
+        background: var(--chrome-hover);
+        color: var(--text-primary);
+      }
+
+      .nav-btn:disabled {
+        opacity: 0.3;
+        cursor: not-allowed;
+      }
+
+      .nav-btn svg {
+        width: 16px;
+        height: 16px;
+        fill: currentColor;
+      }
+
+      /* ── Address bar ──────────────────────────────────────── */
+      #address-form {
+        flex: 1;
+        display: flex;
+        align-items: center;
+        background: var(--address-bg);
+        border: 1.5px solid var(--address-border);
+        border-radius: 22px;
+        height: 34px;
+        padding: 0 12px 0 14px;
+        transition:
+          border-color 0.15s,
+          background 0.15s;
+        gap: 8px;
+      }
+
+      #address-form:focus-within {
+        border-color: var(--address-focus);
+        background: #2a2d30;
+      }
+
+      .address-icon {
+        flex-shrink: 0;
+        color: var(--text-secondary);
+        display: flex;
+        align-items: center;
+      }
+
+      .address-icon svg {
+        width: 13px;
+        height: 13px;
+        fill: currentColor;
+      }
+
+      #address {
+        flex: 1;
+        background: transparent;
+        border: none;
+        outline: none;
+        color: var(--text-primary);
+        font-size: 13px;
+        font-family: inherit;
+        caret-color: var(--accent);
+      }
+
+      #address::placeholder {
+        color: var(--text-secondary);
+      }
+
+      #address::selection {
+        background: rgba(74, 158, 255, 0.3);
+      }
+
+      #go {
+        flex-shrink: 0;
+        width: 28px;
+        height: 28px;
+        display: flex;
+        align-items: center;
+        justify-content: center;
+        background: transparent;
+        border: none;
+        border-radius: 8px;
+        color: var(--text-secondary);
+        cursor: pointer;
+        transition:
+          background 0.1s,
+          color 0.1s;
+        padding: 0;
+      }
+
+      #go:hover {
+        background: var(--chrome-hover);
+        color: var(--text-primary);
+      }
+
+      /* ── Placeholder black screen ─────────────────────────── */
+      #placeholder {
+        position: fixed;
+        top: 84px;
+        left: 0;
+        right: 0;
+        bottom: 0;
+        background: #000;
+        display: none;
+      }
+    </style>
+  </head>
+  <body>
+    <!-- Tab strip -->
+    <div id="tab-strip">
+      <div
+        id="tabs"
+        aria-label="Tabs"></div>
+      <button
+        id="new-tab"
+        type="button"
+        title="New tab (Ctrl+T)"
+        aria-label="New tab">
+        <svg
+          viewBox="0 0 16 16"
+          width="14"
+          height="14"
+          fill="currentColor">
+          <path
+            d="M8 2.5a.75.75 0 0 1 .75.75v4h4a.75.75 0 0 1 0 1.5h-4v4a.75.75 0 0 1-1.5 0v-4h-4a.75.75 0 0 1 0-1.5h4v-4A.75.75 0 0 1 8 2.5Z" />
+        </svg>
+      </button>
+    </div>
+
+    <!-- Navigation bar -->
+    <div id="nav-bar">
+      <button
+        id="back"
+        class="nav-btn"
+        aria-label="Back"
+        title="Back (Alt+←)">
+        <svg viewBox="0 0 16 16">
+          <path
+            d="M13.5 8a.75.75 0 0 0-.75-.75H4.81l2.72-2.72a.75.75 0 0 0-1.06-1.06l-4 4a.75.75 0 0 0 0 1.06l4 4a.75.75 0 0 0 1.06-1.06L4.81 8.75H12.75A.75.75 0 0 0 13.5 8Z" />
+        </svg>
+      </button>
+      <button
+        id="forward"
+        class="nav-btn"
+        aria-label="Forward"
+        title="Forward (Alt+→)">
+        <svg viewBox="0 0 16 16">
+          <path
+            d="M2.5 8a.75.75 0 0 1 .75-.75H11.19L8.47 4.53a.75.75 0 0 1 1.06-1.06l4 4a.75.75 0 0 1 0 1.06l-4 4a.75.75 0 0 1-1.06-1.06l2.72-2.72H3.25A.75.75 0 0 1 2.5 8Z" />
+        </svg>
+      </button>
+      <button
+        id="reload"
+        class="nav-btn"
+        aria-label="Reload"
+        title="Reload (Ctrl+R)">
+        <svg viewBox="0 0 16 16">
+          <path
+            d="M13.57 6.25a.75.75 0 0 0-1.42-.5l-.26.73A5.002 5.002 0 0 0 3 8a5 5 0 1 0 9.41-2.4.75.75 0 1 0-1.35.65A3.5 3.5 0 1 1 8 4.5c1.2 0 2.26.6 2.9 1.52l-.84-.29a.75.75 0 0 0-.5 1.41l2.5.88a.75.75 0 0 0 .96-.46l.55-1.56a.75.75 0 0 0-.5-.94Z" />
+        </svg>
+      </button>
+
+      <form id="address-form">
+        <span class="address-icon">
+          <svg viewBox="0 0 16 16">
+            <path
+              d="M8 1a7 7 0 1 0 0 14A7 7 0 0 0 8 1Zm-1 3.75A.75.75 0 0 1 8 4a.75.75 0 0 1 .75.75v.5a.75.75 0 0 1-1.5 0v-.5Zm.25 2.5h1.5a.75.75 0 0 1 0 1.5H8.5V11a.75.75 0 0 1-1.5 0V8a.75.75 0 0 1 .75-.75h.5Z" />
+          </svg>
+        </span>
+        <input
+          id="address"
+          placeholder="Search or enter URL"
+          autocomplete="off"
+          spellcheck="false" />
+        <button
+          id="go"
+          type="submit"
+          title="Go (Enter)"
+          aria-label="Go">
+          <svg
+            viewBox="0 0 16 16"
+            width="14"
+            height="14"
+            fill="currentColor">
+            <path
+              d="M8.22 2.97a.75.75 0 0 1 1.06 0l4.25 4.25a.75.75 0 0 1 0 1.06l-4.25 4.25a.75.75 0 0 1-1.06-1.06l2.97-2.97H2.75a.75.75 0 0 1 0-1.5h8.44L8.22 4.03a.75.75 0 0 1 0-1.06Z" />
+          </svg>
+        </button>
+      </form>
+    </div>
+
+    <div id="placeholder"></div>
+    <script src="./app.js"></script>
+  </body>
+</html>
