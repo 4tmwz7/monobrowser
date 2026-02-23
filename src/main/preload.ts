@@ -36,6 +36,8 @@ const browserApi = {
   forward: (): Promise<boolean> => ipcRenderer.invoke("nav:forward"),
   reload: (): Promise<boolean> => ipcRenderer.invoke("nav:reload"),
   getHistory: (): Promise<HistoryEntry[]> => ipcRenderer.invoke("history:get"),
+  openHistoryWindow: (): Promise<boolean> =>
+    ipcRenderer.invoke("history:open-window"),
   setViewportTop: (top: number): Promise<boolean> =>
     ipcRenderer.invoke("layout:set-viewport-top", top),
   onTabsState: (

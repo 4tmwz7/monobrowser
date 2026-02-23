@@ -21,6 +21,7 @@ type BrowserApi = {
   back: () => Promise<boolean>;
   forward: () => Promise<boolean>;
   reload: () => Promise<boolean>;
+  openHistoryWindow: () => Promise<boolean>;
   setViewportTop: (top: number) => Promise<boolean>;
   onTabsState: (callback: (payload: TabsStatePayload) => void) => () => void;
 };
@@ -49,6 +50,7 @@ const addressInput = document.getElementById("address") as HTMLInputElement;
 const backButton = document.getElementById("back") as HTMLButtonElement;
 const forwardButton = document.getElementById("forward") as HTMLButtonElement;
 const reloadButton = document.getElementById("reload") as HTMLButtonElement;
+const historyButton = document.getElementById("history") as HTMLButtonElement;
 const newTabButton = document.getElementById("new-tab") as HTMLButtonElement;
 const placeholder = document.getElementById("placeholder") as HTMLDivElement;
 
@@ -199,6 +201,10 @@ const wireEvents = (): void => {
 
   reloadButton.addEventListener("click", async () => {
     await window.browserApi.reload();
+  });
+
+  historyButton.addEventListener("click", async () => {
+    await window.browserApi.openHistoryWindow();
   });
 
   newTabButton.addEventListener("click", async () => {

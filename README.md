@@ -5,6 +5,7 @@ This is a simple desktop browser built using Electron and TypeScript. It's a min
 ## What it does
 
 - You can open multiple tabs, type URLs or search terms in the address bar, and use standard navigation (back, forward, reload).
+- There is a dedicated History button in the navigation bar that opens browsing history in a separate window.
 - Keyboard shortcuts are supported: `Ctrl+T` (or Cmd+T) for a new tab, `Ctrl+W` to close the current tab, and `Ctrl+R` to reload.
 - It opens Google by default on startup.
 - The native window menu bar is hidden to keep the UI clean, but you can reveal it by pressing `Alt`.

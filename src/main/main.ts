@@ -27,6 +27,7 @@ const DEFAULT_URL = "https://www.google.com";
 const MAX_HISTORY_ITEMS = 500;
 
 let mainWindow: BrowserWindow | null = null;
+let historyWindow: BrowserWindow | null = null;
 let historyFilePath = "";
 let viewportTop = 170;
 let nextTabId = 1;
@@ -86,6 +87,148 @@ const broadcastHistory = (): void => {
   }
 
   mainWindow.webContents.send("history:updated", historyEntries);
+
+  if (historyWindow && !historyWindow.isDestroyed()) {
+    void loadHistoryWindowContent();
+  }
+};
+
+const escapeHtml = (value: string): string => {
+  return value
+    .replace(/&/g, "&amp;")
+    .replace(/</g, "&lt;")
+    .replace(/>/g, "&gt;")
+    .replace(/\"/g, "&quot;")
+    .replace(/'/g, "&#39;");
+};
+
+const renderHistoryWindowHtml = (entries: HistoryEntry[]): string => {
+  const rows = entries
+    .map((entry) => {
+      const safeUrl = escapeHtml(entry.url);
+      const safeTitle = escapeHtml(entry.title || entry.url);
+      const safeVisitedAt = escapeHtml(
+        new Date(entry.visitedAt).toLocaleString("pl-PL"),
+      );
+
+      return `<li><a href="${safeUrl}" title="${safeTitle}">${safeTitle}</a><span>${safeVisitedAt}</span></li>`;
+    })
+    .join("");
+
+  return `<!doctype html>
+<html lang="pl">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>MonoBrowser History</title>
+    <style>
+      :root {
+        color-scheme: dark;
+        font-family: "Segoe UI", system-ui, sans-serif;
+      }
+
+      body {
+        margin: 0;
+        background: #1e1f22;
+        color: #dde1e6;
+      }
+
+      header {
+        padding: 14px 16px;
+        border-bottom: 1px solid #3c3f41;
+        font-size: 14px;
+        font-weight: 600;
+      }
+
+      main {
+        padding: 8px;
+      }
+
+      ul {
+        list-style: none;
+        margin: 0;
+        padding: 0;
+      }
+
+      li {
+        display: grid;
+        gap: 2px;
+        padding: 10px;
+        border-radius: 8px;
+      }
+
+      li:hover {
+        background: #2b2d30;
+      }
+
+      a {
+        color: #6ab4ff;
+        text-decoration: none;
+        overflow: hidden;
+        text-overflow: ellipsis;
+        white-space: nowrap;
+      }
+
+      a:hover {
+        text-decoration: underline;
+      }
+
+      span {
+        color: #8c9198;
+        font-size: 12px;
+      }
+
+      .empty {
+        padding: 16px;
+        color: #8c9198;
+      }
+    </style>
+  </head>
+  <body>
+    <header>Historia przeglądania</header>
+    <main>
+      ${rows ? `<ul>${rows}</ul>` : '<div class="empty">Brak wpisów w historii.</div>'}
+    </main>
+  </body>
+</html>`;
+};
+
+const loadHistoryWindowContent = async (): Promise<void> => {
+  if (!historyWindow || historyWindow.isDestroyed()) {
+    return;
+  }
+
+  const html = renderHistoryWindowHtml(historyEntries);
+  const url = `data:text/html;charset=utf-8,${encodeURIComponent(html)}`;
+  await historyWindow.loadURL(url);
+};
+
+const openHistoryWindow = async (): Promise<void> => {
+  if (historyWindow && !historyWindow.isDestroyed()) {
+    historyWindow.focus();
+    return;
+  }
+
+  historyWindow = new BrowserWindow({
+    width: 720,
+    height: 540,
+    minWidth: 520,
+    minHeight: 380,
+    title: "MonoBrowser History",
+    autoHideMenuBar: true,
+    icon: path.join(app.getAppPath(), "assets", "icon.png"),
+    webPreferences: {
+      contextIsolation: true,
+      nodeIntegration: false,
+      sandbox: true,
+    },
+  });
+
+  historyWindow.on("closed", () => {
+    historyWindow = null;
+  });
+
+  await loadHistoryWindowContent();
 };
 
 const saveHistory = async (): Promise<void> => {
@@ -334,6 +477,11 @@ const registerIpc = (): void => {
     return historyEntries;
   });
 
+  ipcMain.handle("history:open-window", async () => {
+    await openHistoryWindow();
+    return true;
+  });
+
   ipcMain.handle("layout:set-viewport-top", (_event, top: number) => {
     if (typeof top !== "number" || Number.isNaN(top)) {
       return false;
@@ -439,6 +587,7 @@ const createMainWindow = async (): Promise<void> => {
 };
 
 const bootstrap = async (): Promise<void> => {
+  app.setName("MonoBrowser");
   historyFilePath = path.join(app.getPath("userData"), "history.json");
   await loadHistory();
   registerIpc();
