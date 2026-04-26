@@ -1,6 +1,6 @@
 {
   "name": "monobrowser",
-  "version": "0.2.1",
+  "version": "0.2.2",
   "productName": "MonoBrowser",
   "description": "Electron Browser MVP",
   "main": "dist/main/main.js",

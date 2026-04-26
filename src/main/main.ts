@@ -32,6 +32,9 @@ type HistoryEntry = {
 const DEFAULT_URL = "https://www.google.com";
 const MAX_HISTORY_ITEMS = 500;
 const CLEAR_HISTORY_URL = "monobrowser://clear-history";
+const SPLASH_ONLY_MODE =
+  process.argv.includes("--splash-only") ||
+  process.env.MONOBROWSER_SPLASH_ONLY === "1";
 
 let mainWindow: BrowserWindow | null = null;
 let historyWindow: BrowserWindow | null = null;
@@ -41,11 +44,208 @@ let nextTabId = 1;
 let activeTabId: number | null = null;
 let historyEntries: HistoryEntry[] = [];
 let preloadedHomeTab: PreloadedHomeTab | null = null;
+let splashWindow: BrowserWindow | null = null;
 
 const tabs = new Map<number, TabRecord>();
 const tabMruOrder: number[] = [];
 
 let updateCheckInProgress = false;
+
+const getSplashLogoDataUrl = async (): Promise<string | null> => {
+  const candidatePaths = [
+    path.join(process.resourcesPath, "assets", "icon.png"),
+    path.join(process.resourcesPath, "icon.png"),
+    path.join(app.getAppPath(), "assets", "icon.png"),
+    path.join(__dirname, "..", "..", "assets", "icon.png"),
+  ];
+
+  for (const candidatePath of candidatePaths) {
+    try {
+      const fileBuffer = await fs.readFile(candidatePath);
+      return `data:image/png;base64,${fileBuffer.toString("base64")}`;
+    } catch {
+      // Try next path.
+    }
+  }
+
+  return null;
+};
+
+const renderSplashHtml = (logoDataUrl: string | null): string => {
+  const logo = logoDataUrl
+    ? `<img src="${logoDataUrl}" alt="MonoBrowser logo" />`
+    : '<div class="logo-fallback" aria-hidden="true"></div>';
+
+  return `<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>MonoBrowser loading</title>
+    <style>
+      :root {
+        color-scheme: dark;
+        font-family: Consolas, "Courier New", monospace;
+      }
+
+      * {
+        box-sizing: border-box;
+      }
+
+      body {
+        margin: 0;
+        width: 100vw;
+        height: 100vh;
+        background: #050505;
+        display: grid;
+        place-items: center;
+      }
+
+      .splash {
+        width: min(320px, 86vw);
+        display: grid;
+        justify-items: center;
+        gap: 12px;
+        padding: 8px 0;
+      }
+
+      .logo img,
+      .logo-fallback {
+        width: 60px;
+        height: 60px;
+        image-rendering: pixelated;
+        border: 1px solid #888;
+        background: #080808;
+      }
+
+      .logo img {
+        padding: 5px;
+        object-fit: contain;
+        filter: grayscale(1) contrast(1.12) brightness(0.92);
+      }
+
+      #progress-value {
+        color: #e5e5e5;
+        font-size: 24px;
+        font-weight: 700;
+        letter-spacing: 0.06em;
+        line-height: 1;
+      }
+
+      .progress-track {
+        width: 100%;
+        height: 12px;
+        border: 1px solid #888;
+        background: #080808;
+        position: relative;
+      }
+
+      .progress-fill {
+        position: absolute;
+        inset: 0 auto 0 0;
+        width: 0%;
+        height: 100%;
+        background: repeating-linear-gradient(
+          90deg,
+          #d7d7d7 0 8px,
+          #767676 8px 16px
+        );
+        transition: width 0.2s ease;
+      }
+    </style>
+  </head>
+  <body>
+    <section class="splash" role="status" aria-live="polite">
+      <div class="logo">
+        ${logo}
+      </div>
+      <strong id="progress-value">0%</strong>
+      <div class="progress-track">
+        <div id="progress-fill" class="progress-fill"></div>
+      </div>
+    </section>
+
+    <script>
+      (() => {
+        const progressFill = document.getElementById("progress-fill");
+        const progressValue = document.getElementById("progress-value");
+
+        window.updateSplash = (percent) => {
+          const parsed = Number(percent);
+          const safePercent = Number.isFinite(parsed)
+            ? Math.max(0, Math.min(100, Math.floor(parsed)))
+            : 0;
+
+          progressFill.style.width = safePercent + "%";
+          progressValue.textContent = safePercent + "%";
+        };
+      })();
+    </script>
+  </body>
+</html>`;
+};
+
+const createSplashWindow = async (): Promise<void> => {
+  if (splashWindow && !splashWindow.isDestroyed()) {
+    return;
+  }
+
+  const logoDataUrl = await getSplashLogoDataUrl();
+
+  splashWindow = new BrowserWindow({
+    width: 360,
+    height: 220,
+    frame: false,
+    resizable: false,
+    minimizable: false,
+    maximizable: false,
+    fullscreenable: false,
+    alwaysOnTop: true,
+    autoHideMenuBar: true,
+    backgroundColor: "#050505",
+    webPreferences: {
+      contextIsolation: true,
+      nodeIntegration: false,
+      sandbox: true,
+    },
+  });
+
+  splashWindow.on("closed", () => {
+    splashWindow = null;
+  });
+
+  const html = renderSplashHtml(logoDataUrl);
+  const dataUrl = `data:text/html;charset=utf-8,${encodeURIComponent(html)}`;
+  await splashWindow.loadURL(dataUrl);
+};
+
+const updateSplashProgress = (percent: number, label: string): void => {
+  if (!splashWindow || splashWindow.isDestroyed()) {
+    return;
+  }
+
+  const safePercent = Math.max(0, Math.min(100, Math.floor(percent)));
+  void label;
+
+  void splashWindow.webContents
+    .executeJavaScript(
+      `window.updateSplash && window.updateSplash(${safePercent});`,
+      true,
+    )
+    .catch(() => undefined);
+};
+
+const destroySplashWindow = (): void => {
+  if (!splashWindow) {
+    return;
+  }
+
+  if (!splashWindow.isDestroyed()) {
+    splashWindow.close();
+  }
+
+  splashWindow = null;
+};
 
 const normalizeInputToUrl = (input: string): string => {
   const trimmed = input.trim();
@@ -557,6 +757,7 @@ const closeTab = (id: number): boolean => {
 const createTab = (
   initialUrl: string = DEFAULT_URL,
   makeActive: boolean = true,
+  preloadNextHomeTab: boolean = true,
 ): number => {
   const id = nextTabId++;
   const normalizedInitialUrl = normalizeInputToUrl(initialUrl);
@@ -601,7 +802,9 @@ const createTab = (
     void appendHistory(contents.getURL(), contents.getTitle());
   }
 
-  ensurePreloadedHomeTab();
+  if (preloadNextHomeTab) {
+    ensurePreloadedHomeTab();
+  }
 
   return id;
 };
@@ -761,18 +964,28 @@ const scheduleAutoUpdateChecks = (): void => {
     void autoUpdater.checkForUpdatesAndNotify();
   };
 
-  checkForUpdates();
-
+  const initialDelayMs = 45 * 1000;
   const sixHoursMs = 6 * 60 * 60 * 1000;
+  setTimeout(checkForUpdates, initialDelayMs);
   setInterval(checkForUpdates, sixHoursMs);
 };
 
-const createMainWindow = async (): Promise<void> => {
+type CreateMainWindowOptions = {
+  showImmediately?: boolean;
+  onProgress?: (percent: number, label: string) => void;
+};
+
+const createMainWindow = async (
+  options: CreateMainWindowOptions = {},
+): Promise<void> => {
+  const { showImmediately = true, onProgress } = options;
+
   mainWindow = new BrowserWindow({
     width: 1400,
     height: 900,
     minWidth: 900,
     minHeight: 600,
+    show: false,
     autoHideMenuBar: true,
     icon: path.join(app.getAppPath(), "assets", "icon.png"),
     webPreferences: {
@@ -791,18 +1004,52 @@ const createMainWindow = async (): Promise<void> => {
 
   mainWindow.setMenuBarVisibility(false);
 
+  onProgress?.(58, "Loading app shell...");
   await mainWindow.loadFile(path.join(__dirname, "../renderer/index.html"));
-  ensurePreloadedHomeTab();
-  createTab(DEFAULT_URL, true);
+  onProgress?.(79, "Opening first tab...");
+  createTab(DEFAULT_URL, true, false);
   broadcastHistory();
+
+  if (showImmediately && mainWindow && !mainWindow.isDestroyed()) {
+    mainWindow.show();
+    mainWindow.focus();
+  }
 };
 
 const bootstrap = async (): Promise<void> => {
   app.setName("MonoBrowser");
   historyFilePath = path.join(app.getPath("userData"), "history.json");
-  await loadHistory();
+
+  await createSplashWindow();
+  updateSplashProgress(8, "Starting MonoBrowser...");
+
+  if (SPLASH_ONLY_MODE) {
+    updateSplashProgress(100, "Splash preview mode");
+    return;
+  }
+
   registerIpc();
-  await createMainWindow();
+
+  const historyLoadPromise = loadHistory().then(() => {
+    broadcastHistory();
+  });
+
+  updateSplashProgress(28, "Preparing interface...");
+  await createMainWindow({
+    showImmediately: false,
+    onProgress: updateSplashProgress,
+  });
+
+  updateSplashProgress(94, "Finalizing startup...");
+  if (mainWindow && !mainWindow.isDestroyed()) {
+    mainWindow.show();
+    mainWindow.focus();
+  }
+
+  updateSplashProgress(100, "Ready");
+  destroySplashWindow();
+
+  void historyLoadPromise;
   scheduleAutoUpdateChecks();
 };
 
