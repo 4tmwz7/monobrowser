@@ -1,6 +1,6 @@
 {
   "name": "monobrowser",
-  "version": "0.2.0",
+  "version": "0.2.1",
   "productName": "MonoBrowser",
   "description": "Electron Browser MVP",
   "main": "dist/main/main.js",
@@ -19,6 +19,7 @@
   },
   "build": {
     "appId": "com.zlf.monobrowser",
+    "artifactName": "${productName}-Setup-${version}.${ext}",
     "publish": [
       {
         "provider": "github",

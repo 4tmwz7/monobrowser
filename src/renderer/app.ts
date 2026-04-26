@@ -44,7 +44,7 @@ const state: {
 
 const CHROME_HEIGHT = 84; // 38px tab-strip + 46px nav-bar
 
-const tabsContainer = document.getElementById("tabs") as HTMLDivElement;
+const tabsContainer = document.getElementById("tab-list") as HTMLDivElement;
 const addressForm = document.getElementById("address-form") as HTMLFormElement;
 const addressInput = document.getElementById("address") as HTMLInputElement;
 const backButton = document.getElementById("back") as HTMLButtonElement;

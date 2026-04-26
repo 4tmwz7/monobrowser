@@ -16,6 +16,12 @@ type TabRecord = TabState & {
   view: BrowserView;
 };
 
+type PreloadedHomeTab = {
+  view: BrowserView;
+  isReady: boolean;
+  removeListeners: () => void;
+};
+
 type HistoryEntry = {
   id: string;
   url: string;
@@ -25,6 +31,7 @@ type HistoryEntry = {
 
 const DEFAULT_URL = "https://www.google.com";
 const MAX_HISTORY_ITEMS = 500;
+const CLEAR_HISTORY_URL = "monobrowser://clear-history";
 
 let mainWindow: BrowserWindow | null = null;
 let historyWindow: BrowserWindow | null = null;
@@ -33,8 +40,10 @@ let viewportTop = 170;
 let nextTabId = 1;
 let activeTabId: number | null = null;
 let historyEntries: HistoryEntry[] = [];
+let preloadedHomeTab: PreloadedHomeTab | null = null;
 
 const tabs = new Map<number, TabRecord>();
+const tabMruOrder: number[] = [];
 
 let updateCheckInProgress = false;
 
@@ -59,6 +68,18 @@ const normalizeInputToUrl = (input: string): string => {
   return `https://www.google.com/search?q=${encodeURIComponent(trimmed)}`;
 };
 
+const isClearHistoryUrl = (value: string): boolean => {
+  try {
+    const parsed = new URL(value);
+    return (
+      parsed.protocol === "monobrowser:" &&
+      parsed.hostname === "clear-history"
+    );
+  } catch {
+    return false;
+  }
+};
+
 const getTabSnapshot = (tab: TabRecord): TabState => ({
   id: tab.id,
   title: tab.title,
@@ -72,6 +93,121 @@ const getTabsStatePayload = () => ({
   tabs: Array.from(tabs.values()).map(getTabSnapshot),
   activeTabId,
 });
+
+const promoteTabInMruOrder = (tabId: number): void => {
+  const existingIndex = tabMruOrder.indexOf(tabId);
+  if (existingIndex !== -1) {
+    tabMruOrder.splice(existingIndex, 1);
+  }
+
+  tabMruOrder.unshift(tabId);
+};
+
+const appendTabToMruOrder = (tabId: number): void => {
+  const existingIndex = tabMruOrder.indexOf(tabId);
+  if (existingIndex !== -1) {
+    tabMruOrder.splice(existingIndex, 1);
+  }
+
+  tabMruOrder.push(tabId);
+};
+
+const removeTabFromMruOrder = (tabId: number): void => {
+  const existingIndex = tabMruOrder.indexOf(tabId);
+  if (existingIndex !== -1) {
+    tabMruOrder.splice(existingIndex, 1);
+  }
+};
+
+const getMostRecentTabId = (): number | null => {
+  for (const tabId of tabMruOrder) {
+    if (tabs.has(tabId)) {
+      return tabId;
+    }
+  }
+
+  return null;
+};
+
+const createTabView = (): BrowserView => {
+  return new BrowserView({
+    webPreferences: {
+      contextIsolation: true,
+      nodeIntegration: false,
+      sandbox: true,
+    },
+  });
+};
+
+const ensurePreloadedHomeTab = (): void => {
+  if (!mainWindow || preloadedHomeTab) {
+    return;
+  }
+
+  const view = createTabView();
+  const contents = view.webContents;
+
+  const handleDidFinishLoad = (): void => {
+    if (!preloadedHomeTab || preloadedHomeTab.view !== view) {
+      return;
+    }
+
+    preloadedHomeTab.isReady = true;
+  };
+
+  const handleDidFailLoad = (): void => {
+    if (!preloadedHomeTab || preloadedHomeTab.view !== view) {
+      return;
+    }
+
+    preloadedHomeTab.removeListeners();
+    preloadedHomeTab = null;
+    contents.close();
+  };
+
+  const removeListeners = (): void => {
+    contents.removeListener("did-finish-load", handleDidFinishLoad);
+    contents.removeListener("did-fail-load", handleDidFailLoad);
+  };
+
+  preloadedHomeTab = {
+    view,
+    isReady: false,
+    removeListeners,
+  };
+
+  contents.on("did-finish-load", handleDidFinishLoad);
+  contents.on("did-fail-load", handleDidFailLoad);
+  contents.loadURL(DEFAULT_URL).catch(() => {
+    handleDidFailLoad();
+  });
+};
+
+const destroyPreloadedHomeTab = (): void => {
+  if (!preloadedHomeTab) {
+    return;
+  }
+
+  const view = preloadedHomeTab.view;
+  preloadedHomeTab.removeListeners();
+  preloadedHomeTab = null;
+  view.webContents.close();
+};
+
+const consumePreloadedHomeTabView = (url: string): BrowserView | null => {
+  if (
+    url !== DEFAULT_URL ||
+    !preloadedHomeTab ||
+    !preloadedHomeTab.isReady
+  ) {
+    return null;
+  }
+
+  const consumedView = preloadedHomeTab.view;
+  preloadedHomeTab.removeListeners();
+  preloadedHomeTab = null;
+  return consumedView;
+};
 
 const broadcastTabsState = (): void => {
   if (!mainWindow) {
@@ -115,6 +251,9 @@ const renderHistoryWindowHtml = (entries: HistoryEntry[]): string => {
     })
     .join("");
 
+  const clearHistoryLabel = rows ? "Usuń całą historię" : "Historia jest już pusta";
+  const clearHistoryDisabled = rows ? "" : "disabled";
+
   return `<!doctype html>
 <html lang="pl">
   <head>
@@ -138,6 +277,31 @@ const renderHistoryWindowHtml = (entries: HistoryEntry[]): string => {
         border-bottom: 1px solid #3c3f41;
         font-size: 14px;
         font-weight: 600;
+        display: flex;
+        align-items: center;
+        justify-content: space-between;
+        gap: 12px;
+      }
+
+      .clear-history {
+        border: 1px solid #4a4d50;
+        background: #2b2d30;
+        color: #dde1e6;
+        border-radius: 8px;
+        padding: 6px 10px;
+        font-size: 12px;
+        font-family: inherit;
+        cursor: pointer;
+        transition: background 0.12s;
+      }
+
+      .clear-history:hover:not(:disabled) {
+        background: #3a3d40;
+      }
+
+      .clear-history:disabled {
+        opacity: 0.45;
+        cursor: not-allowed;
       }
 
       main {
@@ -185,7 +349,12 @@ const renderHistoryWindowHtml = (entries: HistoryEntry[]): string => {
     </style>
   </head>
   <body>
-    <header>Historia przeglądania</header>
+    <header>
+      <span>Historia przeglądania</span>
+      <form action="${CLEAR_HISTORY_URL}" method="get">
+        <button class="clear-history" type="submit" ${clearHistoryDisabled}>${clearHistoryLabel}</button>
+      </form>
+    </header>
     <main>
       ${rows ? `<ul>${rows}</ul>` : '<div class="empty">Brak wpisów w historii.</div>'}
     </main>
@@ -224,11 +393,35 @@ const openHistoryWindow = async (): Promise<void> => {
     },
   });
 
+  historyWindow.webContents.setWindowOpenHandler(({ url }) => {
+    if (isClearHistoryUrl(url)) {
+      void handleHistoryWindowNavigation(url);
+      return { action: "deny" };
+    }
+
+    return { action: "deny" };
+  });
+
+  historyWindow.webContents.on("will-navigate", (event, url) => {
+    if (isClearHistoryUrl(url)) {
+      event.preventDefault();
+      void handleHistoryWindowNavigation(url);
+    }
+  });
+
   historyWindow.on("closed", () => {
     historyWindow = null;
   });
 
   await loadHistoryWindowContent();
+};
+
+const handleHistoryWindowNavigation = async (url: string): Promise<void> => {
+  if (!isClearHistoryUrl(url)) {
+    return;
+  }
+
+  await clearHistory();
 };
 
 const saveHistory = async (): Promise<void> => {
@@ -269,6 +462,12 @@ const appendHistory = async (url: string, title: string): Promise<void> => {
   };
 
   historyEntries = [entry, ...historyEntries].slice(0, MAX_HISTORY_ITEMS);
+  await saveHistory();
+  broadcastHistory();
+};
+
+const clearHistory = async (): Promise<void> => {
+  historyEntries = [];
   await saveHistory();
   broadcastHistory();
 };
@@ -318,6 +517,7 @@ const setActiveTab = (id: number): boolean => {
 
   mainWindow.setBrowserView(tab.view);
   activeTabId = id;
+  promoteTabInMruOrder(id);
   applyActiveViewBounds();
   updateTabFromWebContents(tab);
 
@@ -332,6 +532,7 @@ const closeTab = (id: number): boolean => {
   const wasActive = activeTabId === id;
   const tabToClose = tabs.get(id)!;
   tabs.delete(id);
+  removeTabFromMruOrder(id);
   tabToClose.view.webContents.close();
 
   if (tabs.size === 0) {
@@ -340,8 +541,13 @@ const closeTab = (id: number): boolean => {
       mainWindow.setBrowserView(null);
     }
   } else if (wasActive) {
-    const nextId = tabs.keys().next().value as number;
-    setActiveTab(nextId);
+    const nextId = getMostRecentTabId();
+    if (nextId !== null) {
+      setActiveTab(nextId);
+    } else if (mainWindow) {
+      activeTabId = null;
+      mainWindow.setBrowserView(null);
+    }
   }
 
   broadcastTabsState();
@@ -353,19 +559,14 @@ const createTab = (
   makeActive: boolean = true,
 ): number => {
   const id = nextTabId++;
-
-  const view = new BrowserView({
-    webPreferences: {
-      contextIsolation: true,
-      nodeIntegration: false,
-      sandbox: true,
-    },
-  });
+  const normalizedInitialUrl = normalizeInputToUrl(initialUrl);
+  const preloadedView = consumePreloadedHomeTabView(normalizedInitialUrl);
+  const view = preloadedView ?? createTabView();
 
   const tab: TabRecord = {
     id,
     title: "New Tab",
-    url: initialUrl,
+    url: normalizedInitialUrl,
     isLoading: false,
     canGoBack: false,
     canGoForward: false,
@@ -385,6 +586,7 @@ const createTab = (
   });
 
   tabs.set(id, tab);
+  appendTabToMruOrder(id);
 
   if (makeActive) {
     setActiveTab(id);
@@ -392,7 +594,14 @@ const createTab = (
     broadcastTabsState();
   }
 
-  contents.loadURL(normalizeInputToUrl(initialUrl)).catch(() => undefined);
+  if (!preloadedView) {
+    contents.loadURL(normalizedInitialUrl).catch(() => undefined);
+  } else if (!contents.isLoading()) {
+    updateTabFromWebContents(tab);
+    void appendHistory(contents.getURL(), contents.getTitle());
+  }
+
+  ensurePreloadedHomeTab();
 
   return id;
 };
@@ -576,12 +785,14 @@ const createMainWindow = async (): Promise<void> => {
 
   mainWindow.on("resize", () => applyActiveViewBounds());
   mainWindow.on("closed", () => {
+    destroyPreloadedHomeTab();
     mainWindow = null;
   });
 
   mainWindow.setMenuBarVisibility(false);
 
   await mainWindow.loadFile(path.join(__dirname, "../renderer/index.html"));
+  ensurePreloadedHomeTab();
   createTab(DEFAULT_URL, true);
   broadcastHistory();
 };

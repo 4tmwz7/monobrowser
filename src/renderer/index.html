@@ -68,6 +68,13 @@
         -webkit-app-region: no-drag;
       }
 
+      #tab-list {
+        display: flex;
+        align-items: flex-end;
+        gap: 1px;
+        flex-shrink: 0;
+      }
+
       #tabs::-webkit-scrollbar {
         display: none;
       }
@@ -344,21 +351,23 @@
     <div id="tab-strip">
       <div
         id="tabs"
-        aria-label="Tabs"></div>
-      <button
-        id="new-tab"
-        type="button"
-        title="New tab (Ctrl+T)"
-        aria-label="New tab">
-        <svg
-          viewBox="0 0 16 16"
-          width="14"
-          height="14"
-          fill="currentColor">
-          <path
-            d="M8 2.5a.75.75 0 0 1 .75.75v4h4a.75.75 0 0 1 0 1.5h-4v4a.75.75 0 0 1-1.5 0v-4h-4a.75.75 0 0 1 0-1.5h4v-4A.75.75 0 0 1 8 2.5Z" />
-        </svg>
-      </button>
+        aria-label="Tabs">
+        <div id="tab-list"></div>
+        <button
+          id="new-tab"
+          type="button"
+          title="New tab (Ctrl+T)"
+          aria-label="New tab">
+          <svg
+            viewBox="0 0 16 16"
+            width="14"
+            height="14"
+            fill="currentColor">
+            <path
+              d="M8 2.5a.75.75 0 0 1 .75.75v4h4a.75.75 0 0 1 0 1.5h-4v4a.75.75 0 0 1-1.5 0v-4h-4a.75.75 0 0 1 0-1.5h4v-4A.75.75 0 0 1 8 2.5Z" />
+          </svg>
+        </button>
+      </div>
     </div>
 
     <!-- Navigation bar -->
