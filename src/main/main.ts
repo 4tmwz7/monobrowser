@@ -1,4 +1,5 @@
 import { app, BrowserView, BrowserWindow, dialog, ipcMain } from "electron";
+import type { WebContents } from "electron";
 import fs from "node:fs/promises";
 import path from "node:path";
 import { autoUpdater } from "electron-updater";
@@ -50,6 +51,347 @@ const tabs = new Map<number, TabRecord>();
 const tabMruOrder: number[] = [];
 
 let updateCheckInProgress = false;
+let startPageBackgroundColor = "#ffffff";
+let startPageBackgroundFilePath = "";
+
+const START_PAGE_BACKGROUND_FILE = "start-page-background.json";
+
+const START_PAGE_BG_PROBE_SCRIPT = String.raw`(() => {
+  const parseColor = (value) => {
+    if (typeof value !== "string") {
+      return null;
+    }
+
+    const normalized = value.trim().toLowerCase();
+    if (!normalized || normalized === "transparent") {
+      return null;
+    }
+
+    const shortHexMatch = normalized.match(/^#([0-9a-f]{3})$/i);
+    if (shortHexMatch) {
+      const [r, g, b] = shortHexMatch[1].split("");
+      return "#" + r + r + g + g + b + b;
+    }
+
+    const fullHexMatch = normalized.match(/^#([0-9a-f]{6})$/i);
+    if (fullHexMatch) {
+      return "#" + fullHexMatch[1];
+    }
+
+    const rgbMatch = normalized.match(/^rgba?\(([^)]+)\)$/);
+    if (!rgbMatch) {
+      return null;
+    }
+
+    const parts = rgbMatch[1].split(",").map((part) => part.trim());
+    if (parts.length < 3) {
+      return null;
+    }
+
+    const toByte = (raw) => {
+      if (raw.endsWith("%")) {
+        const value = Number(raw.slice(0, -1));
+        if (!Number.isFinite(value)) {
+          return null;
+        }
+
+        return Math.max(0, Math.min(255, Math.round((value / 100) * 255)));
+      }
+
+      const value = Number(raw);
+      if (!Number.isFinite(value)) {
+        return null;
+      }
+
+      return Math.max(0, Math.min(255, Math.round(value)));
+    };
+
+    const parseAlpha = (raw) => {
+      if (typeof raw !== "string") {
+        return 1;
+      }
+
+      if (raw.endsWith("%")) {
+        const value = Number(raw.slice(0, -1));
+        if (!Number.isFinite(value)) {
+          return 0;
+        }
+
+        return Math.max(0, Math.min(1, value / 100));
+      }
+
+      const value = Number(raw);
+      if (!Number.isFinite(value)) {
+        return 0;
+      }
+
+      return Math.max(0, Math.min(1, value));
+    };
+
+    const r = toByte(parts[0]);
+    const g = toByte(parts[1]);
+    const b = toByte(parts[2]);
+    const alpha = parseAlpha(parts[3]);
+
+    if (r === null || g === null || b === null || alpha <= 0.05) {
+      return null;
+    }
+
+    const toHex = (value) => value.toString(16).padStart(2, "0");
+    return "#" + toHex(r) + toHex(g) + toHex(b);
+  };
+
+  const candidates = [];
+
+  const collectColor = (value) => {
+    if (typeof value === "string" && value.trim()) {
+      candidates.push(value);
+    }
+  };
+
+  const collectFrom = (element) => {
+    if (!element) {
+      return;
+    }
+
+    collectColor(getComputedStyle(element).backgroundColor);
+  };
+
+  collectFrom(document.body);
+  collectFrom(document.documentElement);
+  collectFrom(document.querySelector("main"));
+  collectFrom(document.querySelector("[role='main']"));
+
+  const themeMeta = document.querySelector("meta[name='theme-color']");
+  collectColor(themeMeta && themeMeta.getAttribute("content"));
+
+  for (const candidate of candidates) {
+    const parsed = parseColor(candidate);
+    if (parsed) {
+      return parsed;
+    }
+  }
+
+  return null;
+})()`;
+
+const normalizeHexColor = (value: unknown): string | null => {
+  if (typeof value !== "string") {
+    return null;
+  }
+
+  const normalized = value.trim().toLowerCase();
+  const shortMatch = normalized.match(/^#([0-9a-f]{3})$/i);
+  if (shortMatch) {
+    const [r, g, b] = shortMatch[1].split("");
+    return `#${r}${r}${g}${g}${b}${b}`;
+  }
+
+  const fullMatch = normalized.match(/^#([0-9a-f]{6})$/i);
+  if (fullMatch) {
+    return `#${fullMatch[1]}`;
+  }
+
+  return null;
+};
+
+const getSafeStartPageBackgroundColor = (value: unknown): string => {
+  return normalizeHexColor(value) ?? "#ffffff";
+};
+
+const isDefaultStartPageUrl = (value: string): boolean => {
+  try {
+    const parsed = new URL(value);
+    const defaultParsed = new URL(DEFAULT_URL);
+
+    if (parsed.hostname !== defaultParsed.hostname) {
+      return false;
+    }
+
+    const pathname = parsed.pathname.toLowerCase();
+    if (pathname !== "/" && pathname !== "/webhp") {
+      return false;
+    }
+
+    return !parsed.searchParams.has("q");
+  } catch {
+    return false;
+  }
+};
+
+const loadStartPageBackgroundColor = async (): Promise<void> => {
+  if (!startPageBackgroundFilePath) {
+    return;
+  }
+
+  try {
+    const raw = await fs.readFile(startPageBackgroundFilePath, "utf8");
+    const parsed = JSON.parse(raw) as { color?: unknown };
+    const nextColor = normalizeHexColor(parsed.color);
+
+    if (nextColor) {
+      startPageBackgroundColor = nextColor;
+    }
+  } catch {
+    startPageBackgroundColor = getSafeStartPageBackgroundColor(
+      startPageBackgroundColor,
+    );
+  }
+};
+
+const saveStartPageBackgroundColor = async (): Promise<void> => {
+  if (!startPageBackgroundFilePath) {
+    return;
+  }
+
+  await fs.mkdir(path.dirname(startPageBackgroundFilePath), { recursive: true });
+  await fs.writeFile(
+    startPageBackgroundFilePath,
+    JSON.stringify({ color: startPageBackgroundColor }, null, 2),
+    "utf8",
+  );
+};
+
+type SplashTheme = {
+  bg: string;
+  text: string;
+  border: string;
+  logoBg: string;
+  trackBg: string;
+  fillA: string;
+  fillB: string;
+};
+
+const getColorLuminance = (hexColor: string): number => {
+  const safeColor = getSafeStartPageBackgroundColor(hexColor);
+  const red = parseInt(safeColor.slice(1, 3), 16);
+  const green = parseInt(safeColor.slice(3, 5), 16);
+  const blue = parseInt(safeColor.slice(5, 7), 16);
+
+  const toLinear = (channel: number): number => {
+    const normalized = channel / 255;
+    if (normalized <= 0.03928) {
+      return normalized / 12.92;
+    }
+
+    return ((normalized + 0.055) / 1.055) ** 2.4;
+  };
+
+  const r = toLinear(red);
+  const g = toLinear(green);
+  const b = toLinear(blue);
+
+  return 0.2126 * r + 0.7152 * g + 0.0722 * b;
+};
+
+const getSplashTheme = (backgroundColor: string): SplashTheme => {
+  const bg = getSafeStartPageBackgroundColor(backgroundColor);
+  const isDarkBackground = getColorLuminance(bg) < 0.45;
+
+  if (isDarkBackground) {
+    return {
+      bg,
+      text: "#ececec",
+      border: "#8e8e8e",
+      logoBg: "rgba(0, 0, 0, 0.26)",
+      trackBg: "rgba(0, 0, 0, 0.35)",
+      fillA: "#e4e4e4",
+      fillB: "#8a8a8a",
+    };
+  }
+
+  return {
+    bg,
+    text: "#111111",
+    border: "#383838",
+    logoBg: "rgba(255, 255, 255, 0.62)",
+    trackBg: "rgba(0, 0, 0, 0.08)",
+    fillA: "#1f1f1f",
+    fillB: "#666666",
+  };
+};
+
+const applyStartPageBackgroundToView = (view: BrowserView): void => {
+  const color = getSafeStartPageBackgroundColor(startPageBackgroundColor);
+
+  try {
+    view.setBackgroundColor(color);
+  } catch {
+    return;
+  }
+};
+
+const applySplashThemeToWindow = (windowRef: BrowserWindow): void => {
+  if (windowRef.isDestroyed()) {
+    return;
+  }
+
+  const theme = getSplashTheme(startPageBackgroundColor);
+  windowRef.setBackgroundColor(theme.bg);
+
+  const serializedTheme = JSON.stringify(theme);
+  void windowRef.webContents
+    .executeJavaScript(
+      `window.updateSplashTheme && window.updateSplashTheme(${serializedTheme});`,
+      true,
+    )
+    .catch(() => undefined);
+};
+
+const applyStartPageBackgroundColor = (): void => {
+  startPageBackgroundColor = getSafeStartPageBackgroundColor(
+    startPageBackgroundColor,
+  );
+
+  if (mainWindow && !mainWindow.isDestroyed()) {
+    mainWindow.setBackgroundColor(startPageBackgroundColor);
+  }
+
+  if (splashWindow && !splashWindow.isDestroyed()) {
+    applySplashThemeToWindow(splashWindow);
+  }
+
+  if (preloadedHomeTab) {
+    applyStartPageBackgroundToView(preloadedHomeTab.view);
+  }
+
+  for (const tab of tabs.values()) {
+    if (isDefaultStartPageUrl(tab.url)) {
+      applyStartPageBackgroundToView(tab.view);
+    }
+  }
+};
+
+const updateStartPageBackgroundFromContents = async (
+  contents: WebContents,
+): Promise<void> => {
+  if (contents.isDestroyed()) {
+    return;
+  }
+
+  const currentUrl = contents.getURL();
+  if (!isDefaultStartPageUrl(currentUrl)) {
+    return;
+  }
+
+  try {
+    const detectedColor = await contents.executeJavaScript(
+      START_PAGE_BG_PROBE_SCRIPT,
+      true,
+    );
+
+    const nextColor = normalizeHexColor(detectedColor);
+    if (!nextColor || nextColor === startPageBackgroundColor) {
+      return;
+    }
+
+    startPageBackgroundColor = nextColor;
+    applyStartPageBackgroundColor();
+    await saveStartPageBackgroundColor();
+  } catch {
+    return;
+  }
+};
 
 const getSplashLogoDataUrl = async (): Promise<string | null> => {
   const candidatePaths = [
@@ -75,6 +417,8 @@ const renderSplashHtml = (logoDataUrl: string | null): string => {
   const logo = logoDataUrl
     ? `<img src="${logoDataUrl}" alt="MonoBrowser logo" />`
     : '<div class="logo-fallback" aria-hidden="true"></div>';
+  const theme = getSplashTheme(startPageBackgroundColor);
+  const serializedTheme = JSON.stringify(theme);
 
   return `<!doctype html>
 <html lang="en">
@@ -86,6 +430,13 @@ const renderSplashHtml = (logoDataUrl: string | null): string => {
       :root {
         color-scheme: dark;
         font-family: Consolas, "Courier New", monospace;
+        --bg: ${theme.bg};
+        --text: ${theme.text};
+        --border: ${theme.border};
+        --logo-bg: ${theme.logoBg};
+        --track-bg: ${theme.trackBg};
+        --fill-a: ${theme.fillA};
+        --fill-b: ${theme.fillB};
       }
 
       * {
@@ -96,7 +447,7 @@ const renderSplashHtml = (logoDataUrl: string | null): string => {
         margin: 0;
         width: 100vw;
         height: 100vh;
-        background: #050505;
+        background: var(--bg);
         display: grid;
         place-items: center;
       }
@@ -114,8 +465,8 @@ const renderSplashHtml = (logoDataUrl: string | null): string => {
         width: 60px;
         height: 60px;
         image-rendering: pixelated;
-        border: 1px solid #888;
-        background: #080808;
+        border: 1px solid var(--border);
+        background: var(--logo-bg);
       }
 
       .logo img {
@@ -125,7 +476,7 @@ const renderSplashHtml = (logoDataUrl: string | null): string => {
       }
 
       #progress-value {
-        color: #e5e5e5;
+        color: var(--text);
         font-size: 24px;
         font-weight: 700;
         letter-spacing: 0.06em;
@@ -135,8 +486,8 @@ const renderSplashHtml = (logoDataUrl: string | null): string => {
       .progress-track {
         width: 100%;
         height: 12px;
-        border: 1px solid #888;
-        background: #080808;
+        border: 1px solid var(--border);
+        background: var(--track-bg);
         position: relative;
       }
 
@@ -147,8 +498,8 @@ const renderSplashHtml = (logoDataUrl: string | null): string => {
         height: 100%;
         background: repeating-linear-gradient(
           90deg,
-          #d7d7d7 0 8px,
-          #767676 8px 16px
+          var(--fill-a) 0 8px,
+          var(--fill-b) 8px 16px
         );
         transition: width 0.2s ease;
       }
@@ -167,8 +518,36 @@ const renderSplashHtml = (logoDataUrl: string | null): string => {
 
     <script>
       (() => {
+        const rootStyle = document.documentElement.style;
         const progressFill = document.getElementById("progress-fill");
         const progressValue = document.getElementById("progress-value");
+
+        const applyTheme = (theme) => {
+          if (!theme || typeof theme !== "object") {
+            return;
+          }
+
+          const entries = [
+            ["bg", "--bg"],
+            ["text", "--text"],
+            ["border", "--border"],
+            ["logoBg", "--logo-bg"],
+            ["trackBg", "--track-bg"],
+            ["fillA", "--fill-a"],
+            ["fillB", "--fill-b"],
+          ];
+
+          for (const [key, variableName] of entries) {
+            const value = theme[key];
+            if (typeof value === "string" && value.trim().length > 0) {
+              rootStyle.setProperty(variableName, value);
+            }
+          }
+        };
+
+        window.updateSplashTheme = (theme) => {
+          applyTheme(theme);
+        };
 
         window.updateSplash = (percent) => {
           const parsed = Number(percent);
@@ -179,6 +558,8 @@ const renderSplashHtml = (logoDataUrl: string | null): string => {
           progressFill.style.width = safePercent + "%";
           progressValue.textContent = safePercent + "%";
         };
+
+        applyTheme(${serializedTheme});
       })();
     </script>
   </body>
@@ -202,7 +583,7 @@ const createSplashWindow = async (): Promise<void> => {
     fullscreenable: false,
     alwaysOnTop: true,
     autoHideMenuBar: true,
-    backgroundColor: "#050505",
+    backgroundColor: getSafeStartPageBackgroundColor(startPageBackgroundColor),
     webPreferences: {
       contextIsolation: true,
       nodeIntegration: false,
@@ -217,6 +598,7 @@ const createSplashWindow = async (): Promise<void> => {
   const html = renderSplashHtml(logoDataUrl);
   const dataUrl = `data:text/html;charset=utf-8,${encodeURIComponent(html)}`;
   await splashWindow.loadURL(dataUrl);
+  applySplashThemeToWindow(splashWindow);
 };
 
 const updateSplashProgress = (percent: number, label: string): void => {
@@ -245,6 +627,16 @@ const destroySplashWindow = (): void => {
   }
 
   splashWindow = null;
+};
+
+const runBackgroundProbeIfStartPage = (contents: WebContents): void => {
+  if (contents.isDestroyed()) {
+    return;
+  }
+
+  if (isDefaultStartPageUrl(contents.getURL())) {
+    void updateStartPageBackgroundFromContents(contents);
+  }
 };
 
 const normalizeInputToUrl = (input: string): string => {
@@ -345,7 +737,12 @@ const ensurePreloadedHomeTab = (): void => {
   }
 
   const view = createTabView();
+  applyStartPageBackgroundToView(view);
   const contents = view.webContents;
+
+  const handleDomReady = (): void => {
+    runBackgroundProbeIfStartPage(contents);
+  };
 
   const handleDidFinishLoad = (): void => {
     if (!preloadedHomeTab || preloadedHomeTab.view !== view) {
@@ -353,6 +750,7 @@ const ensurePreloadedHomeTab = (): void => {
     }
 
     preloadedHomeTab.isReady = true;
+    runBackgroundProbeIfStartPage(contents);
   };
 
   const handleDidFailLoad = (): void => {
@@ -366,6 +764,7 @@ const ensurePreloadedHomeTab = (): void => {
   };
 
   const removeListeners = (): void => {
+    contents.removeListener("dom-ready", handleDomReady);
     contents.removeListener("did-finish-load", handleDidFinishLoad);
     contents.removeListener("did-fail-load", handleDidFailLoad);
   };
@@ -376,6 +775,7 @@ const ensurePreloadedHomeTab = (): void => {
     removeListeners,
   };
 
+  contents.on("dom-ready", handleDomReady);
   contents.on("did-finish-load", handleDidFinishLoad);
   contents.on("did-fail-load", handleDidFailLoad);
   contents.loadURL(DEFAULT_URL).catch(() => {
@@ -764,6 +1164,10 @@ const createTab = (
   const preloadedView = consumePreloadedHomeTabView(normalizedInitialUrl);
   const view = preloadedView ?? createTabView();
 
+  if (isDefaultStartPageUrl(normalizedInitialUrl)) {
+    applyStartPageBackgroundToView(view);
+  }
+
   const tab: TabRecord = {
     id,
     title: "New Tab",
@@ -776,6 +1180,9 @@ const createTab = (
 
   const contents = view.webContents;
 
+  contents.on("dom-ready", () => {
+    runBackgroundProbeIfStartPage(contents);
+  });
   contents.on("did-start-loading", () => updateTabFromWebContents(tab));
   contents.on("did-stop-loading", () => updateTabFromWebContents(tab));
   contents.on("page-title-updated", () => updateTabFromWebContents(tab));
@@ -783,6 +1190,7 @@ const createTab = (
   contents.on("did-navigate-in-page", () => updateTabFromWebContents(tab));
   contents.on("did-finish-load", async () => {
     updateTabFromWebContents(tab);
+    void updateStartPageBackgroundFromContents(contents);
     await appendHistory(contents.getURL(), contents.getTitle());
   });
 
@@ -980,6 +1388,10 @@ const createMainWindow = async (
 ): Promise<void> => {
   const { showImmediately = true, onProgress } = options;
 
+  const currentBackgroundColor = getSafeStartPageBackgroundColor(
+    startPageBackgroundColor,
+  );
+
   mainWindow = new BrowserWindow({
     width: 1400,
     height: 900,
@@ -987,6 +1399,7 @@ const createMainWindow = async (
     minHeight: 600,
     show: false,
     autoHideMenuBar: true,
+    backgroundColor: currentBackgroundColor,
     icon: path.join(app.getAppPath(), "assets", "icon.png"),
     webPreferences: {
       preload: path.join(__dirname, "preload.js"),
@@ -1019,6 +1432,13 @@ const createMainWindow = async (
 const bootstrap = async (): Promise<void> => {
   app.setName("MonoBrowser");
   historyFilePath = path.join(app.getPath("userData"), "history.json");
+  startPageBackgroundFilePath = path.join(
+    app.getPath("userData"),
+    START_PAGE_BACKGROUND_FILE,
+  );
+
+  await loadStartPageBackgroundColor();
+  applyStartPageBackgroundColor();
 
   await createSplashWindow();
   updateSplashProgress(8, "Starting MonoBrowser...");
