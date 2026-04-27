@@ -655,6 +655,10 @@ const normalizeInputToUrl = (input: string): string => {
     return DEFAULT_URL;
   }
 
+  if (/^about:blank(?:[?#].*)?$/i.test(trimmed)) {
+    return trimmed;
+  }
+
   const hasProtocol = /^https?:\/\//i.test(trimmed);
   if (hasProtocol) {
     return trimmed;
@@ -667,6 +671,19 @@ const normalizeInputToUrl = (input: string): string => {
   }
 
   return `https://www.google.com/search?q=${encodeURIComponent(trimmed)}`;
+};
+
+const openUrlInNewTab = (url: string): void => {
+  const trimmed = url.trim();
+
+  if (!trimmed) {
+    openNewTab(DEFAULT_URL);
+    return;
+  }
+
+  if (/^https?:\/\//i.test(trimmed) || /^about:blank(?:[?#].*)?$/i.test(trimmed)) {
+    openNewTab(trimmed);
+  }
 };
 
 const isClearHistoryUrl = (value: string): boolean => {
@@ -757,6 +774,11 @@ const createTabView = (): BrowserView => {
       nodeIntegration: false,
       sandbox: true,
     },
+  });
+
+  view.webContents.setWindowOpenHandler(({ url }) => {
+    openUrlInNewTab(url);
+    return { action: "deny" };
   });
 
   return view;
@@ -896,7 +918,7 @@ const getHistoryRowsHtml = (entries: HistoryEntry[]): string => {
         new Date(entry.visitedAt).toLocaleString("pl-PL"),
       );
 
-      return `<li><a href="${safeUrl}" title="${safeTitle}">${safeTitle}</a><span>${safeVisitedAt}</span></li>`;
+      return `<li><a href="${safeUrl}" title="${safeTitle}" target="_blank" rel="noopener noreferrer">${safeTitle}</a><span>${safeVisitedAt}</span></li>`;
     })
     .join("");
 };
@@ -1145,6 +1167,7 @@ const openHistoryWindow = async (): Promise<void> => {
       return { action: "deny" };
     }
 
+    openUrlInNewTab(url);
     return { action: "deny" };
   });
 

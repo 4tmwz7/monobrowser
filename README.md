@@ -2,10 +2,6 @@
 
 This is a simple desktop browser built using Electron and TypeScript. It's a minimal project, but it includes the core features you'd expect from a browser like tabs, navigation, and keyboard shortcuts.
 
-## TODO
-
-- Fix favicons not rendering
-
 ## What it does
 
 - You can open multiple tabs, type URLs or search terms in the address bar, and use standard navigation (back, forward, reload).

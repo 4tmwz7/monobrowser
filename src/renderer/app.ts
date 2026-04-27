@@ -90,21 +90,27 @@ const renderTabs = (): void => {
     // Favicon placeholder
     const favicon = document.createElement("span");
     favicon.className = "tab-favicon";
-    favicon.innerHTML = `<svg viewBox="0 0 16 16" width="12" height="12" fill="currentColor"><path d="M8 1a7 7 0 1 0 0 14A7 7 0 0 0 8 1Zm-.75 3.5h1.5v5h-1.5v-5Zm.75 7a.875.875 0 1 1 0-1.75A.875.875 0 0 1 8 11.5Z"/></svg>`;
+    favicon.style.display = "none";
 
-    // Try to load real favicon
     try {
       const url = new URL(tab.url);
-      const img = document.createElement("img");
-      img.src = `${url.origin}/favicon.ico`;
-      img.width = 14;
-      img.height = 14;
-      img.style.borderRadius = "2px";
-      img.onerror = () => img.replaceWith(favicon.querySelector("svg")!);
-      favicon.innerHTML = "";
-      favicon.append(img);
+
+      if (url.protocol === "http:" || url.protocol === "https:") {
+        const img = document.createElement("img");
+        img.src = `${url.origin}/favicon.ico`;
+        img.width = 14;
+        img.height = 14;
+        img.style.borderRadius = "2px";
+        img.onload = () => {
+          favicon.style.display = "flex";
+        };
+        img.onerror = () => {
+          favicon.remove();
+        };
+        favicon.append(img);
+      }
     } catch {
-      // keep default svg
+      // No favicon for invalid or non-web URLs.
     }
 
     const title = document.createElement("span");
