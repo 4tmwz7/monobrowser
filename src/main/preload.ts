@@ -60,6 +60,15 @@ const browserApi = {
     ipcRenderer.on("history:updated", listener);
     return () => ipcRenderer.removeListener("history:updated", listener);
   },
+  triggerNewTabShortcut: (initialUrl?: string): void => {
+    ipcRenderer.send("tabs:create-shortcut", initialUrl);
+  },
+  triggerCloseTabShortcut: (): void => {
+    ipcRenderer.send("tabs:close-shortcut");
+  },
+  triggerReloadShortcut: (): void => {
+    ipcRenderer.send("nav:reload-shortcut");
+  },
 };
 
 contextBridge.exposeInMainWorld("browserApi", browserApi);

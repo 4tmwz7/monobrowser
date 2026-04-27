@@ -40,7 +40,6 @@
         overflow: hidden;
       }
 
-      /* ── Tab strip ─────────────────────────────────────────── */
       #tab-strip {
         position: fixed;
         top: 0;
@@ -66,6 +65,7 @@
         overflow-y: hidden;
         scrollbar-width: none;
         -webkit-app-region: no-drag;
+        scroll-behavior: smooth;
       }
 
       #tab-list {
@@ -84,8 +84,9 @@
         align-items: center;
         gap: 6px;
         height: 32px;
+        width: max-content;
         max-width: 220px;
-        min-width: 80px;
+        min-width: 120px;
         padding: 0 10px 0 12px;
         background: var(--chrome-inactive-tab);
         border: 1px solid transparent;
@@ -403,13 +404,13 @@
         </svg>
       </button>
       <button
-        id="history"
+        id="data"
         class="nav-btn"
-        aria-label="History"
-        title="History">
+        aria-label="History and data"
+        title="History and data">
         <svg viewBox="0 0 16 16">
           <path
-            d="M8 1.25a6.75 6.75 0 1 0 6.65 7.93.75.75 0 0 0-1.48-.24A5.25 5.25 0 1 1 8 2.75c1.9 0 3.56 1.02 4.47 2.54l-1.2-.29a.75.75 0 1 0-.36 1.46l2.54.63a.75.75 0 0 0 .91-.56l.57-2.4a.75.75 0 1 0-1.46-.35l-.17.7A6.72 6.72 0 0 0 8 1.25Zm-.75 3.5a.75.75 0 0 1 1.5 0V8c0 .2-.08.39-.22.53l-2.25 2.25a.75.75 0 0 1-1.06-1.06L7.25 7.69V4.75Z" />
+            d="M2.75 2A.75.75 0 0 0 2 2.75v10.5c0 .41.34.75.75.75h10.5a.75.75 0 0 0 .75-.75V5.56a.75.75 0 0 0-.22-.53L10.97 2.22a.75.75 0 0 0-.53-.22H2.75Zm7.19 1.5 2.56 2.56h-2.56V3.5ZM5 7a.75.75 0 0 1 .75-.75h4.5a.75.75 0 0 1 0 1.5h-4.5A.75.75 0 0 1 5 7Zm0 3a.75.75 0 0 1 .75-.75h4.5a.75.75 0 0 1 0 1.5h-4.5A.75.75 0 0 1 5 10Zm0 3a.75.75 0 0 1 .75-.75h2.25a.75.75 0 0 1 0 1.5H5.75A.75.75 0 0 1 5 13Z" />
         </svg>
       </button>
 

@@ -1,4 +1,4 @@
-import { app, BrowserView, BrowserWindow, dialog, ipcMain } from "electron";
+import { app, BrowserView, BrowserWindow, dialog, ipcMain, session, Menu, MenuItemConstructorOptions } from "electron";
 import type { WebContents } from "electron";
 import fs from "node:fs/promises";
 import path from "node:path";
@@ -17,6 +17,8 @@ type TabRecord = TabState & {
   view: BrowserView;
 };
 
+type ShortcutAction = "new-tab" | "close-tab" | "reload";
+
 type PreloadedHomeTab = {
   view: BrowserView;
   isReady: boolean;
@@ -33,6 +35,8 @@ type HistoryEntry = {
 const DEFAULT_URL = "https://www.google.com";
 const MAX_HISTORY_ITEMS = 500;
 const CLEAR_HISTORY_URL = "monobrowser://clear-history";
+const CLEAR_COOKIES_URL = "monobrowser://clear-cookies";
+const CLEAR_CACHE_URL = "monobrowser://clear-cache";
 const SPLASH_ONLY_MODE =
   process.argv.includes("--splash-only") ||
   process.env.MONOBROWSER_SPLASH_ONLY === "1";
@@ -46,6 +50,7 @@ let activeTabId: number | null = null;
 let historyEntries: HistoryEntry[] = [];
 let preloadedHomeTab: PreloadedHomeTab | null = null;
 let splashWindow: BrowserWindow | null = null;
+let dataPanelStatusMessage = "";
 
 const tabs = new Map<number, TabRecord>();
 const tabMruOrder: number[] = [];
@@ -202,9 +207,13 @@ const getSafeStartPageBackgroundColor = (value: unknown): string => {
 const isDefaultStartPageUrl = (value: string): boolean => {
   try {
     const parsed = new URL(value);
-    const defaultParsed = new URL(DEFAULT_URL);
+    const host = parsed.hostname.toLowerCase();
+    const isGoogleHost =
+      host === "google.com" ||
+      host === "www.google.com" ||
+      /^([a-z0-9-]+\.)?google\.[a-z.]+$/.test(host);
 
-    if (parsed.hostname !== defaultParsed.hostname) {
+    if (!isGoogleHost) {
       return false;
     }
 
@@ -672,6 +681,26 @@ const isClearHistoryUrl = (value: string): boolean => {
   }
 };
 
+const isClearCookiesUrl = (value: string): boolean => {
+  try {
+    const parsed = new URL(value);
+    return (
+      parsed.protocol === "monobrowser:" && parsed.hostname === "clear-cookies"
+    );
+  } catch {
+    return false;
+  }
+};
+
+const isClearCacheUrl = (value: string): boolean => {
+  try {
+    const parsed = new URL(value);
+    return parsed.protocol === "monobrowser:" && parsed.hostname === "clear-cache";
+  } catch {
+    return false;
+  }
+};
+
 const getTabSnapshot = (tab: TabRecord): TabState => ({
   id: tab.id,
   title: tab.title,
@@ -722,13 +751,15 @@ const getMostRecentTabId = (): number | null => {
 };
 
 const createTabView = (): BrowserView => {
-  return new BrowserView({
+  const view = new BrowserView({
     webPreferences: {
       contextIsolation: true,
       nodeIntegration: false,
       sandbox: true,
     },
   });
+
+  return view;
 };
 
 const ensurePreloadedHomeTab = (): void => {
@@ -838,8 +869,26 @@ const escapeHtml = (value: string): string => {
     .replace(/'/g, "&#39;");
 };
 
-const renderHistoryWindowHtml = (entries: HistoryEntry[]): string => {
-  const rows = entries
+const clearCookies = async (): Promise<void> => {
+  await session.defaultSession.clearStorageData({
+    storages: ["cookies"],
+  });
+};
+
+const clearCacheData = async (): Promise<void> => {
+  await session.defaultSession.clearCache();
+};
+
+const getDataPanelStatusHtml = (): string => {
+  if (!dataPanelStatusMessage) {
+    return "";
+  }
+
+  return `<p class="status">${escapeHtml(dataPanelStatusMessage)}</p>`;
+};
+
+const getHistoryRowsHtml = (entries: HistoryEntry[]): string => {
+  return entries
     .map((entry) => {
       const safeUrl = escapeHtml(entry.url);
       const safeTitle = escapeHtml(entry.title || entry.url);
@@ -850,6 +899,10 @@ const renderHistoryWindowHtml = (entries: HistoryEntry[]): string => {
       return `<li><a href="${safeUrl}" title="${safeTitle}">${safeTitle}</a><span>${safeVisitedAt}</span></li>`;
     })
     .join("");
+};
+
+const renderHistoryWindowHtml = (entries: HistoryEntry[]): string => {
+  const rows = getHistoryRowsHtml(entries);
 
   const clearHistoryLabel = rows ? "Usuń całą historię" : "Historia jest już pusta";
   const clearHistoryDisabled = rows ? "" : "disabled";
@@ -908,6 +961,73 @@ const renderHistoryWindowHtml = (entries: HistoryEntry[]): string => {
         padding: 8px;
       }
 
+      .split {
+        display: grid;
+        grid-template-columns: minmax(0, 1.7fr) minmax(220px, 1fr);
+        gap: 12px;
+      }
+
+      .panel {
+        background: #25272a;
+        border: 1px solid #3c3f41;
+        border-radius: 10px;
+        min-height: 340px;
+      }
+
+      .panel-title {
+        padding: 10px 12px;
+        border-bottom: 1px solid #3c3f41;
+        font-size: 12px;
+        color: #a7adb5;
+        text-transform: uppercase;
+        letter-spacing: 0.04em;
+      }
+
+      .history-panel ul {
+        padding: 6px;
+      }
+
+      .data-panel {
+        padding: 12px;
+        display: grid;
+        gap: 8px;
+        align-content: start;
+      }
+
+      .data-panel p {
+        color: #b6bcc4;
+        font-size: 12px;
+        line-height: 1.45;
+        margin: 0 0 6px;
+      }
+
+      .danger-btn {
+        border: 1px solid #4a4d50;
+        background: #2b2d30;
+        color: #dde1e6;
+        border-radius: 8px;
+        padding: 8px 10px;
+        font-size: 12px;
+        font-family: inherit;
+        cursor: pointer;
+        text-align: left;
+        transition: background 0.12s;
+      }
+
+      .danger-btn:hover {
+        background: #3a3d40;
+      }
+
+      .status {
+        margin-top: 6px;
+        padding: 8px 10px;
+        border: 1px solid #4a4d50;
+        border-radius: 8px;
+        background: #2b2d30;
+        color: #d6dbe1;
+        font-size: 12px;
+      }
+
       ul {
         list-style: none;
         margin: 0;
@@ -946,6 +1066,16 @@ const renderHistoryWindowHtml = (entries: HistoryEntry[]): string => {
         padding: 16px;
         color: #8c9198;
       }
+
+      @media (max-width: 820px) {
+        .split {
+          grid-template-columns: 1fr;
+        }
+
+        .panel {
+          min-height: auto;
+        }
+      }
     </style>
   </head>
   <body>
@@ -956,7 +1086,23 @@ const renderHistoryWindowHtml = (entries: HistoryEntry[]): string => {
       </form>
     </header>
     <main>
-      ${rows ? `<ul>${rows}</ul>` : '<div class="empty">Brak wpisów w historii.</div>'}
+      <div class="split">
+        <section class="panel history-panel">
+          <div class="panel-title">Historia</div>
+          ${rows ? `<ul>${rows}</ul>` : '<div class="empty">Brak wpisów w historii.</div>'}
+        </section>
+        <aside class="panel data-panel">
+          <div class="panel-title">Wyczyść dane</div>
+          <p>W tym panelu usuniesz dane przeglądarki dla wszystkich stron.</p>
+          <form action="${CLEAR_COOKIES_URL}" method="get">
+            <button class="danger-btn" type="submit">Usuń wszystkie cookies</button>
+          </form>
+          <form action="${CLEAR_CACHE_URL}" method="get">
+            <button class="danger-btn" type="submit">Usuń cache</button>
+          </form>
+          ${getDataPanelStatusHtml()}
+        </aside>
+      </div>
     </main>
   </body>
 </html>`;
@@ -994,7 +1140,7 @@ const openHistoryWindow = async (): Promise<void> => {
   });
 
   historyWindow.webContents.setWindowOpenHandler(({ url }) => {
-    if (isClearHistoryUrl(url)) {
+    if (isClearHistoryUrl(url) || isClearCookiesUrl(url) || isClearCacheUrl(url)) {
       void handleHistoryWindowNavigation(url);
       return { action: "deny" };
     }
@@ -1003,7 +1149,7 @@ const openHistoryWindow = async (): Promise<void> => {
   });
 
   historyWindow.webContents.on("will-navigate", (event, url) => {
-    if (isClearHistoryUrl(url)) {
+    if (isClearHistoryUrl(url) || isClearCookiesUrl(url) || isClearCacheUrl(url)) {
       event.preventDefault();
       void handleHistoryWindowNavigation(url);
     }
@@ -1017,11 +1163,24 @@ const openHistoryWindow = async (): Promise<void> => {
 };
 
 const handleHistoryWindowNavigation = async (url: string): Promise<void> => {
-  if (!isClearHistoryUrl(url)) {
+  if (isClearHistoryUrl(url)) {
+    dataPanelStatusMessage = "Historia została wyczyszczona.";
+    await clearHistory();
     return;
   }
 
-  await clearHistory();
+  if (isClearCookiesUrl(url)) {
+    await clearCookies();
+    dataPanelStatusMessage = "Wszystkie cookies zostały usunięte.";
+    broadcastHistory();
+    return;
+  }
+
+  if (isClearCacheUrl(url)) {
+    await clearCacheData();
+    dataPanelStatusMessage = "Cache został wyczyszczony.";
+    broadcastHistory();
+  }
 };
 
 const saveHistory = async (): Promise<void> => {
@@ -1054,6 +1213,10 @@ const appendHistory = async (url: string, title: string): Promise<void> => {
     return;
   }
 
+  if (isDefaultStartPageUrl(url)) {
+    return;
+  }
+
   const entry: HistoryEntry = {
     id: `${Date.now()}-${Math.random().toString(16).slice(2)}`,
     url,
@@ -1070,6 +1233,62 @@ const clearHistory = async (): Promise<void> => {
   historyEntries = [];
   await saveHistory();
   broadcastHistory();
+};
+
+const handleBeforeInputEvent = (
+  event: Electron.Event,
+  input: Electron.Input,
+): void => {
+  if (input.type !== "keyDown" && input.type !== "rawKeyDown") {
+    return;
+  }
+
+  const hasCommandModifier = !!(input.control || input.meta);
+  if (!hasCommandModifier || input.alt) {
+    return;
+  }
+
+  const key = (input.key || "").toLowerCase();
+  const code = (input.code || "").toLowerCase();
+  let action: ShortcutAction | null = null;
+
+  if (key === "t" || code === "keyt") {
+    action = "new-tab";
+  } else if (key === "w" || code === "keyw") {
+    action = "close-tab";
+  } else if (key === "r" || code === "keyr") {
+    action = "reload";
+  }
+
+  if (!action) {
+    return;
+  }
+
+  event.preventDefault();
+
+  if (action === "new-tab") {
+    openNewTab();
+    return;
+  }
+
+  if (action === "close-tab") {
+    const activeTab = getActiveTab();
+    if (!activeTab) {
+      return;
+    }
+
+    closeCurrentTab();
+    return;
+  }
+
+  const activeTab = getActiveTab();
+  if (activeTab) {
+    activeTab.view.webContents.reload();
+  }
+};
+
+const registerWindowShortcuts = (windowRef: BrowserWindow): void => {
+  // Menu is now configured globally via setApplicationMenu.
 };
 
 const applyActiveViewBounds = (): void => {
@@ -1099,8 +1318,8 @@ const updateTabFromWebContents = (tab: TabRecord): void => {
   tab.url = contents.getURL() || tab.url;
   tab.title = contents.getTitle() || tab.title;
   tab.isLoading = contents.isLoading();
-  tab.canGoBack = contents.canGoBack();
-  tab.canGoForward = contents.canGoForward();
+  tab.canGoBack = contents.navigationHistory.canGoBack();
+  tab.canGoForward = contents.navigationHistory.canGoForward();
 
   broadcastTabsState();
 };
@@ -1217,6 +1436,23 @@ const createTab = (
   return id;
 };
 
+const openNewTab = (initialUrl?: string): number => {
+  const requestedUrl = initialUrl?.trim();
+  if (requestedUrl) {
+    return createTab(requestedUrl, true);
+  }
+
+  return createTab(DEFAULT_URL, true);
+};
+
+const closeCurrentTab = (): boolean => {
+  if (activeTabId === null) {
+    return false;
+  }
+
+  return closeTab(activeTabId);
+};
+
 const getActiveTab = (): TabRecord | null => {
   if (activeTabId === null) {
     return null;
@@ -1227,11 +1463,19 @@ const getActiveTab = (): TabRecord | null => {
 
 const registerIpc = (): void => {
   ipcMain.handle("tabs:create", (_event, initialUrl?: string) => {
-    return createTab(initialUrl || DEFAULT_URL, true);
+    return openNewTab(initialUrl);
+  });
+
+  ipcMain.on("tabs:create-shortcut", (_event, initialUrl?: string) => {
+    openNewTab(initialUrl);
   });
 
   ipcMain.handle("tabs:close", (_event, tabId: number) => {
     return closeTab(tabId);
+  });
+
+  ipcMain.on("tabs:close-shortcut", () => {
+    closeCurrentTab();
   });
 
   ipcMain.handle("tabs:switch", (_event, tabId: number) => {
@@ -1250,7 +1494,15 @@ const registerIpc = (): void => {
       return false;
     }
 
-    await tab.view.webContents.loadURL(normalizeInputToUrl(input));
+    try {
+      await tab.view.webContents.loadURL(normalizeInputToUrl(input));
+    } catch (err: any) {
+      // Ignorujemy ERR_ABORTED, ponieważ występuje naturalnie podczas szybkiej nawigacji lub przekierowań na stronach
+      if (err?.code !== "ERR_ABORTED") {
+        console.error("Navigation failed:", err);
+      }
+    }
+    
     updateTabFromWebContents(tab);
     return true;
   });
@@ -1291,6 +1543,15 @@ const registerIpc = (): void => {
 
     tab.view.webContents.reload();
     return true;
+  });
+
+  ipcMain.on("nav:reload-shortcut", () => {
+    const tab = getActiveTab();
+    if (!tab) {
+      return;
+    }
+
+    tab.view.webContents.reload();
   });
 
   ipcMain.handle("history:get", () => {
@@ -1415,6 +1676,8 @@ const createMainWindow = async (
     mainWindow = null;
   });
 
+  registerWindowShortcuts(mainWindow);
+
   mainWindow.setMenuBarVisibility(false);
 
   onProgress?.(58, "Loading app shell...");
@@ -1427,6 +1690,98 @@ const createMainWindow = async (
     mainWindow.show();
     mainWindow.focus();
   }
+};
+
+const setupApplicationMenu = (): void => {
+  const isMac = process.platform === "darwin";
+
+  const template: MenuItemConstructorOptions[] = [
+    ...(isMac ? [{ role: "appMenu" } as MenuItemConstructorOptions] : []),
+    {
+      label: "File",
+      submenu: [
+        {
+          label: "New Tab",
+          accelerator: "CmdOrCtrl+T",
+          click: () => {
+            openNewTab();
+          },
+        },
+        {
+          label: "Close Tab",
+          accelerator: "CmdOrCtrl+W",
+          click: () => {
+            closeCurrentTab();
+          },
+        },
+        { role: "quit" } as MenuItemConstructorOptions,
+      ],
+    },
+    {
+      label: "Edit",
+      submenu: [
+        { role: "undo" } as MenuItemConstructorOptions,
+        { role: "redo" } as MenuItemConstructorOptions,
+        { type: "separator" } as MenuItemConstructorOptions,
+        { role: "cut" } as MenuItemConstructorOptions,
+        { role: "copy" } as MenuItemConstructorOptions,
+        { role: "paste" } as MenuItemConstructorOptions,
+        ...(isMac
+          ? ([
+              { role: "pasteAndMatchStyle" },
+              { role: "delete" },
+              { role: "selectAll" },
+              { type: "separator" },
+              {
+                label: "Speech",
+                submenu: [{ role: "startSpeaking" }, { role: "stopSpeaking" }],
+              },
+            ] as MenuItemConstructorOptions[])
+          : ([{ role: "delete" }, { type: "separator" }, { role: "selectAll" }] as MenuItemConstructorOptions[])),
+      ],
+    },
+    {
+      label: "View",
+      submenu: [
+        {
+          label: "Reload",
+          accelerator: "CmdOrCtrl+R",
+          click: () => {
+            const tab = getActiveTab();
+            if (tab) {
+              tab.view.webContents.reload();
+            }
+          },
+        },
+        { role: "forceReload" },
+        { role: "toggleDevTools" },
+        { type: "separator" },
+        { role: "resetZoom" },
+        { role: "zoomIn" },
+        { role: "zoomOut" },
+        { type: "separator" },
+        { role: "togglefullscreen" },
+      ] as MenuItemConstructorOptions[],
+    },
+    {
+      label: "Window",
+      submenu: [
+        { role: "minimize" },
+        { role: "zoom" },
+        ...(isMac
+          ? ([
+              { type: "separator" },
+              { role: "front" },
+              { type: "separator" },
+              { role: "window" },
+            ] as MenuItemConstructorOptions[])
+          : []),
+      ],
+    },
+  ];
+
+  const menu = Menu.buildFromTemplate(template);
+  Menu.setApplicationMenu(menu);
 };
 
 const bootstrap = async (): Promise<void> => {
@@ -1455,6 +1810,7 @@ const bootstrap = async (): Promise<void> => {
   });
 
   updateSplashProgress(28, "Preparing interface...");
+  setupApplicationMenu();
   await createMainWindow({
     showImmediately: false,
     onProgress: updateSplashProgress,

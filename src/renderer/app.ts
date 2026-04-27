@@ -24,6 +24,9 @@ type BrowserApi = {
   openHistoryWindow: () => Promise<boolean>;
   setViewportTop: (top: number) => Promise<boolean>;
   onTabsState: (callback: (payload: TabsStatePayload) => void) => () => void;
+  triggerNewTabShortcut: (initialUrl?: string) => void;
+  triggerCloseTabShortcut: () => void;
+  triggerReloadShortcut: () => void;
 };
 
 declare global {
@@ -50,7 +53,7 @@ const addressInput = document.getElementById("address") as HTMLInputElement;
 const backButton = document.getElementById("back") as HTMLButtonElement;
 const forwardButton = document.getElementById("forward") as HTMLButtonElement;
 const reloadButton = document.getElementById("reload") as HTMLButtonElement;
-const historyButton = document.getElementById("history") as HTMLButtonElement;
+const dataButton = document.getElementById("data") as HTMLButtonElement;
 const newTabButton = document.getElementById("new-tab") as HTMLButtonElement;
 const placeholder = document.getElementById("placeholder") as HTMLDivElement;
 
@@ -159,29 +162,19 @@ const handleKeyboardShortcut = async (event: KeyboardEvent): Promise<void> => {
 
   if (key === "t") {
     event.preventDefault();
-    await window.browserApi.createTab(DEFAULT_URL);
+    window.browserApi.triggerNewTabShortcut(DEFAULT_URL);
     return;
   }
 
   if (key === "r") {
-    const activeTab = getActiveTab();
-    if (!activeTab) {
-      return;
-    }
-
     event.preventDefault();
-    await window.browserApi.reload();
+    window.browserApi.triggerReloadShortcut();
     return;
   }
 
   if (key === "w") {
-    const activeTab = getActiveTab();
-    if (!activeTab) {
-      return;
-    }
-
     event.preventDefault();
-    await window.browserApi.closeTab(activeTab.id);
+    window.browserApi.triggerCloseTabShortcut();
   }
 };
 
@@ -203,13 +196,20 @@ const wireEvents = (): void => {
     await window.browserApi.reload();
   });
 
-  historyButton.addEventListener("click", async () => {
+  dataButton.addEventListener("click", async () => {
     await window.browserApi.openHistoryWindow();
   });
 
   newTabButton.addEventListener("click", async () => {
     await window.browserApi.createTab(DEFAULT_URL);
   });
+
+  const tabsWrapper = document.getElementById("tabs") as HTMLDivElement;
+  tabsWrapper.addEventListener("wheel", (event) => {
+    if (event.deltaY !== 0 && !event.shiftKey) {
+      tabsWrapper.scrollLeft += event.deltaY * 1.5;
+    }
+  }, { passive: true });
 
   window.addEventListener("keydown", (event) => {
     void handleKeyboardShortcut(event);
@@ -227,9 +227,23 @@ const wireEvents = (): void => {
   });
 
   window.browserApi.onTabsState((payload) => {
+    const isNewTab = payload.tabs.length > state.tabs.length;
+    const previousActive = state.activeTabId;
+    
     state.tabs = payload.tabs;
     state.activeTabId = payload.activeTabId;
+    
     render();
+
+    // Auto-scroll to newly created or newly focused tabs
+    if (isNewTab || (state.activeTabId && state.activeTabId !== previousActive)) {
+      setTimeout(() => {
+        const activeTabBtn = tabsContainer.querySelector('.tab-btn.active');
+        if (activeTabBtn) {
+          activeTabBtn.scrollIntoView({ behavior: 'smooth', block: 'nearest', inline: 'nearest' });
+        }
+      }, 50);
+    }
   });
 };
 
