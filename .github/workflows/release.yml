@@ -1,0 +1,108 @@
+name: Release
+
+on:
+  push:
+    tags:
+      - "v*"
+
+permissions:
+  contents: write
+
+concurrency:
+  group: release-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  validate-version:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+
+      - name: Verify tag matches package version
+        run: >-
+          node -e "const { version } = require('./package.json');
+          const expected = 'v' + version;
+          if (process.env.GITHUB_REF_NAME !== expected) {
+            console.error('Release tag must be ' + expected + ', received ' + process.env.GITHUB_REF_NAME);
+            process.exit(1);
+          }"
+
+  prepare-release:
+    needs: validate-version
+    runs-on: ubuntu-latest
+    env:
+      GH_TOKEN: ${{ github.token }}
+    steps:
+      - name: Create draft release
+        run: >-
+          gh release create "$GITHUB_REF_NAME"
+          --repo "$GITHUB_REPOSITORY"
+          --verify-tag
+          --draft
+          --title "MonoBrowser $GITHUB_REF_NAME"
+          --generate-notes
+
+  build:
+    needs: prepare-release
+    strategy:
+      fail-fast: true
+      matrix:
+        include:
+          - platform: windows
+            os: windows-latest
+            command: dist:win
+          - platform: linux
+            os: ubuntu-latest
+            command: dist:linux
+    runs-on: ${{ matrix.os }}
+    env:
+      GH_TOKEN: ${{ github.token }}
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+
+      - name: Set up Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Build ${{ matrix.platform }} package
+        run: npm run ${{ matrix.command }} -- --publish always
+
+  publish:
+    needs: build
+    runs-on: ubuntu-latest
+    env:
+      GH_TOKEN: ${{ github.token }}
+    steps:
+      - name: Verify release files
+        shell: bash
+        run: |
+          version="${GITHUB_REF_NAME#v}"
+          assets="$(gh release view "$GITHUB_REF_NAME" --repo "$GITHUB_REPOSITORY" --json assets --jq '.assets[].name')"
+          required=(
+            "latest.yml"
+            "MonoBrowser-Setup-${version}.exe"
+            "MonoBrowser-Setup-${version}.exe.blockmap"
+            "latest-linux.yml"
+            "MonoBrowser-${version}-x86_64.AppImage"
+            "MonoBrowser-${version}-x86_64.AppImage.blockmap"
+          )
+
+          for asset in "${required[@]}"; do
+            if ! grep -Fqx "$asset" <<<"$assets"; then
+              echo "Missing release asset: $asset" >&2
+              exit 1
+            fi
+          done
+
+      - name: Publish release
+        run: >-
+          gh release edit "$GITHUB_REF_NAME"
+          --repo "$GITHUB_REPOSITORY"
+          --draft=false

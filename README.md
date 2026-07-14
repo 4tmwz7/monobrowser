@@ -1,6 +1,6 @@
 # MonoBrowser
 
-MonoBrowser is a small desktop browser built with Electron, TypeScript, and esbuild.
+MonoBrowser is a small desktop browser for Windows and Linux, built with Electron, TypeScript, and esbuild.
 
 ## Features
 
@@ -25,22 +25,52 @@ MonoBrowser is a small desktop browser built with Electron, TypeScript, and esbu
 npm install
 npm run dev
 npm run build
-npm run dist
+npm run dist:win
+npm run dist:linux
 ```
 
 - `npm run dev` builds the app and starts Electron
 - `npm run build` builds the main and renderer bundles
-- `npm run dist` builds the app and packages the Windows installer
+- `npm run dist` or `npm run dist:win` packages the Windows x64 NSIS installer
+- `npm run dist:linux` packages the Linux x64 AppImage
+- `npm run dist:all` packages both platforms on a host with the required cross-platform tooling
+
+Packaged files are written to `release/`.
+
+## Releases
+
+Stable releases are built by GitHub Actions. Update the version in `package.json`, commit the change, and push a matching tag:
+
+```bash
+git tag v0.4.0
+git push origin v0.4.0
+```
+
+The tag must exactly match `v<package.json version>`. The workflow builds Windows on a Windows runner and Linux on an Ubuntu runner, then publishes both packages in one GitHub Release.
 
 ## Auto-update
 
-Packaged builds check GitHub Releases automatically.
+Packaged Windows and Linux builds check GitHub Releases automatically. The first check runs 45 seconds after startup and subsequent checks run every six hours. When an update has downloaded, MonoBrowser asks whether it should restart now or later.
 
-For updates to work, the release must include:
+The release must include:
 
 - `latest.yml`
 - `MonoBrowser-Setup-<version>.exe`
 - `MonoBrowser-Setup-<version>.exe.blockmap`
+- `latest-linux.yml`
+- `MonoBrowser-<version>-x86_64.AppImage`
+- `MonoBrowser-<version>-x86_64.AppImage.blockmap`
+
+Linux auto-update requires running the AppImage from a location writable by the current user.
+
+## Running on Linux
+
+Download the AppImage from GitHub Releases, make it executable, and run it:
+
+```bash
+chmod +x MonoBrowser-<version>-x86_64.AppImage
+./MonoBrowser-<version>-x86_64.AppImage
+```
 
 ## Project structure
 

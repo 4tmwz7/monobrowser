@@ -1,5 +1,5 @@
 <!doctype html>
-<html lang="en">
+<html lang="pl">
   <head>
     <meta charset="UTF-8" />
     <meta
@@ -259,6 +259,18 @@
         fill: currentColor;
       }
 
+
+      #app-menu-wrap {
+        position: relative;
+        flex-shrink: 0;
+      }
+
+      #menu-button {
+        font-size: 22px;
+        line-height: 1;
+        padding-bottom: 4px;
+      }
+
       /* ── Address bar ──────────────────────────────────────── */
       #address-form {
         flex: 1;
@@ -352,13 +364,13 @@
     <div id="tab-strip">
       <div
         id="tabs"
-        aria-label="Tabs">
+        aria-label="Karty">
         <div id="tab-list"></div>
         <button
           id="new-tab"
           type="button"
-          title="New tab (Ctrl+T)"
-          aria-label="New tab">
+          title="Nowa karta (Ctrl+T)"
+          aria-label="Nowa karta">
           <svg
             viewBox="0 0 16 16"
             width="14"
@@ -376,8 +388,8 @@
       <button
         id="back"
         class="nav-btn"
-        aria-label="Back"
-        title="Back (Alt+←)">
+        aria-label="Wstecz"
+        title="Wstecz (Alt+←)">
         <svg viewBox="0 0 16 16">
           <path
             d="M13.5 8a.75.75 0 0 0-.75-.75H4.81l2.72-2.72a.75.75 0 0 0-1.06-1.06l-4 4a.75.75 0 0 0 0 1.06l4 4a.75.75 0 0 0 1.06-1.06L4.81 8.75H12.75A.75.75 0 0 0 13.5 8Z" />
@@ -386,8 +398,8 @@
       <button
         id="forward"
         class="nav-btn"
-        aria-label="Forward"
-        title="Forward (Alt+→)">
+        aria-label="Dalej"
+        title="Dalej (Alt+→)">
         <svg viewBox="0 0 16 16">
           <path
             d="M2.5 8a.75.75 0 0 1 .75-.75H11.19L8.47 4.53a.75.75 0 0 1 1.06-1.06l4 4a.75.75 0 0 1 0 1.06l-4 4a.75.75 0 0 1-1.06-1.06l2.72-2.72H3.25A.75.75 0 0 1 2.5 8Z" />
@@ -396,24 +408,13 @@
       <button
         id="reload"
         class="nav-btn"
-        aria-label="Reload"
-        title="Reload (Ctrl+R)">
+        aria-label="Odśwież"
+        title="Odśwież (Ctrl+R)">
         <svg viewBox="0 0 16 16">
           <path
             d="M13.57 6.25a.75.75 0 0 0-1.42-.5l-.26.73A5.002 5.002 0 0 0 3 8a5 5 0 1 0 9.41-2.4.75.75 0 1 0-1.35.65A3.5 3.5 0 1 1 8 4.5c1.2 0 2.26.6 2.9 1.52l-.84-.29a.75.75 0 0 0-.5 1.41l2.5.88a.75.75 0 0 0 .96-.46l.55-1.56a.75.75 0 0 0-.5-.94Z" />
         </svg>
       </button>
-      <button
-        id="data"
-        class="nav-btn"
-        aria-label="History and data"
-        title="History and data">
-        <svg viewBox="0 0 16 16">
-          <path
-            d="M2.75 2A.75.75 0 0 0 2 2.75v10.5c0 .41.34.75.75.75h10.5a.75.75 0 0 0 .75-.75V5.56a.75.75 0 0 0-.22-.53L10.97 2.22a.75.75 0 0 0-.53-.22H2.75Zm7.19 1.5 2.56 2.56h-2.56V3.5ZM5 7a.75.75 0 0 1 .75-.75h4.5a.75.75 0 0 1 0 1.5h-4.5A.75.75 0 0 1 5 7Zm0 3a.75.75 0 0 1 .75-.75h4.5a.75.75 0 0 1 0 1.5h-4.5A.75.75 0 0 1 5 10Zm0 3a.75.75 0 0 1 .75-.75h2.25a.75.75 0 0 1 0 1.5H5.75A.75.75 0 0 1 5 13Z" />
-        </svg>
-      </button>
-
       <form id="address-form">
         <span class="address-icon">
           <svg viewBox="0 0 16 16">
@@ -423,14 +424,14 @@
         </span>
         <input
           id="address"
-          placeholder="Search or enter URL"
+          placeholder="Szukaj lub wpisz adres"
           autocomplete="off"
           spellcheck="false" />
         <button
           id="go"
           type="submit"
-          title="Go (Enter)"
-          aria-label="Go">
+          title="Przejdź (Enter)"
+          aria-label="Przejdź">
           <svg
             viewBox="0 0 16 16"
             width="14"
@@ -441,6 +442,9 @@
           </svg>
         </button>
       </form>
+      <div id="app-menu-wrap">
+        <button id="menu-button" class="nav-btn" type="button" aria-haspopup="menu" aria-label="Menu" title="Menu">⋮</button>
+      </div>
     </div>
 
     <div id="placeholder"></div>

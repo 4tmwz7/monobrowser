@@ -1,5 +1,6 @@
-import { app, BrowserView, BrowserWindow, dialog, ipcMain, session, Menu, MenuItemConstructorOptions } from "electron";
-import type { WebContents } from "electron";
+import { app, BrowserView, BrowserWindow, dialog, ipcMain, session, Menu, shell, MenuItemConstructorOptions } from "electron";
+import type { DownloadItem, WebContents } from "electron";
+import fsSync from "node:fs";
 import fs from "node:fs/promises";
 import path from "node:path";
 import { autoUpdater } from "electron-updater";
@@ -19,12 +20,6 @@ type TabRecord = TabState & {
 
 type ShortcutAction = "new-tab" | "close-tab" | "reload";
 
-type PreloadedHomeTab = {
-  view: BrowserView;
-  isReady: boolean;
-  removeListeners: () => void;
-};
-
 type HistoryEntry = {
   id: string;
   url: string;
@@ -32,28 +27,94 @@ type HistoryEntry = {
   visitedAt: string;
 };
 
+type DownloadStatus =
+  | "in-progress"
+  | "completed"
+  | "cancelled"
+  | "interrupted"
+  | "failed";
+
+type DownloadRecord = {
+  id: string;
+  fileName: string;
+  sourceUrl: string;
+  sourceOrigin: string;
+  savePath: string;
+  startedAt: string;
+  finishedAt: string | null;
+  receivedBytes: number;
+  totalBytes: number;
+  status: DownloadStatus;
+  error?: string;
+};
+
+type DownloadStatePayload = {
+  downloads: DownloadRecord[];
+};
+
+type SiteOriginRecord = {
+  origin: string;
+  lastSeenAt: string;
+};
+
+type SiteDataType =
+  | "cookies"
+  | "localStorage"
+  | "indexedDB"
+  | "cache"
+  | "serviceWorkers";
+
+type SiteDataEntry = {
+  origin: string;
+  lastSeenAt: string | null;
+  cookieCount: number;
+};
+
+type ClearResult = {
+  ok: boolean;
+  message: string;
+};
+
+type AppLanguage = "pl" | "en";
+
 const DEFAULT_URL = "https://www.google.com";
 const MAX_HISTORY_ITEMS = 500;
+const MAX_DOWNLOAD_ITEMS = 500;
+const ALLOWED_SITE_DATA_TYPES = new Set<SiteDataType>([
+  "cookies",
+  "localStorage",
+  "indexedDB",
+  "cache",
+  "serviceWorkers",
+]);
 const CLEAR_HISTORY_URL = "monobrowser://clear-history";
-const CLEAR_COOKIES_URL = "monobrowser://clear-cookies";
-const CLEAR_CACHE_URL = "monobrowser://clear-cache";
 const SPLASH_ONLY_MODE =
   process.argv.includes("--splash-only") ||
   process.env.MONOBROWSER_SPLASH_ONLY === "1";
 
 let mainWindow: BrowserWindow | null = null;
 let historyWindow: BrowserWindow | null = null;
+let downloadsWindow: BrowserWindow | null = null;
+let siteDataWindow: BrowserWindow | null = null;
 let historyFilePath = "";
+let downloadsFilePath = "";
+let siteOriginsFilePath = "";
+let languageFilePath = "";
 let viewportTop = 170;
 let nextTabId = 1;
 let activeTabId: number | null = null;
 let historyEntries: HistoryEntry[] = [];
-let preloadedHomeTab: PreloadedHomeTab | null = null;
+let downloadRecords: DownloadRecord[] = [];
+let siteOriginRecords: SiteOriginRecord[] = [];
+let appLanguage: AppLanguage = "pl";
 let splashWindow: BrowserWindow | null = null;
-let dataPanelStatusMessage = "";
 
 const tabs = new Map<number, TabRecord>();
+const activeDownloads = new Map<string, DownloadItem>();
+const reservedDownloadPaths = new Set<string>();
+const jsonWriteQueues = new Map<string, Promise<void>>();
 const tabMruOrder: number[] = [];
+let tabsBroadcastScheduled = false;
 
 let updateCheckInProgress = false;
 let startPageBackgroundColor = "#ffffff";
@@ -358,10 +419,6 @@ const applyStartPageBackgroundColor = (): void => {
 
   if (splashWindow && !splashWindow.isDestroyed()) {
     applySplashThemeToWindow(splashWindow);
-  }
-
-  if (preloadedHomeTab) {
-    applyStartPageBackgroundToView(preloadedHomeTab.view);
   }
 
   for (const tab of tabs.values()) {
@@ -698,26 +755,6 @@ const isClearHistoryUrl = (value: string): boolean => {
   }
 };
 
-const isClearCookiesUrl = (value: string): boolean => {
-  try {
-    const parsed = new URL(value);
-    return (
-      parsed.protocol === "monobrowser:" && parsed.hostname === "clear-cookies"
-    );
-  } catch {
-    return false;
-  }
-};
-
-const isClearCacheUrl = (value: string): boolean => {
-  try {
-    const parsed = new URL(value);
-    return parsed.protocol === "monobrowser:" && parsed.hostname === "clear-cache";
-  } catch {
-    return false;
-  }
-};
-
 const getTabSnapshot = (tab: TabRecord): TabState => ({
   id: tab.id,
   title: tab.title,
@@ -784,90 +821,18 @@ const createTabView = (): BrowserView => {
   return view;
 };
 
-const ensurePreloadedHomeTab = (): void => {
-  if (!mainWindow || preloadedHomeTab) {
-    return;
-  }
-
-  const view = createTabView();
-  applyStartPageBackgroundToView(view);
-  const contents = view.webContents;
-
-  const handleDomReady = (): void => {
-    runBackgroundProbeIfStartPage(contents);
-  };
-
-  const handleDidFinishLoad = (): void => {
-    if (!preloadedHomeTab || preloadedHomeTab.view !== view) {
-      return;
-    }
-
-    preloadedHomeTab.isReady = true;
-    runBackgroundProbeIfStartPage(contents);
-  };
-
-  const handleDidFailLoad = (): void => {
-    if (!preloadedHomeTab || preloadedHomeTab.view !== view) {
-      return;
-    }
-
-    preloadedHomeTab.removeListeners();
-    preloadedHomeTab = null;
-    contents.close();
-  };
-
-  const removeListeners = (): void => {
-    contents.removeListener("dom-ready", handleDomReady);
-    contents.removeListener("did-finish-load", handleDidFinishLoad);
-    contents.removeListener("did-fail-load", handleDidFailLoad);
-  };
-
-  preloadedHomeTab = {
-    view,
-    isReady: false,
-    removeListeners,
-  };
-
-  contents.on("dom-ready", handleDomReady);
-  contents.on("did-finish-load", handleDidFinishLoad);
-  contents.on("did-fail-load", handleDidFailLoad);
-  contents.loadURL(DEFAULT_URL).catch(() => {
-    handleDidFailLoad();
-  });
-};
-
-const destroyPreloadedHomeTab = (): void => {
-  if (!preloadedHomeTab) {
-    return;
-  }
-
-  const view = preloadedHomeTab.view;
-  preloadedHomeTab.removeListeners();
-  preloadedHomeTab = null;
-  view.webContents.close();
-};
-
-const consumePreloadedHomeTabView = (url: string): BrowserView | null => {
-  if (
-    url !== DEFAULT_URL ||
-    !preloadedHomeTab ||
-    !preloadedHomeTab.isReady
-  ) {
-    return null;
-  }
-
-  const consumedView = preloadedHomeTab.view;
-  preloadedHomeTab.removeListeners();
-  preloadedHomeTab = null;
-  return consumedView;
-};
-
 const broadcastTabsState = (): void => {
-  if (!mainWindow) {
+  if (tabsBroadcastScheduled) {
     return;
   }
 
-  mainWindow.webContents.send("tabs:state", getTabsStatePayload());
+  tabsBroadcastScheduled = true;
+  setImmediate(() => {
+    tabsBroadcastScheduled = false;
+    if (mainWindow && !mainWindow.isDestroyed()) {
+      mainWindow.webContents.send("tabs:state", getTabsStatePayload());
+    }
+  });
 };
 
 const broadcastHistory = (): void => {
@@ -882,6 +847,321 @@ const broadcastHistory = (): void => {
   }
 };
 
+const normalizeHttpOrigin = (value: string): string | null => {
+  try {
+    const parsed = new URL(value);
+    if (parsed.protocol !== "http:" && parsed.protocol !== "https:") {
+      return null;
+    }
+    return parsed.origin;
+  } catch {
+    return null;
+  }
+};
+
+const writeJsonAtomically = async (filePath: string, value: unknown): Promise<void> => {
+  if (!filePath) {
+    return;
+  }
+
+  const previousWrite = jsonWriteQueues.get(filePath) ?? Promise.resolve();
+  const nextWrite = previousWrite.catch(() => undefined).then(async () => {
+    await fs.mkdir(path.dirname(filePath), { recursive: true });
+    const temporaryPath = `${filePath}.${process.pid}.${Date.now()}.${Math.random().toString(16).slice(2)}.tmp`;
+    await fs.writeFile(temporaryPath, JSON.stringify(value, null, 2), "utf8");
+    await fs.rename(temporaryPath, filePath);
+  });
+  jsonWriteQueues.set(filePath, nextWrite);
+
+  try {
+    await nextWrite;
+  } finally {
+    if (jsonWriteQueues.get(filePath) === nextWrite) {
+      jsonWriteQueues.delete(filePath);
+    }
+  }
+};
+
+const normalizeLanguage = (value: unknown): AppLanguage | null => {
+  return value === "pl" || value === "en" ? value : null;
+};
+
+const loadLanguage = async (): Promise<void> => {
+  try {
+    const raw = await fs.readFile(languageFilePath, "utf8");
+    const parsed = JSON.parse(raw) as { language?: unknown };
+    appLanguage = normalizeLanguage(parsed.language) ?? "pl";
+  } catch {
+    appLanguage = "pl";
+  }
+};
+
+const saveLanguage = async (): Promise<void> => {
+  await writeJsonAtomically(languageFilePath, { language: appLanguage });
+};
+
+const localeForLanguage = (): string => appLanguage === "pl" ? "pl-PL" : "en-US";
+
+const saveDownloads = async (): Promise<void> => {
+  downloadRecords = downloadRecords.slice(0, MAX_DOWNLOAD_ITEMS);
+  await writeJsonAtomically(downloadsFilePath, downloadRecords);
+};
+
+const getDownloadStatePayload = (): DownloadStatePayload => ({
+  downloads: downloadRecords.map((record) => ({ ...record })),
+});
+
+const broadcastDownloads = (): void => {
+  if (downloadsWindow && !downloadsWindow.isDestroyed()) {
+    downloadsWindow.webContents.send("downloads:updated", getDownloadStatePayload());
+  }
+};
+
+const loadDownloads = async (): Promise<void> => {
+  try {
+    const raw = await fs.readFile(downloadsFilePath, "utf8");
+    const parsed = JSON.parse(raw) as DownloadRecord[];
+    downloadRecords = Array.isArray(parsed) ? parsed.slice(0, MAX_DOWNLOAD_ITEMS) : [];
+  } catch {
+    downloadRecords = [];
+  }
+
+  let changed = false;
+  const interruptedAt = new Date().toISOString();
+  downloadRecords = downloadRecords.map((record) => {
+    if (record.status !== "in-progress") {
+      return record;
+    }
+    changed = true;
+    return {
+      ...record,
+      status: "interrupted",
+      finishedAt: interruptedAt,
+      error: "Pobieranie zostało przerwane przez zamknięcie aplikacji.",
+    };
+  });
+
+  if (changed) {
+    await saveDownloads();
+  }
+};
+
+const getAvailableDownloadPath = (suggestedName: string): string => {
+  const rawName = path.basename(suggestedName.trim() || "download");
+  const safeName = rawName.replace(/[\u0000-\u001f<>:"/\\|?*]/g, "_") || "download";
+  const extension = path.extname(safeName);
+  const stem = path.basename(safeName, extension) || "download";
+  const downloadsDirectory = app.getPath("downloads");
+
+  for (let suffix = 0; ; suffix += 1) {
+    const fileName = suffix === 0 ? `${stem}${extension}` : `${stem} (${suffix})${extension}`;
+    const candidate = path.join(downloadsDirectory, fileName);
+    if (!fsSync.existsSync(candidate) && !reservedDownloadPaths.has(candidate)) {
+      reservedDownloadPaths.add(candidate);
+      return candidate;
+    }
+  }
+};
+
+const registerDownloadHandling = (): void => {
+  session.defaultSession.on("will-download", (_event, item) => {
+    const id = `${Date.now()}-${Math.random().toString(16).slice(2)}`;
+    let savePath = "";
+
+    try {
+      savePath = getAvailableDownloadPath(item.getFilename() || "download");
+      item.setSavePath(savePath);
+
+      const sourceUrl = item.getURL();
+      const record: DownloadRecord = {
+        id,
+        fileName: path.basename(savePath),
+        sourceUrl,
+        sourceOrigin: normalizeHttpOrigin(sourceUrl) ?? "Nieznane źródło",
+        savePath,
+        startedAt: new Date(item.getStartTime() * 1000 || Date.now()).toISOString(),
+        finishedAt: null,
+        receivedBytes: item.getReceivedBytes(),
+        totalBytes: item.getTotalBytes(),
+        status: "in-progress",
+      };
+
+      downloadRecords = [record, ...downloadRecords].slice(0, MAX_DOWNLOAD_ITEMS);
+      activeDownloads.set(id, item);
+      void saveDownloads().catch((error) => console.error("Failed to save downloads:", error));
+      broadcastDownloads();
+
+      item.on("updated", (_updatedEvent, state) => {
+        record.receivedBytes = item.getReceivedBytes();
+        record.totalBytes = item.getTotalBytes();
+        if (state === "interrupted") {
+          record.error = "Połączenie zostało przerwane; Electron próbuje kontynuować pobieranie.";
+        } else {
+          delete record.error;
+        }
+        broadcastDownloads();
+      });
+
+      item.once("done", (_doneEvent, state) => {
+        record.receivedBytes = item.getReceivedBytes();
+        record.totalBytes = item.getTotalBytes();
+        record.finishedAt = new Date().toISOString();
+        record.status = state;
+        if (state === "interrupted") {
+          record.error = "Pobieranie zostało przerwane przez błąd sieci lub zapisu.";
+        } else if (state === "cancelled") {
+          record.error = "Pobieranie zostało anulowane.";
+        } else {
+          delete record.error;
+        }
+        activeDownloads.delete(id);
+        reservedDownloadPaths.delete(savePath);
+        void saveDownloads().catch((error) => console.error("Failed to save downloads:", error));
+        broadcastDownloads();
+      });
+    } catch (error) {
+      if (savePath) {
+        reservedDownloadPaths.delete(savePath);
+      }
+      item.cancel();
+      const message = error instanceof Error ? error.message : "Nieznany błąd pobierania.";
+      const failedRecord: DownloadRecord = {
+        id,
+        fileName: item.getFilename() || "download",
+        sourceUrl: item.getURL(),
+        sourceOrigin: normalizeHttpOrigin(item.getURL()) ?? "Nieznane źródło",
+        savePath,
+        startedAt: new Date().toISOString(),
+        finishedAt: new Date().toISOString(),
+        receivedBytes: item.getReceivedBytes(),
+        totalBytes: item.getTotalBytes(),
+        status: "failed",
+        error: message,
+      };
+      downloadRecords = [failedRecord, ...downloadRecords].slice(0, MAX_DOWNLOAD_ITEMS);
+      void saveDownloads().catch((saveError) => console.error("Failed to save downloads:", saveError));
+      broadcastDownloads();
+    }
+  });
+};
+
+const saveSiteOrigins = async (): Promise<void> => {
+  await writeJsonAtomically(siteOriginsFilePath, siteOriginRecords);
+};
+
+const loadSiteOrigins = async (): Promise<void> => {
+  try {
+    const raw = await fs.readFile(siteOriginsFilePath, "utf8");
+    const parsed = JSON.parse(raw) as SiteOriginRecord[];
+    siteOriginRecords = Array.isArray(parsed)
+      ? parsed.filter((entry) => normalizeHttpOrigin(entry.origin) === entry.origin)
+      : [];
+  } catch {
+    siteOriginRecords = [];
+  }
+};
+
+const registerVisitedOrigin = async (url: string): Promise<void> => {
+  const origin = normalizeHttpOrigin(url);
+  if (!origin) {
+    return;
+  }
+
+  const nextRecord = { origin, lastSeenAt: new Date().toISOString() };
+  siteOriginRecords = [
+    nextRecord,
+    ...siteOriginRecords.filter((entry) => entry.origin !== origin),
+  ];
+  await saveSiteOrigins();
+};
+
+const cookieMatchesHostname = (cookieDomain: string, hostname: string): boolean => {
+  const normalizedDomain = cookieDomain.replace(/^\./, "").toLowerCase();
+  const normalizedHostname = hostname.toLowerCase();
+  return normalizedHostname === normalizedDomain || normalizedHostname.endsWith(`.${normalizedDomain}`);
+};
+
+const listSiteData = async (): Promise<SiteDataEntry[]> => {
+  const cookies = await session.defaultSession.cookies.get({});
+  const entries = new Map<string, SiteDataEntry>();
+
+  for (const record of siteOriginRecords) {
+    entries.set(record.origin, {
+      origin: record.origin,
+      lastSeenAt: record.lastSeenAt,
+      cookieCount: 0,
+    });
+  }
+
+  for (const cookie of cookies) {
+    if (!cookie.domain) {
+      continue;
+    }
+    const host = cookie.domain.replace(/^\./, "");
+    const origin = normalizeHttpOrigin(`${cookie.secure ? "https" : "http"}://${host}`);
+    if (origin && !entries.has(origin)) {
+      entries.set(origin, { origin, lastSeenAt: null, cookieCount: 0 });
+    }
+  }
+
+  for (const entry of entries.values()) {
+    const hostname = new URL(entry.origin).hostname;
+    entry.cookieCount = cookies.filter((cookie) => Boolean(cookie.domain) && cookieMatchesHostname(cookie.domain!, hostname)).length;
+  }
+
+  return [...entries.values()].sort((a, b) => {
+    const dateOrder = (b.lastSeenAt ?? "").localeCompare(a.lastSeenAt ?? "");
+    return dateOrder || a.origin.localeCompare(b.origin);
+  });
+};
+
+const validateSiteDataTypes = (value: unknown): SiteDataType[] | null => {
+  if (!Array.isArray(value) || value.length === 0) {
+    return null;
+  }
+  const unique = [...new Set(value)];
+  if (!unique.every((item): item is SiteDataType => typeof item === "string" && ALLOWED_SITE_DATA_TYPES.has(item as SiteDataType))) {
+    return null;
+  }
+  return unique;
+};
+
+const clearSiteData = async (originValue: unknown, dataTypesValue: unknown): Promise<ClearResult> => {
+  if (typeof originValue !== "string") {
+    return { ok: false, message: appLanguage === "pl" ? "Nieprawidłowy origin." : "Invalid origin." };
+  }
+  const origin = normalizeHttpOrigin(originValue);
+  if (!origin || origin !== originValue) {
+    return { ok: false, message: appLanguage === "pl" ? "Nieprawidłowy lub nieobsługiwany origin." : "Invalid or unsupported origin." };
+  }
+  const dataTypes = validateSiteDataTypes(dataTypesValue);
+  if (!dataTypes) {
+    return { ok: false, message: appLanguage === "pl" ? "Wybierz co najmniej jeden prawidłowy typ danych." : "Select at least one valid data type." };
+  }
+
+  try {
+    await session.defaultSession.clearData({ origins: [origin], dataTypes });
+    return { ok: true, message: appLanguage === "pl" ? `Usunięto wybrane dane dla ${origin}.` : `Selected data for ${origin} was cleared.` };
+  } catch (error) {
+    const detail = error instanceof Error ? error.message : appLanguage === "pl" ? "Nieznany błąd." : "Unknown error.";
+    return { ok: false, message: appLanguage === "pl" ? `Nie udało się usunąć danych: ${detail}` : `Data could not be cleared: ${detail}` };
+  }
+};
+
+const clearGlobalSiteData = async (dataTypesValue: unknown): Promise<ClearResult> => {
+  const dataTypes = validateSiteDataTypes(dataTypesValue);
+  if (!dataTypes) {
+    return { ok: false, message: appLanguage === "pl" ? "Wybierz co najmniej jeden prawidłowy typ danych." : "Select at least one valid data type." };
+  }
+  try {
+    await session.defaultSession.clearData({ dataTypes });
+    return { ok: true, message: appLanguage === "pl" ? "Usunięto wybrane dane wszystkich witryn." : "Selected data for all sites was cleared." };
+  } catch (error) {
+    const detail = error instanceof Error ? error.message : appLanguage === "pl" ? "Nieznany błąd." : "Unknown error.";
+    return { ok: false, message: appLanguage === "pl" ? `Nie udało się usunąć danych: ${detail}` : `Data could not be cleared: ${detail}` };
+  }
+};
+
 const escapeHtml = (value: string): string => {
   return value
     .replace(/&/g, "&amp;")
@@ -891,31 +1171,13 @@ const escapeHtml = (value: string): string => {
     .replace(/'/g, "&#39;");
 };
 
-const clearCookies = async (): Promise<void> => {
-  await session.defaultSession.clearStorageData({
-    storages: ["cookies"],
-  });
-};
-
-const clearCacheData = async (): Promise<void> => {
-  await session.defaultSession.clearCache();
-};
-
-const getDataPanelStatusHtml = (): string => {
-  if (!dataPanelStatusMessage) {
-    return "";
-  }
-
-  return `<p class="status">${escapeHtml(dataPanelStatusMessage)}</p>`;
-};
-
 const getHistoryRowsHtml = (entries: HistoryEntry[]): string => {
   return entries
     .map((entry) => {
       const safeUrl = escapeHtml(entry.url);
       const safeTitle = escapeHtml(entry.title || entry.url);
       const safeVisitedAt = escapeHtml(
-        new Date(entry.visitedAt).toLocaleString("pl-PL"),
+        new Date(entry.visitedAt).toLocaleString(localeForLanguage()),
       );
 
       return `<li><a href="${safeUrl}" title="${safeTitle}" target="_blank" rel="noopener noreferrer">${safeTitle}</a><span>${safeVisitedAt}</span></li>`;
@@ -924,27 +1186,51 @@ const getHistoryRowsHtml = (entries: HistoryEntry[]): string => {
 };
 
 const renderHistoryWindowHtml = (entries: HistoryEntry[]): string => {
+  const copy = appLanguage === "pl" ? {
+    documentTitle: "MonoBrowser — Historia",
+    heading: "Historia przeglądania",
+    clear: "Usuń całą historię",
+    alreadyEmpty: "Historia jest już pusta",
+    confirm: "Czy na pewno usunąć całą historię przeglądania?",
+    empty: "Brak wpisów w historii.",
+  } : {
+    documentTitle: "MonoBrowser — History",
+    heading: "Browsing history",
+    clear: "Clear all history",
+    alreadyEmpty: "History is already empty",
+    confirm: "Are you sure you want to clear all browsing history?",
+    empty: "No browsing history yet.",
+  };
   const rows = getHistoryRowsHtml(entries);
 
-  const clearHistoryLabel = rows ? "Usuń całą historię" : "Historia jest już pusta";
+  const clearHistoryLabel = rows ? copy.clear : copy.alreadyEmpty;
   const clearHistoryDisabled = rows ? "" : "disabled";
 
   return `<!doctype html>
-<html lang="pl">
+<html lang="${appLanguage}">
   <head>
     <meta charset="UTF-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-    <title>MonoBrowser History</title>
+    <title>${copy.documentTitle}</title>
     <style>
       :root {
         color-scheme: dark;
         font-family: "Segoe UI", system-ui, sans-serif;
       }
 
+      html,
+      body {
+        width: 100%;
+        height: 100%;
+      }
+
       body {
         margin: 0;
         background: #1e1f22;
         color: #dde1e6;
+        display: flex;
+        flex-direction: column;
+        overflow: hidden;
       }
 
       header {
@@ -956,6 +1242,12 @@ const renderHistoryWindowHtml = (entries: HistoryEntry[]): string => {
         align-items: center;
         justify-content: space-between;
         gap: 12px;
+        flex: 0 0 auto;
+      }
+
+      header > span {
+        color: #dde1e6;
+        font-size: 14px;
       }
 
       .clear-history {
@@ -981,73 +1273,28 @@ const renderHistoryWindowHtml = (entries: HistoryEntry[]): string => {
 
       main {
         padding: 8px;
-      }
-
-      .split {
-        display: grid;
-        grid-template-columns: minmax(0, 1.7fr) minmax(220px, 1fr);
-        gap: 12px;
+        flex: 1 1 auto;
+        min-height: 0;
+        display: flex;
       }
 
       .panel {
         background: #25272a;
         border: 1px solid #3c3f41;
         border-radius: 10px;
-        min-height: 340px;
-      }
-
-      .panel-title {
-        padding: 10px 12px;
-        border-bottom: 1px solid #3c3f41;
-        font-size: 12px;
-        color: #a7adb5;
-        text-transform: uppercase;
-        letter-spacing: 0.04em;
+        flex: 1 1 auto;
+        min-width: 0;
+        min-height: 0;
+        display: flex;
+        flex-direction: column;
+        overflow: hidden;
       }
 
       .history-panel ul {
         padding: 6px;
-      }
-
-      .data-panel {
-        padding: 12px;
-        display: grid;
-        gap: 8px;
-        align-content: start;
-      }
-
-      .data-panel p {
-        color: #b6bcc4;
-        font-size: 12px;
-        line-height: 1.45;
-        margin: 0 0 6px;
-      }
-
-      .danger-btn {
-        border: 1px solid #4a4d50;
-        background: #2b2d30;
-        color: #dde1e6;
-        border-radius: 8px;
-        padding: 8px 10px;
-        font-size: 12px;
-        font-family: inherit;
-        cursor: pointer;
-        text-align: left;
-        transition: background 0.12s;
-      }
-
-      .danger-btn:hover {
-        background: #3a3d40;
-      }
-
-      .status {
-        margin-top: 6px;
-        padding: 8px 10px;
-        border: 1px solid #4a4d50;
-        border-radius: 8px;
-        background: #2b2d30;
-        color: #d6dbe1;
-        font-size: 12px;
+        flex: 1 1 auto;
+        min-height: 0;
+        overflow-y: auto;
       }
 
       ul {
@@ -1087,44 +1334,22 @@ const renderHistoryWindowHtml = (entries: HistoryEntry[]): string => {
       .empty {
         padding: 16px;
         color: #8c9198;
+        flex: 1 1 auto;
       }
 
-      @media (max-width: 820px) {
-        .split {
-          grid-template-columns: 1fr;
-        }
-
-        .panel {
-          min-height: auto;
-        }
-      }
     </style>
   </head>
   <body>
     <header>
-      <span>Historia przeglądania</span>
-      <form action="${CLEAR_HISTORY_URL}" method="get">
+      <span>${copy.heading}</span>
+      <form action="${CLEAR_HISTORY_URL}" method="get" onsubmit="return confirm('${copy.confirm}')">
         <button class="clear-history" type="submit" ${clearHistoryDisabled}>${clearHistoryLabel}</button>
       </form>
     </header>
     <main>
-      <div class="split">
-        <section class="panel history-panel">
-          <div class="panel-title">Historia</div>
-          ${rows ? `<ul>${rows}</ul>` : '<div class="empty">Brak wpisów w historii.</div>'}
-        </section>
-        <aside class="panel data-panel">
-          <div class="panel-title">Wyczyść dane</div>
-          <p>W tym panelu usuniesz dane przeglądarki dla wszystkich stron.</p>
-          <form action="${CLEAR_COOKIES_URL}" method="get">
-            <button class="danger-btn" type="submit">Usuń wszystkie cookies</button>
-          </form>
-          <form action="${CLEAR_CACHE_URL}" method="get">
-            <button class="danger-btn" type="submit">Usuń cache</button>
-          </form>
-          ${getDataPanelStatusHtml()}
-        </aside>
-      </div>
+      <section class="panel history-panel">
+        ${rows ? `<ul>${rows}</ul>` : `<div class="empty">${copy.empty}</div>`}
+      </section>
     </main>
   </body>
 </html>`;
@@ -1151,7 +1376,7 @@ const openHistoryWindow = async (): Promise<void> => {
     height: 540,
     minWidth: 520,
     minHeight: 380,
-    title: "MonoBrowser History",
+    title: appLanguage === "pl" ? "MonoBrowser — Historia" : "MonoBrowser — History",
     autoHideMenuBar: true,
     icon: path.join(app.getAppPath(), "assets", "icon.png"),
     webPreferences: {
@@ -1162,7 +1387,7 @@ const openHistoryWindow = async (): Promise<void> => {
   });
 
   historyWindow.webContents.setWindowOpenHandler(({ url }) => {
-    if (isClearHistoryUrl(url) || isClearCookiesUrl(url) || isClearCacheUrl(url)) {
+    if (isClearHistoryUrl(url)) {
       void handleHistoryWindowNavigation(url);
       return { action: "deny" };
     }
@@ -1172,7 +1397,7 @@ const openHistoryWindow = async (): Promise<void> => {
   });
 
   historyWindow.webContents.on("will-navigate", (event, url) => {
-    if (isClearHistoryUrl(url) || isClearCookiesUrl(url) || isClearCacheUrl(url)) {
+    if (isClearHistoryUrl(url)) {
       event.preventDefault();
       void handleHistoryWindowNavigation(url);
     }
@@ -1187,36 +1412,299 @@ const openHistoryWindow = async (): Promise<void> => {
 
 const handleHistoryWindowNavigation = async (url: string): Promise<void> => {
   if (isClearHistoryUrl(url)) {
-    dataPanelStatusMessage = "Historia została wyczyszczona.";
     await clearHistory();
-    return;
-  }
-
-  if (isClearCookiesUrl(url)) {
-    await clearCookies();
-    dataPanelStatusMessage = "Wszystkie cookies zostały usunięte.";
-    broadcastHistory();
-    return;
-  }
-
-  if (isClearCacheUrl(url)) {
-    await clearCacheData();
-    dataPanelStatusMessage = "Cache został wyczyszczony.";
-    broadcastHistory();
   }
 };
 
-const saveHistory = async (): Promise<void> => {
-  if (!historyFilePath) {
+const INTERNAL_WINDOW_STYLES = `
+  :root { color-scheme: dark; font-family: "Segoe UI", system-ui, sans-serif; }
+  * { box-sizing: border-box; }
+  body { margin: 0; background: #1e1f22; color: #dde1e6; }
+  header { position: sticky; top: 0; z-index: 2; display: flex; align-items: center; justify-content: space-between; gap: 12px; padding: 14px 18px; border-bottom: 1px solid #3c3f41; background: #1e1f22; }
+  h1 { margin: 0; font-size: 16px; }
+  button, input { font: inherit; }
+  button { border: 1px solid #4a4d50; background: #2b2d30; color: #dde1e6; border-radius: 8px; padding: 7px 11px; cursor: pointer; }
+  button:hover:not(:disabled) { background: #3a3d40; }
+  button:disabled { opacity: .45; cursor: not-allowed; }
+  button.danger { border-color: #724247; color: #ffb7bd; }
+  main { padding: 14px 18px; }
+  .empty, .muted { color: #969ca4; }
+  .empty { padding: 30px 12px; text-align: center; }
+  .status-message { margin: 10px 0; padding: 9px 11px; border: 1px solid #4a4d50; border-radius: 8px; background: #25272a; font-size: 13px; }
+`;
+
+const renderDownloadsWindowHtml = (): string => {
+  const copy = appLanguage === "pl" ? {
+    title: "MonoBrowser — Pobieranie", heading: "Pobieranie", clearHistory: "Wyczyść historię pobrań",
+    statuses: { "in-progress": "Pobieranie", completed: "Ukończono", cancelled: "Anulowano", interrupted: "Przerwano", failed: "Błąd" },
+    empty: "Brak pobrań.", unknownSource: "Nieznane źródło", cancel: "Anuluj", openFile: "Otwórz plik", showInFolder: "Pokaż w folderze",
+    cancelFailed: "Nie udało się anulować pobierania.", openFailed: "Plik nie istnieje lub nie można go otworzyć.",
+    showFailed: "Plik nie istnieje lub nie można go pokazać.", clearConfirm: "Wyczyścić historię pobrań? Pobrane pliki pozostaną na dysku.",
+    clearFailed: "Nie udało się wyczyścić historii pobrań.", loadFailed: "Nie udało się wczytać historii pobrań.",
+    connectionInterrupted: "Połączenie zostało chwilowo przerwane.", downloadInterrupted: "Pobieranie zostało przerwane przez błąd sieci lub zapisu.",
+    cancelledMessage: "Pobieranie zostało anulowane.", failedMessage: "Pobieranie nie powiodło się.", locale: "pl-PL",
+  } : {
+    title: "MonoBrowser — Downloads", heading: "Downloads", clearHistory: "Clear download history",
+    statuses: { "in-progress": "Downloading", completed: "Completed", cancelled: "Cancelled", interrupted: "Interrupted", failed: "Failed" },
+    empty: "No downloads yet.", unknownSource: "Unknown source", cancel: "Cancel", openFile: "Open file", showInFolder: "Show in folder",
+    cancelFailed: "The download could not be cancelled.", openFailed: "The file does not exist or could not be opened.",
+    showFailed: "The file does not exist or could not be shown.", clearConfirm: "Clear download history? Downloaded files will remain on disk.",
+    clearFailed: "Download history could not be cleared.", loadFailed: "Download history could not be loaded.",
+    connectionInterrupted: "The connection was temporarily interrupted.", downloadInterrupted: "The download was interrupted by a network or disk error.",
+    cancelledMessage: "The download was cancelled.", failedMessage: "The download failed.", locale: "en-US",
+  };
+  const copyJson = JSON.stringify(copy).replace(/</g, "\\u003c");
+  return `<!doctype html>
+<html lang="${appLanguage}"><head><meta charset="UTF-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+<meta http-equiv="Content-Security-Policy" content="default-src 'none'; style-src 'unsafe-inline'; script-src 'unsafe-inline'">
+<title>${copy.title}</title><style>${INTERNAL_WINDOW_STYLES}
+  .downloads { display: grid; gap: 10px; }
+  .download { background: #25272a; border: 1px solid #3c3f41; border-radius: 10px; padding: 12px; display: grid; gap: 8px; }
+  .download-top { display: flex; justify-content: space-between; align-items: start; gap: 12px; }
+  .name { font-weight: 600; overflow-wrap: anywhere; }
+  .status { font-size: 12px; border-radius: 999px; padding: 3px 8px; background: #34373b; white-space: nowrap; }
+  .status.completed { color: #9ee6af; } .status.cancelled,.status.interrupted,.status.failed { color: #ffb7bd; }
+  .details { display: grid; gap: 3px; color: #aeb4bc; font-size: 12px; }
+  .path { overflow-wrap: anywhere; }
+  .progress-row { display: flex; align-items: center; gap: 10px; font-size: 12px; }
+  progress { flex: 1; height: 10px; accent-color: #4a9eff; }
+  .actions { display: flex; flex-wrap: wrap; gap: 7px; }
+  .error { color: #ffb7bd; font-size: 12px; }
+</style></head><body>
+<header><h1>${copy.heading}</h1><button id="clear" class="danger">${copy.clearHistory}</button></header>
+<main><div id="message" hidden class="status-message"></div><div id="list" class="downloads"></div></main>
+<script>
+(() => {
+  const copy = ${copyJson};
+  const list = document.getElementById('list');
+  const clearButton = document.getElementById('clear');
+  const message = document.getElementById('message');
+  const labels = copy.statuses;
+  const bytes = value => {
+    if (!Number.isFinite(value) || value <= 0) return '0 B';
+    const units = ['B','KB','MB','GB','TB']; let size = value; let unit = 0;
+    while (size >= 1024 && unit < units.length - 1) { size /= 1024; unit++; }
+    return (unit === 0 ? Math.round(size) : size.toFixed(size >= 10 ? 1 : 2)) + ' ' + units[unit];
+  };
+  const showMessage = text => { message.textContent = text; message.hidden = false; };
+  const make = (tag, className, text) => { const el = document.createElement(tag); if (className) el.className = className; if (text !== undefined) el.textContent = text; return el; };
+  const action = (label, handler, danger) => { const button = make('button', danger ? 'danger' : '', label); button.addEventListener('click', handler); return button; };
+  const render = records => {
+    list.replaceChildren(); clearButton.disabled = records.length === 0;
+    if (!records.length) { list.append(make('div','empty',copy.empty)); return; }
+    for (const record of records) {
+      const card = make('article','download');
+      const top = make('div','download-top'); top.append(make('div','name',record.fileName), make('span','status ' + record.status,labels[record.status] || record.status));
+      const details = make('div','details');
+      const source = !record.sourceOrigin || record.sourceOrigin === 'Nieznane źródło' ? copy.unknownSource : record.sourceOrigin;
+      details.append(make('div','',source), make('div','path',record.savePath), make('div','',new Date(record.startedAt).toLocaleString(copy.locale) + ' · ' + bytes(record.totalBytes || record.receivedBytes)));
+      card.append(top, details);
+      if (record.status === 'in-progress') {
+        const row = make('div','progress-row'); const progress = document.createElement('progress');
+        if (record.totalBytes > 0) { progress.max = record.totalBytes; progress.value = record.receivedBytes; }
+        const percent = record.totalBytes > 0 ? Math.min(100, Math.round(record.receivedBytes / record.totalBytes * 100)) + '% · ' : '';
+        row.append(progress, make('span','',percent + bytes(record.receivedBytes))); card.append(row);
+      }
+      if (record.error) { const errors = { 'in-progress':copy.connectionInterrupted, interrupted:copy.downloadInterrupted, cancelled:copy.cancelledMessage, failed:copy.failedMessage }; card.append(make('div','error',errors[record.status] || copy.failedMessage)); }
+      const actions = make('div','actions');
+      if (record.status === 'in-progress') actions.append(action(copy.cancel, async () => { if (!await window.browserApi.cancelDownload(record.id)) showMessage(copy.cancelFailed); }, true));
+      if (record.status === 'completed') {
+        actions.append(action(copy.openFile, async () => { if (!await window.browserApi.openDownloadedFile(record.id)) showMessage(copy.openFailed); }));
+        actions.append(action(copy.showInFolder, async () => { if (!await window.browserApi.showDownloadInFolder(record.id)) showMessage(copy.showFailed); }));
+      }
+      if (actions.childElementCount) card.append(actions); list.append(card);
+    }
+  };
+  clearButton.addEventListener('click', async () => {
+    if (!confirm(copy.clearConfirm)) return;
+    if (!await window.browserApi.clearDownloadsHistory()) showMessage(copy.clearFailed);
+  });
+  window.browserApi.onDownloadsUpdated(payload => render(payload.downloads));
+  window.browserApi.getDownloads().then(render).catch(() => showMessage(copy.loadFailed));
+})();
+</script></body></html>`;
+};
+
+const renderSiteDataWindowHtml = (): string => {
+  const copy = appLanguage === "pl" ? {
+    title: "MonoBrowser — Dane witryn", heading: "Dane witryn", refresh: "Odśwież", filter: "Filtruj witryny…",
+    allSites: "Wszystkie witryny", globalNote: "Globalne czyszczenie nie usuwa pobranych plików ani historii pobrań.",
+    clearHistory: "Wyczyść historię", clearCookies: "Usuń wszystkie pliki cookie", clearCache: "Wyczyść całą pamięć podręczną",
+    warning: "Uwaga: usunięcie plików cookie może objąć całą domenę rejestrowalną i jej subdomeny, zgodnie z regułami Chromium.",
+    cancel: "Anuluj", clearData: "Wyczyść dane", noMatches: "Brak pasujących witryn.", noOrigins: "Brak znanych witryn.",
+    origin: "Witryna", lastActivity: "Ostatnia aktywność", cookies: "Pliki cookie", cookieOnly: "Tylko plik cookie", loadFailed: "Nie udało się wczytać danych witryn.",
+    cookieType: "Pliki cookie", localStorageType: "Pamięć lokalna", indexedDbType: "Baza IndexedDB", cacheType: "Pamięć podręczna", serviceWorkersType: "Skrypty service worker",
+    clearTitle: "Wyczyść dane: ", confirmHistory: "Czy na pewno usunąć całą historię przeglądania?",
+    confirmCookies: "Czy na pewno usunąć pliki cookie wszystkich witryn? Może to wylogować ze stron.",
+    confirmCache: "Czy na pewno wyczyścić pamięć podręczną wszystkich witryn?", locale: "pl-PL",
+  } : {
+    title: "MonoBrowser — Site data", heading: "Site data", refresh: "Refresh", filter: "Filter origins…",
+    allSites: "All sites", globalNote: "Global clearing does not remove downloaded files or download history.",
+    clearHistory: "Clear history", clearCookies: "Clear all cookies", clearCache: "Clear all cache",
+    warning: "Warning: clearing cookies may affect the entire registrable domain and its subdomains, according to Chromium rules.",
+    cancel: "Cancel", clearData: "Clear data", noMatches: "No matching origins.", noOrigins: "No known origins.",
+    origin: "Origin", lastActivity: "Last activity", cookies: "Cookies", cookieOnly: "Cookie only", loadFailed: "Site data could not be loaded.",
+    cookieType: "Cookies", localStorageType: "Local Storage", indexedDbType: "IndexedDB", cacheType: "Cache", serviceWorkersType: "Service Workers",
+    clearTitle: "Clear data: ", confirmHistory: "Are you sure you want to clear all browsing history?",
+    confirmCookies: "Are you sure you want to clear cookies for all sites? This may sign you out.",
+    confirmCache: "Are you sure you want to clear the cache for all sites?", locale: "en-US",
+  };
+  const copyJson = JSON.stringify(copy).replace(/</g, "\\u003c");
+  return `<!doctype html>
+<html lang="${appLanguage}"><head><meta charset="UTF-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+<meta http-equiv="Content-Security-Policy" content="default-src 'none'; style-src 'unsafe-inline'; script-src 'unsafe-inline'">
+<title>${copy.title}</title><style>${INTERNAL_WINDOW_STYLES}
+  header { align-items: stretch; flex-direction: column; }
+  .heading { display:flex; align-items:center; justify-content:space-between; }
+  #filter { width: 100%; border: 1px solid #4a4d50; background: #2b2d30; color: #dde1e6; border-radius: 8px; padding: 9px 11px; outline: none; }
+  #filter:focus { border-color: #4a9eff; }
+  table { width:100%; border-collapse:collapse; background:#25272a; border:1px solid #3c3f41; }
+  th,td { padding:10px 12px; border-bottom:1px solid #3c3f41; text-align:left; font-size:13px; }
+  th { color:#aeb4bc; font-size:12px; } td:first-child { overflow-wrap:anywhere; }
+  footer { margin-top:16px; padding:14px; background:#25272a; border:1px solid #3c3f41; border-radius:10px; }
+  footer h2 { margin:0 0 6px; font-size:14px; } .global-actions { display:flex; flex-wrap:wrap; gap:8px; margin-top:10px; }
+  dialog { width:min(520px,calc(100vw - 30px)); border:1px solid #4a4d50; border-radius:12px; padding:0; background:#25272a; color:#dde1e6; }
+  dialog::backdrop { background:rgba(0,0,0,.65); } .modal-body { padding:18px; } .modal-body h2 { margin:0 0 7px; font-size:16px; overflow-wrap:anywhere; }
+  .warning { color:#ffc48a; font-size:12px; line-height:1.45; } .choices { display:grid; gap:9px; margin:16px 0; } label { display:flex; align-items:center; gap:9px; }
+  .modal-actions { display:flex; justify-content:flex-end; gap:8px; }
+  @media(max-width:720px) { th:nth-child(2),td:nth-child(2) { display:none; } }
+</style></head><body>
+<header><div class="heading"><h1>${copy.heading}</h1><button id="refresh">${copy.refresh}</button></div><input id="filter" type="search" placeholder="${copy.filter}" autocomplete="off"></header>
+<main><div id="message" hidden class="status-message"></div><div id="content"></div>
+<footer><h2>${copy.allSites}</h2><div class="muted">${copy.globalNote}</div><div class="global-actions"><button id="clear-history" class="danger">${copy.clearHistory}</button><button id="clear-cookies" class="danger">${copy.clearCookies}</button><button id="clear-cache" class="danger">${copy.clearCache}</button></div></footer></main>
+<dialog id="dialog"><form method="dialog" class="modal-body"><h2 id="modal-title"></h2><p class="warning">${copy.warning}</p><div class="choices">
+  <label><input type="checkbox" value="cookies" checked> ${copy.cookieType}</label><label><input type="checkbox" value="localStorage" checked> ${copy.localStorageType}</label><label><input type="checkbox" value="indexedDB" checked> ${copy.indexedDbType}</label><label><input type="checkbox" value="cache" checked> ${copy.cacheType}</label><label><input type="checkbox" value="serviceWorkers" checked> ${copy.serviceWorkersType}</label>
+</div><div class="modal-actions"><button value="cancel">${copy.cancel}</button><button id="confirm" value="default" class="danger">${copy.clearData}</button></div></form></dialog>
+<script>
+(() => {
+  const copy = ${copyJson};
+  let entries = []; let selectedOrigin = null;
+  const content = document.getElementById('content'), filter = document.getElementById('filter'), dialog = document.getElementById('dialog'), confirmButton = document.getElementById('confirm'), message = document.getElementById('message');
+  const showMessage = (text, ok) => { message.textContent = text; message.style.borderColor = ok ? '#46734f' : '#724247'; message.hidden = false; };
+  const render = () => {
+    const query = filter.value.trim().toLowerCase(); const visible = entries.filter(entry => entry.origin.toLowerCase().includes(query)); content.replaceChildren();
+    if (!visible.length) { const empty=document.createElement('div'); empty.className='empty'; empty.textContent=query?copy.noMatches:copy.noOrigins; content.append(empty); return; }
+    const table=document.createElement('table'), head=document.createElement('thead'), body=document.createElement('tbody'); head.innerHTML='<tr><th>'+copy.origin+'</th><th>'+copy.lastActivity+'</th><th>'+copy.cookies+'</th><th></th></tr>';
+    for (const entry of visible) { const row=document.createElement('tr'); const origin=document.createElement('td'); origin.textContent=entry.origin; const seen=document.createElement('td'); seen.textContent=entry.lastSeenAt?new Date(entry.lastSeenAt).toLocaleString(copy.locale):copy.cookieOnly; const count=document.createElement('td'); count.textContent=String(entry.cookieCount); const action=document.createElement('td'); const button=document.createElement('button'); button.textContent=copy.clearData; button.addEventListener('click',()=>openModal(entry.origin)); action.append(button); row.append(origin,seen,count,action); body.append(row); }
+    table.append(head,body); content.append(table);
+  };
+  const load = async () => { try { entries=await window.browserApi.listSiteData(); render(); } catch { showMessage(copy.loadFailed,false); } };
+  const openModal = origin => { selectedOrigin=origin; document.getElementById('modal-title').textContent=copy.clearTitle+origin; dialog.querySelectorAll('input[type=checkbox]').forEach(input=>input.checked=true); updateConfirm(); dialog.showModal(); };
+  const updateConfirm = () => { confirmButton.disabled=!dialog.querySelector('input[type=checkbox]:checked'); };
+  dialog.querySelectorAll('input[type=checkbox]').forEach(input=>input.addEventListener('change',updateConfirm));
+  dialog.addEventListener('close', async () => { if (dialog.returnValue!=='default'||!selectedOrigin) return; const types=[...dialog.querySelectorAll('input[type=checkbox]:checked')].map(input=>input.value); const result=await window.browserApi.clearSiteData(selectedOrigin,types); showMessage(result.message,result.ok); selectedOrigin=null; await load(); });
+  filter.addEventListener('input',render); document.getElementById('refresh').addEventListener('click',load);
+  document.getElementById('clear-history').addEventListener('click',async()=>{ if(!confirm(copy.confirmHistory))return; const result=await window.browserApi.clearGlobalHistory(); showMessage(result.message,result.ok); });
+  document.getElementById('clear-cookies').addEventListener('click',async()=>{ if(!confirm(copy.confirmCookies))return; const result=await window.browserApi.clearGlobalSiteData(['cookies']); showMessage(result.message,result.ok); await load(); });
+  document.getElementById('clear-cache').addEventListener('click',async()=>{ if(!confirm(copy.confirmCache))return; const result=await window.browserApi.clearGlobalSiteData(['cache']); showMessage(result.message,result.ok); await load(); });
+  load();
+})();
+</script></body></html>`;
+};
+
+const configureInternalWindow = (windowRef: BrowserWindow): void => {
+  windowRef.webContents.setWindowOpenHandler(() => ({ action: "deny" }));
+  windowRef.webContents.on("will-navigate", (event, url) => {
+    if (!url.startsWith("data:text/html")) {
+      event.preventDefault();
+    }
+  });
+};
+
+const openDownloadsWindow = async (): Promise<void> => {
+  if (downloadsWindow && !downloadsWindow.isDestroyed()) {
+    downloadsWindow.focus();
     return;
   }
+  downloadsWindow = new BrowserWindow({
+    width: 820, height: 640, minWidth: 540, minHeight: 400,
+    title: appLanguage === "pl" ? "MonoBrowser — Pobieranie" : "MonoBrowser — Downloads", autoHideMenuBar: true,
+    icon: path.join(app.getAppPath(), "assets", "icon.png"),
+    webPreferences: { preload: path.join(__dirname, "preload.js"), contextIsolation: true, nodeIntegration: false, sandbox: true },
+  });
+  configureInternalWindow(downloadsWindow);
+  downloadsWindow.on("closed", () => { downloadsWindow = null; });
+  await downloadsWindow.loadURL(`data:text/html;charset=utf-8,${encodeURIComponent(renderDownloadsWindowHtml())}`);
+};
 
-  await fs.mkdir(path.dirname(historyFilePath), { recursive: true });
-  await fs.writeFile(
-    historyFilePath,
-    JSON.stringify(historyEntries, null, 2),
-    "utf8",
-  );
+const openSiteDataWindow = async (): Promise<void> => {
+  if (siteDataWindow && !siteDataWindow.isDestroyed()) {
+    siteDataWindow.focus();
+    return;
+  }
+  siteDataWindow = new BrowserWindow({
+    width: 900, height: 680, minWidth: 600, minHeight: 440,
+    title: appLanguage === "pl" ? "MonoBrowser — Dane witryn" : "MonoBrowser — Site data", autoHideMenuBar: true,
+    icon: path.join(app.getAppPath(), "assets", "icon.png"),
+    webPreferences: { preload: path.join(__dirname, "preload.js"), contextIsolation: true, nodeIntegration: false, sandbox: true },
+  });
+  configureInternalWindow(siteDataWindow);
+  siteDataWindow.on("closed", () => { siteDataWindow = null; });
+  await siteDataWindow.loadURL(`data:text/html;charset=utf-8,${encodeURIComponent(renderSiteDataWindowHtml())}`);
+};
+
+const refreshLocalizedWindows = async (): Promise<void> => {
+  if (mainWindow && !mainWindow.isDestroyed()) {
+    mainWindow.webContents.send("language:changed", appLanguage);
+  }
+  if (historyWindow && !historyWindow.isDestroyed()) {
+    await loadHistoryWindowContent();
+  }
+  if (downloadsWindow && !downloadsWindow.isDestroyed()) {
+    await downloadsWindow.loadURL(`data:text/html;charset=utf-8,${encodeURIComponent(renderDownloadsWindowHtml())}`);
+  }
+  if (siteDataWindow && !siteDataWindow.isDestroyed()) {
+    await siteDataWindow.loadURL(`data:text/html;charset=utf-8,${encodeURIComponent(renderSiteDataWindowHtml())}`);
+  }
+};
+
+const setApplicationLanguage = async (language: AppLanguage): Promise<boolean> => {
+  if (language === appLanguage) {
+    return true;
+  }
+  appLanguage = language;
+  await saveLanguage();
+  setupApplicationMenu();
+  await refreshLocalizedWindows();
+  return true;
+};
+
+const openNavigationMenu = (anchor: unknown): boolean => {
+  if (!mainWindow || mainWindow.isDestroyed() || typeof anchor !== "object" || anchor === null) {
+    return false;
+  }
+  const raw = anchor as { x?: unknown; y?: unknown };
+  if (typeof raw.x !== "number" || typeof raw.y !== "number" || !Number.isFinite(raw.x) || !Number.isFinite(raw.y)) {
+    return false;
+  }
+  const copy = appLanguage === "pl" ? {
+    history: "Historia", downloads: "Pobieranie", siteData: "Dane witryn", language: "Język", polish: "Polski", english: "Angielski",
+  } : {
+    history: "History", downloads: "Downloads", siteData: "Site data", language: "Language", polish: "Polish", english: "English",
+  };
+  const menu = Menu.buildFromTemplate([
+    { label: copy.history, click: () => { void openHistoryWindow(); } },
+    { label: copy.downloads, click: () => { void openDownloadsWindow(); } },
+    { label: copy.siteData, click: () => { void openSiteDataWindow(); } },
+    { type: "separator" },
+    {
+      label: copy.language,
+      submenu: [
+        { label: copy.polish, type: "radio", checked: appLanguage === "pl", click: () => { void setApplicationLanguage("pl"); } },
+        { label: copy.english, type: "radio", checked: appLanguage === "en", click: () => { void setApplicationLanguage("en"); } },
+      ],
+    },
+  ]);
+  menu.popup({
+    window: mainWindow,
+    x: Math.max(0, Math.floor(raw.x)),
+    y: Math.max(0, Math.floor(raw.y)),
+  });
+  return true;
+};
+
+const saveHistory = async (): Promise<void> => {
+  await writeJsonAtomically(historyFilePath, historyEntries);
 };
 
 const loadHistory = async (): Promise<void> => {
@@ -1232,9 +1720,12 @@ const loadHistory = async (): Promise<void> => {
 };
 
 const appendHistory = async (url: string, title: string): Promise<void> => {
-  if (!/^https?:\/\//i.test(url)) {
+  const origin = normalizeHttpOrigin(url);
+  if (!origin) {
     return;
   }
+
+  await registerVisitedOrigin(url);
 
   if (isDefaultStartPageUrl(url)) {
     return;
@@ -1338,13 +1829,30 @@ const applyActiveViewBounds = (): void => {
 const updateTabFromWebContents = (tab: TabRecord): void => {
   const contents = tab.view.webContents;
 
-  tab.url = contents.getURL() || tab.url;
-  tab.title = contents.getTitle() || tab.title;
-  tab.isLoading = contents.isLoading();
-  tab.canGoBack = contents.navigationHistory.canGoBack();
-  tab.canGoForward = contents.navigationHistory.canGoForward();
+  if (contents.isDestroyed() || !tabs.has(tab.id)) {
+    return;
+  }
 
-  broadcastTabsState();
+  const nextState = {
+    url: contents.getURL() || tab.url,
+    title: contents.getTitle() || tab.title,
+    isLoading: contents.isLoading(),
+    canGoBack: contents.navigationHistory.canGoBack(),
+    canGoForward: contents.navigationHistory.canGoForward(),
+  };
+
+  const changed =
+    tab.url !== nextState.url ||
+    tab.title !== nextState.title ||
+    tab.isLoading !== nextState.isLoading ||
+    tab.canGoBack !== nextState.canGoBack ||
+    tab.canGoForward !== nextState.canGoForward;
+
+  Object.assign(tab, nextState);
+
+  if (changed) {
+    broadcastTabsState();
+  }
 };
 
 const setActiveTab = (id: number): boolean => {
@@ -1362,6 +1870,7 @@ const setActiveTab = (id: number): boolean => {
   promoteTabInMruOrder(id);
   applyActiveViewBounds();
   updateTabFromWebContents(tab);
+  broadcastTabsState();
 
   return true;
 };
@@ -1399,12 +1908,10 @@ const closeTab = (id: number): boolean => {
 const createTab = (
   initialUrl: string = DEFAULT_URL,
   makeActive: boolean = true,
-  preloadNextHomeTab: boolean = true,
 ): number => {
   const id = nextTabId++;
   const normalizedInitialUrl = normalizeInputToUrl(initialUrl);
-  const preloadedView = consumePreloadedHomeTabView(normalizedInitialUrl);
-  const view = preloadedView ?? createTabView();
+  const view = createTabView();
 
   if (isDefaultStartPageUrl(normalizedInitialUrl)) {
     applyStartPageBackgroundToView(view);
@@ -1412,7 +1919,7 @@ const createTab = (
 
   const tab: TabRecord = {
     id,
-    title: "New Tab",
+    title: appLanguage === "pl" ? "Nowa karta" : "New Tab",
     url: normalizedInitialUrl,
     isLoading: false,
     canGoBack: false,
@@ -1445,16 +1952,7 @@ const createTab = (
     broadcastTabsState();
   }
 
-  if (!preloadedView) {
-    contents.loadURL(normalizedInitialUrl).catch(() => undefined);
-  } else if (!contents.isLoading()) {
-    updateTabFromWebContents(tab);
-    void appendHistory(contents.getURL(), contents.getTitle());
-  }
-
-  if (preloadNextHomeTab) {
-    ensurePreloadedHomeTab();
-  }
+  contents.loadURL(normalizedInitialUrl).catch(() => undefined);
 
   return id;
 };
@@ -1586,6 +2084,105 @@ const registerIpc = (): void => {
     return true;
   });
 
+  ipcMain.handle("downloads:open-window", async () => {
+    await openDownloadsWindow();
+    return true;
+  });
+
+  ipcMain.handle("site-data:open-window", async () => {
+    await openSiteDataWindow();
+    return true;
+  });
+
+  ipcMain.handle("downloads:get", () => {
+    return getDownloadStatePayload().downloads;
+  });
+
+  ipcMain.handle("downloads:cancel", (_event, id: unknown) => {
+    if (typeof id !== "string" || !id || id.length > 200) {
+      return false;
+    }
+    const item = activeDownloads.get(id);
+    if (!item) {
+      return false;
+    }
+    item.cancel();
+    return true;
+  });
+
+  ipcMain.handle("downloads:clear-history", async () => {
+    downloadRecords = downloadRecords.filter((record) => activeDownloads.has(record.id));
+    await saveDownloads();
+    broadcastDownloads();
+    return true;
+  });
+
+  ipcMain.handle("downloads:open-file", async (_event, id: unknown) => {
+    if (typeof id !== "string" || !id || id.length > 200) {
+      return false;
+    }
+    const record = downloadRecords.find((entry) => entry.id === id);
+    if (!record || record.status !== "completed") {
+      return false;
+    }
+    try {
+      const stats = await fs.stat(record.savePath);
+      if (!stats.isFile()) {
+        return false;
+      }
+      return (await shell.openPath(record.savePath)) === "";
+    } catch {
+      return false;
+    }
+  });
+
+  ipcMain.handle("downloads:show-in-folder", async (_event, id: unknown) => {
+    if (typeof id !== "string" || !id || id.length > 200) {
+      return false;
+    }
+    const record = downloadRecords.find((entry) => entry.id === id);
+    if (!record || record.status !== "completed") {
+      return false;
+    }
+    try {
+      const stats = await fs.stat(record.savePath);
+      if (!stats.isFile()) {
+        return false;
+      }
+      shell.showItemInFolder(record.savePath);
+      return true;
+    } catch {
+      return false;
+    }
+  });
+
+  ipcMain.handle("site-data:list", async () => listSiteData());
+  ipcMain.handle("site-data:clear", async (_event, origin: unknown, dataTypes: unknown) => {
+    return clearSiteData(origin, dataTypes);
+  });
+  ipcMain.handle("site-data:clear-global", async (_event, dataTypes: unknown) => {
+    return clearGlobalSiteData(dataTypes);
+  });
+  ipcMain.handle("site-data:clear-history", async () => {
+    try {
+      await clearHistory();
+      return { ok: true, message: appLanguage === "pl" ? "Historia przeglądania została wyczyszczona." : "Browsing history was cleared." } satisfies ClearResult;
+    } catch (error) {
+      const detail = error instanceof Error ? error.message : appLanguage === "pl" ? "Nieznany błąd." : "Unknown error.";
+      return { ok: false, message: appLanguage === "pl" ? `Nie udało się wyczyścić historii: ${detail}` : `History could not be cleared: ${detail}` } satisfies ClearResult;
+    }
+  });
+
+  ipcMain.handle("language:get", () => appLanguage);
+  ipcMain.handle("language:set", async (_event, value: unknown) => {
+    const language = normalizeLanguage(value);
+    if (!language) {
+      return false;
+    }
+    return setApplicationLanguage(language);
+  });
+  ipcMain.handle("navigation-menu:open", (_event, anchor: unknown) => openNavigationMenu(anchor));
+
   ipcMain.handle("layout:set-viewport-top", (_event, top: number) => {
     if (typeof top !== "number" || Number.isNaN(top)) {
       return false;
@@ -1695,7 +2292,6 @@ const createMainWindow = async (
 
   mainWindow.on("resize", () => applyActiveViewBounds());
   mainWindow.on("closed", () => {
-    destroyPreloadedHomeTab();
     mainWindow = null;
   });
 
@@ -1706,7 +2302,7 @@ const createMainWindow = async (
   onProgress?.(58, "Loading app shell...");
   await mainWindow.loadFile(path.join(__dirname, "../renderer/index.html"));
   onProgress?.(79, "Opening first tab...");
-  createTab(DEFAULT_URL, true, false);
+  createTab(DEFAULT_URL, true);
   broadcastHistory();
 
   if (showImmediately && mainWindow && !mainWindow.isDestroyed()) {
@@ -1717,57 +2313,72 @@ const createMainWindow = async (
 
 const setupApplicationMenu = (): void => {
   const isMac = process.platform === "darwin";
+  const copy = appLanguage === "pl" ? {
+    file: "Plik", newTab: "Nowa karta", closeTab: "Zamknij kartę", quit: "Zakończ",
+    edit: "Edycja", undo: "Cofnij", redo: "Ponów", cut: "Wytnij", copy: "Kopiuj", paste: "Wklej",
+    pasteMatch: "Wklej i dopasuj styl", delete: "Usuń", selectAll: "Zaznacz wszystko", speech: "Mowa",
+    view: "Widok", reload: "Odśwież", forceReload: "Wymuś odświeżenie", devTools: "Narzędzia deweloperskie",
+    resetZoom: "Rozmiar rzeczywisty", zoomIn: "Powiększ", zoomOut: "Pomniejsz", fullscreen: "Pełny ekran",
+    window: "Okno", minimize: "Minimalizuj", zoom: "Maksymalizuj", front: "Przenieś wszystko na wierzch",
+  } : {
+    file: "File", newTab: "New Tab", closeTab: "Close Tab", quit: "Quit",
+    edit: "Edit", undo: "Undo", redo: "Redo", cut: "Cut", copy: "Copy", paste: "Paste",
+    pasteMatch: "Paste and Match Style", delete: "Delete", selectAll: "Select All", speech: "Speech",
+    view: "View", reload: "Reload", forceReload: "Force Reload", devTools: "Developer Tools",
+    resetZoom: "Actual Size", zoomIn: "Zoom In", zoomOut: "Zoom Out", fullscreen: "Full Screen",
+    window: "Window", minimize: "Minimize", zoom: "Zoom", front: "Bring All to Front",
+  };
 
   const template: MenuItemConstructorOptions[] = [
     ...(isMac ? [{ role: "appMenu" } as MenuItemConstructorOptions] : []),
     {
-      label: "File",
+      label: copy.file,
       submenu: [
         {
-          label: "New Tab",
+          label: copy.newTab,
           accelerator: "CmdOrCtrl+T",
           click: () => {
             openNewTab();
           },
         },
         {
-          label: "Close Tab",
+          label: copy.closeTab,
           accelerator: "CmdOrCtrl+W",
           click: () => {
             closeCurrentTab();
           },
         },
-        { role: "quit" } as MenuItemConstructorOptions,
+        { role: "quit", label: copy.quit } as MenuItemConstructorOptions,
       ],
     },
     {
-      label: "Edit",
+      label: copy.edit,
       submenu: [
-        { role: "undo" } as MenuItemConstructorOptions,
-        { role: "redo" } as MenuItemConstructorOptions,
+        { role: "undo", label: copy.undo } as MenuItemConstructorOptions,
+        { role: "redo", label: copy.redo } as MenuItemConstructorOptions,
         { type: "separator" } as MenuItemConstructorOptions,
-        { role: "cut" } as MenuItemConstructorOptions,
-        { role: "copy" } as MenuItemConstructorOptions,
-        { role: "paste" } as MenuItemConstructorOptions,
+        { role: "cut", label: copy.cut } as MenuItemConstructorOptions,
+        { role: "copy", label: copy.copy } as MenuItemConstructorOptions,
+        { role: "paste", label: copy.paste } as MenuItemConstructorOptions,
         ...(isMac
           ? ([
-              { role: "pasteAndMatchStyle" },
-              { role: "delete" },
-              { role: "selectAll" },
+              { role: "pasteAndMatchStyle", label: copy.pasteMatch },
+              { role: "delete", label: copy.delete },
+              { role: "selectAll", label: copy.selectAll },
               { type: "separator" },
               {
-                label: "Speech",
+                label: copy.speech,
                 submenu: [{ role: "startSpeaking" }, { role: "stopSpeaking" }],
               },
             ] as MenuItemConstructorOptions[])
-          : ([{ role: "delete" }, { type: "separator" }, { role: "selectAll" }] as MenuItemConstructorOptions[])),
+          : ([{ role: "delete", label: copy.delete }, { type: "separator" }, { role: "selectAll", label: copy.selectAll }] as MenuItemConstructorOptions[])),
       ],
     },
     {
-      label: "View",
+      label: copy.view,
       submenu: [
         {
-          label: "Reload",
+          label: copy.reload,
           accelerator: "CmdOrCtrl+R",
           click: () => {
             const tab = getActiveTab();
@@ -1776,25 +2387,25 @@ const setupApplicationMenu = (): void => {
             }
           },
         },
-        { role: "forceReload" },
-        { role: "toggleDevTools" },
+        { role: "forceReload", label: copy.forceReload },
+        { role: "toggleDevTools", label: copy.devTools },
         { type: "separator" },
-        { role: "resetZoom" },
-        { role: "zoomIn" },
-        { role: "zoomOut" },
+        { role: "resetZoom", label: copy.resetZoom },
+        { role: "zoomIn", label: copy.zoomIn },
+        { role: "zoomOut", label: copy.zoomOut },
         { type: "separator" },
-        { role: "togglefullscreen" },
+        { role: "togglefullscreen", label: copy.fullscreen },
       ] as MenuItemConstructorOptions[],
     },
     {
-      label: "Window",
+      label: copy.window,
       submenu: [
-        { role: "minimize" },
-        { role: "zoom" },
+        { role: "minimize", label: copy.minimize },
+        { role: "zoom", label: copy.zoom },
         ...(isMac
           ? ([
               { type: "separator" },
-              { role: "front" },
+              { role: "front", label: copy.front },
               { type: "separator" },
               { role: "window" },
             ] as MenuItemConstructorOptions[])
@@ -1810,13 +2421,22 @@ const setupApplicationMenu = (): void => {
 const bootstrap = async (): Promise<void> => {
   app.setName("MonoBrowser");
   historyFilePath = path.join(app.getPath("userData"), "history.json");
+  downloadsFilePath = path.join(app.getPath("userData"), "downloads.json");
+  siteOriginsFilePath = path.join(app.getPath("userData"), "site-origins.json");
+  languageFilePath = path.join(app.getPath("userData"), "language.json");
   startPageBackgroundFilePath = path.join(
     app.getPath("userData"),
     START_PAGE_BACKGROUND_FILE,
   );
 
-  await loadStartPageBackgroundColor();
+  await Promise.all([loadStartPageBackgroundColor(), loadLanguage()]);
   applyStartPageBackgroundColor();
+
+  const persistentDataLoad = Promise.all([
+    loadHistory(),
+    loadDownloads(),
+    loadSiteOrigins(),
+  ]);
 
   await createSplashWindow();
   updateSplashProgress(8, "Starting MonoBrowser...");
@@ -1827,10 +2447,8 @@ const bootstrap = async (): Promise<void> => {
   }
 
   registerIpc();
-
-  const historyLoadPromise = loadHistory().then(() => {
-    broadcastHistory();
-  });
+  await persistentDataLoad;
+  registerDownloadHandling();
 
   updateSplashProgress(28, "Preparing interface...");
   setupApplicationMenu();
@@ -1848,7 +2466,6 @@ const bootstrap = async (): Promise<void> => {
   updateSplashProgress(100, "Ready");
   destroySplashWindow();
 
-  void historyLoadPromise;
   scheduleAutoUpdateChecks();
 };
 

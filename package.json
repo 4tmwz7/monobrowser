@@ -1,6 +1,6 @@
 {
   "name": "monobrowser",
-  "version": "0.3.1",
+  "version": "0.3.2",
   "productName": "MonoBrowser",
   "description": "Electron Browser MVP",
   "main": "dist/main/main.js",
@@ -15,24 +15,56 @@
     "build": "npm run clean && npm run gen:icon && npm run build:main && npm run build:renderer && npm run copy:html",
     "dev": "npm run build && electron .",
     "start": "electron .",
-    "dist": "npm run build && electron-builder"
+    "dist": "npm run dist:win",
+    "dist:win": "npm run build && electron-builder --win nsis --x64",
+    "dist:linux": "npm run build && electron-builder --linux AppImage --x64",
+    "dist:all": "npm run build && electron-builder --win nsis --linux AppImage --x64"
   },
   "build": {
     "appId": "com.zlf.monobrowser",
-    "artifactName": "${productName}-Setup-${version}.${ext}",
+    "electronUpdaterCompatibility": ">=2.16",
+    "electronFuses": {
+      "runAsNode": false
+    },
+    "win": {
+      "target": [
+        {
+          "target": "nsis",
+          "arch": [
+            "x64"
+          ]
+        }
+      ],
+      "artifactName": "${productName}-Setup-${version}.${ext}"
+    },
+    "linux": {
+      "target": [
+        {
+          "target": "AppImage",
+          "arch": [
+            "x64"
+          ]
+        }
+      ],
+      "artifactName": "${productName}-${version}-${arch}.${ext}",
+      "category": "Network"
+    },
     "publish": [
       {
         "provider": "github",
         "owner": "4tmwz7",
-        "repo": "monobrowser"
+        "repo": "monobrowser",
+        "releaseType": "draft"
       }
     ],
     "files": [
       "dist/**/*",
+      "assets/icon.png",
       "package.json"
     ],
     "directories": {
-      "buildResources": "assets"
+      "buildResources": "assets",
+      "output": "release"
     }
   },
   "dependencies": {

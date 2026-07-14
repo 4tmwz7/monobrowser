@@ -21,6 +21,25 @@ type HistoryEntry = {
   visitedAt: string;
 };
 
+type DownloadStatus = "in-progress" | "completed" | "cancelled" | "interrupted" | "failed";
+type DownloadRecord = {
+  id: string;
+  fileName: string;
+  sourceUrl: string;
+  sourceOrigin: string;
+  savePath: string;
+  startedAt: string;
+  finishedAt: string | null;
+  receivedBytes: number;
+  totalBytes: number;
+  status: DownloadStatus;
+  error?: string;
+};
+type SiteDataType = "cookies" | "localStorage" | "indexedDB" | "cache" | "serviceWorkers";
+type SiteDataEntry = { origin: string; lastSeenAt: string | null; cookieCount: number };
+type ClearResult = { ok: boolean; message: string };
+type AppLanguage = "pl" | "en";
+
 const browserApi = {
   createTab: (initialUrl?: string): Promise<number> =>
     ipcRenderer.invoke("tabs:create", initialUrl),
@@ -38,6 +57,25 @@ const browserApi = {
   getHistory: (): Promise<HistoryEntry[]> => ipcRenderer.invoke("history:get"),
   openHistoryWindow: (): Promise<boolean> =>
     ipcRenderer.invoke("history:open-window"),
+  openDownloadsWindow: (): Promise<boolean> =>
+    ipcRenderer.invoke("downloads:open-window"),
+  openSiteDataWindow: (): Promise<boolean> =>
+    ipcRenderer.invoke("site-data:open-window"),
+  getDownloads: (): Promise<DownloadRecord[]> => ipcRenderer.invoke("downloads:get"),
+  cancelDownload: (id: string): Promise<boolean> => ipcRenderer.invoke("downloads:cancel", id),
+  clearDownloadsHistory: (): Promise<boolean> => ipcRenderer.invoke("downloads:clear-history"),
+  openDownloadedFile: (id: string): Promise<boolean> => ipcRenderer.invoke("downloads:open-file", id),
+  showDownloadInFolder: (id: string): Promise<boolean> => ipcRenderer.invoke("downloads:show-in-folder", id),
+  listSiteData: (): Promise<SiteDataEntry[]> => ipcRenderer.invoke("site-data:list"),
+  clearSiteData: (origin: string, dataTypes: SiteDataType[]): Promise<ClearResult> =>
+    ipcRenderer.invoke("site-data:clear", origin, dataTypes),
+  clearGlobalSiteData: (dataTypes: SiteDataType[]): Promise<ClearResult> =>
+    ipcRenderer.invoke("site-data:clear-global", dataTypes),
+  clearGlobalHistory: (): Promise<ClearResult> => ipcRenderer.invoke("site-data:clear-history"),
+  getLanguage: (): Promise<AppLanguage> => ipcRenderer.invoke("language:get"),
+  setLanguage: (language: AppLanguage): Promise<boolean> => ipcRenderer.invoke("language:set", language),
+  openNavigationMenu: (anchor: { x: number; y: number }): Promise<boolean> =>
+    ipcRenderer.invoke("navigation-menu:open", anchor),
   setViewportTop: (top: number): Promise<boolean> =>
     ipcRenderer.invoke("layout:set-viewport-top", top),
   onTabsState: (
@@ -59,6 +97,21 @@ const browserApi = {
     ) => callback(entries);
     ipcRenderer.on("history:updated", listener);
     return () => ipcRenderer.removeListener("history:updated", listener);
+  },
+  onDownloadsUpdated: (
+    callback: (payload: { downloads: DownloadRecord[] }) => void,
+  ): (() => void) => {
+    const listener = (
+      _event: Electron.IpcRendererEvent,
+      payload: { downloads: DownloadRecord[] },
+    ) => callback(payload);
+    ipcRenderer.on("downloads:updated", listener);
+    return () => ipcRenderer.removeListener("downloads:updated", listener);
+  },
+  onLanguageChanged: (callback: (language: AppLanguage) => void): (() => void) => {
+    const listener = (_event: Electron.IpcRendererEvent, language: AppLanguage) => callback(language);
+    ipcRenderer.on("language:changed", listener);
+    return () => ipcRenderer.removeListener("language:changed", listener);
   },
   triggerNewTabShortcut: (initialUrl?: string): void => {
     ipcRenderer.send("tabs:create-shortcut", initialUrl);
