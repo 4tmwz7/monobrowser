@@ -1,6 +1,11 @@
 # MonoBrowser
 
-MonoBrowser is a small desktop browser for Windows and Linux, built with Electron, TypeScript, and esbuild. The current development version is 0.3.3; the latest published release remains [v0.3.2](https://github.com/4tmwz7/monobrowser/releases/tag/v0.3.2).
+MonoBrowser is a small desktop browser for Windows and Linux, built with Electron, TypeScript, and esbuild. The latest stable release is [v0.3.3](https://github.com/4tmwz7/monobrowser/releases/tag/v0.3.3).
+
+## Download
+
+- [Windows x64 installer](https://github.com/4tmwz7/monobrowser/releases/download/v0.3.3/MonoBrowser-Setup-0.3.3.exe)
+- [Linux x64 AppImage](https://github.com/4tmwz7/monobrowser/releases/download/v0.3.3/MonoBrowser-0.3.3-x86_64.AppImage)
 
 ## Features
 
@@ -12,7 +17,7 @@ MonoBrowser is a small desktop browser for Windows and Linux, built with Electro
 - Three-dot navigation menu with History, Downloads, Site data, and language selection
 - Polish and English application interface, with the selected language saved between launches
 - History window with clickable entries and history clearing
-- Persistent download history with live progress, cancellation, opening completed files, and showing them in the folder
+- Native download location picker, persistent history, bottom-right live progress, cancellation, opening completed files, and showing them in the folder
 - Per-site data panel for cookies, Local Storage, IndexedDB, cache, and Service Workers
 - Global browsing-data controls that do not delete downloaded files or download history
 - Links opened with `window.open` or `target="_blank"` open in a new tab
