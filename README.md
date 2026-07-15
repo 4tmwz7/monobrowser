@@ -1,15 +1,21 @@
 # MonoBrowser
 
-MonoBrowser is a small desktop browser for Windows and Linux, built with Electron, TypeScript, and esbuild.
+MonoBrowser is a small desktop browser for Windows and Linux, built with Electron, TypeScript, and esbuild. The current release is [v0.3.2](https://github.com/4tmwz7/monobrowser/releases/tag/v0.3.2).
 
 ## Features
 
 - Multiple tabs with tab switching and closing
 - Back, forward, reload, and address bar navigation
 - Search terms in the address bar open Google search
-- History window with clickable entries
+- Three-dot navigation menu with History, Downloads, Site data, and language selection
+- Polish and English application interface, with the selected language saved between launches
+- History window with clickable entries and history clearing
+- Persistent download history with live progress, cancellation, opening completed files, and showing them in the folder
+- Per-site data panel for cookies, Local Storage, IndexedDB, cache, and Service Workers
+- Global browsing-data controls that do not delete downloaded files or download history
 - Links opened with `window.open` or `target="_blank"` open in a new tab
-- Custom tab strip with loading state and favicon handling
+- Batched tab-state updates and frame-scheduled UI rendering to reduce unnecessary work
+- No permanently preloaded Google tab, reducing idle RAM use
 - Auto-updates from GitHub Releases
 - Generated monochrome app icon during build
 
@@ -39,14 +45,14 @@ Packaged files are written to `release/`.
 
 ## Releases
 
-Stable releases are built by GitHub Actions. Update the version in `package.json`, commit the change, and push a matching tag:
+Update the version in `package.json`, commit the change, and push a matching tag:
 
 ```bash
-git tag v0.4.0
-git push origin v0.4.0
+git tag v<version>
+git push origin v<version>
 ```
 
-The tag must exactly match `v<package.json version>`. The workflow builds Windows on a Windows runner and Linux on an Ubuntu runner, then publishes both packages in one GitHub Release.
+The tag must exactly match `v<package.json version>`. The repository includes a GitHub Actions workflow for Windows and Linux release builds. Packages can also be built locally with `npm run dist:win` and `npm run dist:linux`.
 
 ## Auto-update
 
@@ -59,7 +65,6 @@ The release must include:
 - `MonoBrowser-Setup-<version>.exe.blockmap`
 - `latest-linux.yml`
 - `MonoBrowser-<version>-x86_64.AppImage`
-- `MonoBrowser-<version>-x86_64.AppImage.blockmap`
 
 Linux auto-update requires running the AppImage from a location writable by the current user.
 
@@ -74,9 +79,9 @@ chmod +x MonoBrowser-<version>-x86_64.AppImage
 
 ## Project structure
 
-- `src/main/main.ts` - Electron main process, tabs, navigation, history, release helpers
-- `src/main/preload.ts` - IPC bridge
-- `src/renderer/app.ts` - tab strip and browser chrome UI
+- `src/main/main.ts` - Electron main process, tabs, navigation, downloads, site data, and language settings
+- `src/main/preload.ts` - narrow IPC bridge for browser and internal windows
+- `src/renderer/app.ts` - tab strip, browser chrome, and native-menu anchor
 - `src/renderer/index.html` - renderer shell and styles
 
 ## Notes
