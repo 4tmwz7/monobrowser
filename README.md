@@ -1,12 +1,14 @@
 # MonoBrowser
 
-MonoBrowser is a small desktop browser for Windows and Linux, built with Electron, TypeScript, and esbuild. The current release is [v0.3.2](https://github.com/4tmwz7/monobrowser/releases/tag/v0.3.2).
+MonoBrowser is a small desktop browser for Windows and Linux, built with Electron, TypeScript, and esbuild. The current development version is 0.3.3; the latest published release remains [v0.3.2](https://github.com/4tmwz7/monobrowser/releases/tag/v0.3.2).
 
 ## Features
 
 - Multiple tabs with tab switching and closing
 - Back, forward, reload, and address bar navigation
-- Search terms in the address bar open Google search
+- Branded start page with an integrated web search field
+- Configurable default search engine: Google, DuckDuckGo, or a custom HTTP(S) search URL
+- Bundled uBlock Origin network filtering with its standard filter lists
 - Three-dot navigation menu with History, Downloads, Site data, and language selection
 - Polish and English application interface, with the selected language saved between launches
 - History window with clickable entries and history clearing
@@ -88,7 +90,8 @@ chmod +x MonoBrowser-<version>-x86_64.AppImage
 
 - The native menu bar is hidden by default.
 - The app uses a sandboxed renderer with `contextIsolation` enabled and `nodeIntegration` disabled.
-- The default start page is Google.
+- New tabs open the local MonoBrowser start page; Google is the default search engine.
+- The bundled uBlock Origin files retain their upstream GPLv3 license in `vendor/ublock-origin/LICENSE.txt`.
 
 ## License
 

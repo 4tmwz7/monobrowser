@@ -39,6 +39,10 @@ type SiteDataType = "cookies" | "localStorage" | "indexedDB" | "cache" | "servic
 type SiteDataEntry = { origin: string; lastSeenAt: string | null; cookieCount: number };
 type ClearResult = { ok: boolean; message: string };
 type AppLanguage = "pl" | "en";
+type SearchEngine = "google" | "duckduckgo" | "custom";
+type SearchSettings = { engine: SearchEngine; customUrl: string };
+type SearchSettingsResult = { ok: boolean; message: string; settings: SearchSettings };
+type UBlockStatus = { loaded: boolean; name: string; version: string; error: string | null };
 
 const browserApi = {
   createTab: (initialUrl?: string): Promise<number> =>
@@ -74,6 +78,11 @@ const browserApi = {
   clearGlobalHistory: (): Promise<ClearResult> => ipcRenderer.invoke("site-data:clear-history"),
   getLanguage: (): Promise<AppLanguage> => ipcRenderer.invoke("language:get"),
   setLanguage: (language: AppLanguage): Promise<boolean> => ipcRenderer.invoke("language:set", language),
+  getSearchSettings: (): Promise<SearchSettings> => ipcRenderer.invoke("settings:get-search"),
+  setSearchSettings: (settings: SearchSettings): Promise<SearchSettingsResult> =>
+    ipcRenderer.invoke("settings:set-search", settings),
+  openSettingsWindow: (): Promise<boolean> => ipcRenderer.invoke("settings:open-window"),
+  getUBlockStatus: (): Promise<UBlockStatus> => ipcRenderer.invoke("ublock:get-status"),
   openNavigationMenu: (anchor: { x: number; y: number }): Promise<boolean> =>
     ipcRenderer.invoke("navigation-menu:open", anchor),
   setViewportTop: (top: number): Promise<boolean> =>

@@ -1,5 +1,5 @@
 import { app, BrowserView, BrowserWindow, dialog, ipcMain, session, Menu, shell, MenuItemConstructorOptions } from "electron";
-import type { DownloadItem, WebContents } from "electron";
+import type { DownloadItem, Extension, WebContents } from "electron";
 import fsSync from "node:fs";
 import fs from "node:fs/promises";
 import path from "node:path";
@@ -77,7 +77,32 @@ type ClearResult = {
 
 type AppLanguage = "pl" | "en";
 
-const DEFAULT_URL = "https://www.google.com";
+type SearchEngine = "google" | "duckduckgo" | "custom";
+
+type SearchSettings = {
+  engine: SearchEngine;
+  customUrl: string;
+};
+
+type UBlockStatus = {
+  loaded: boolean;
+  name: string;
+  version: string;
+  error: string | null;
+};
+
+type SearchSettingsResult = {
+  ok: boolean;
+  message: string;
+  settings: SearchSettings;
+};
+
+const START_PAGE_URL = "monobrowser://new-tab";
+const DEFAULT_URL = START_PAGE_URL;
+const DEFAULT_SEARCH_SETTINGS: SearchSettings = {
+  engine: "google",
+  customUrl: "https://example.com/search?q={query}",
+};
 const MAX_HISTORY_ITEMS = 500;
 const MAX_DOWNLOAD_ITEMS = 500;
 const ALLOWED_SITE_DATA_TYPES = new Set<SiteDataType>([
@@ -95,11 +120,15 @@ const SPLASH_ONLY_MODE =
 let mainWindow: BrowserWindow | null = null;
 let historyWindow: BrowserWindow | null = null;
 let downloadsWindow: BrowserWindow | null = null;
+let downloadProgressView: BrowserView | null = null;
+let downloadProgressVisible = false;
 let siteDataWindow: BrowserWindow | null = null;
+let settingsWindow: BrowserWindow | null = null;
 let historyFilePath = "";
 let downloadsFilePath = "";
 let siteOriginsFilePath = "";
 let languageFilePath = "";
+let searchSettingsFilePath = "";
 let viewportTop = 170;
 let nextTabId = 1;
 let activeTabId: number | null = null;
@@ -107,20 +136,24 @@ let historyEntries: HistoryEntry[] = [];
 let downloadRecords: DownloadRecord[] = [];
 let siteOriginRecords: SiteOriginRecord[] = [];
 let appLanguage: AppLanguage = "pl";
+let searchSettings: SearchSettings = { ...DEFAULT_SEARCH_SETTINGS };
+let ublockExtension: Extension | null = null;
+let ublockLoadError: string | null = null;
+let bebasNeueFontDataUrl: string | null = null;
 let splashWindow: BrowserWindow | null = null;
 
 const tabs = new Map<number, TabRecord>();
 const activeDownloads = new Map<string, DownloadItem>();
-const reservedDownloadPaths = new Set<string>();
 const jsonWriteQueues = new Map<string, Promise<void>>();
 const tabMruOrder: number[] = [];
+const startPageDataUrls = new Set<string>();
 let tabsBroadcastScheduled = false;
 
 let updateCheckInProgress = false;
-let startPageBackgroundColor = "#ffffff";
+let startPageBackgroundColor = "#101114";
 let startPageBackgroundFilePath = "";
 
-const START_PAGE_BACKGROUND_FILE = "start-page-background.json";
+const START_PAGE_BACKGROUND_FILE = "start-page-background-v2.json";
 
 const START_PAGE_BG_PROBE_SCRIPT = String.raw`(() => {
   const parseColor = (value) => {
@@ -262,31 +295,11 @@ const normalizeHexColor = (value: unknown): string | null => {
 };
 
 const getSafeStartPageBackgroundColor = (value: unknown): string => {
-  return normalizeHexColor(value) ?? "#ffffff";
+  return normalizeHexColor(value) ?? "#101114";
 };
 
 const isDefaultStartPageUrl = (value: string): boolean => {
-  try {
-    const parsed = new URL(value);
-    const host = parsed.hostname.toLowerCase();
-    const isGoogleHost =
-      host === "google.com" ||
-      host === "www.google.com" ||
-      /^([a-z0-9-]+\.)?google\.[a-z.]+$/.test(host);
-
-    if (!isGoogleHost) {
-      return false;
-    }
-
-    const pathname = parsed.pathname.toLowerCase();
-    if (pathname !== "/" && pathname !== "/webhp") {
-      return false;
-    }
-
-    return !parsed.searchParams.has("q");
-  } catch {
-    return false;
-  }
+  return value === START_PAGE_URL;
 };
 
 const loadStartPageBackgroundColor = async (): Promise<void> => {
@@ -705,11 +718,154 @@ const runBackgroundProbeIfStartPage = (contents: WebContents): void => {
   }
 };
 
+const getSearchTemplate = (): string => {
+  if (searchSettings.engine === "duckduckgo") {
+    return "https://duckduckgo.com/?q={query}";
+  }
+
+  if (searchSettings.engine === "custom") {
+    return searchSettings.customUrl;
+  }
+
+  return "https://www.google.com/search?q={query}";
+};
+
+const buildSearchUrl = (query: string): string =>
+  getSearchTemplate().replaceAll("{query}", encodeURIComponent(query));
+
+const getBebasNeueFontDataUrl = (): string => {
+  if (bebasNeueFontDataUrl) {
+    return bebasNeueFontDataUrl;
+  }
+
+  const candidates = [
+    path.join(app.getAppPath(), "assets", "fonts", "BebasNeue-Regular.ttf"),
+    path.join(process.resourcesPath, "assets", "fonts", "BebasNeue-Regular.ttf"),
+    path.join(__dirname, "..", "..", "assets", "fonts", "BebasNeue-Regular.ttf"),
+  ];
+  for (const candidate of candidates) {
+    try {
+      const encoded = fsSync.readFileSync(candidate).toString("base64");
+      bebasNeueFontDataUrl = `data:font/ttf;base64,${encoded}`;
+      return bebasNeueFontDataUrl;
+    } catch {
+      continue;
+    }
+  }
+
+  return "";
+};
+
+const renderStartPageHtml = (): string => {
+  const copy = appLanguage === "pl" ? {
+    title: "Nowa karta",
+    heading: "Dokąd teraz?",
+    placeholder: "Wyszukaj w internecie",
+    search: "Szukaj",
+  } : {
+    title: "New tab",
+    heading: "Where to next?",
+    placeholder: "Search the web",
+    search: "Search",
+  };
+  const searchTemplateJson = JSON.stringify(getSearchTemplate()).replace(/</g, "\\u003c");
+  const bebasNeueFontUrl = getBebasNeueFontDataUrl();
+
+  return `<!doctype html>
+<html lang="${appLanguage}">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width,initial-scale=1">
+  <meta name="theme-color" content="#0a0a0a">
+  <meta http-equiv="Content-Security-Policy" content="default-src 'none'; style-src 'unsafe-inline'; script-src 'unsafe-inline'; img-src data:; font-src data:">
+  <title>${copy.title}</title>
+  <style>
+    @font-face { font-family:"Bebas Neue"; src:url("${bebasNeueFontUrl}") format("truetype"); font-style:normal; font-weight:400; font-display:block; }
+    :root { color-scheme: light; --black:#0a0a0a; --white:#f0efe9; --accent:#9c9b95; --grey:#5c5b57; font-family: ui-monospace, "Cascadia Mono", "Courier New", monospace; }
+    * { box-sizing: border-box; }
+    body { min-height:100vh; margin:0; overflow:hidden; background:var(--white); color:var(--black); cursor:crosshair; }
+    body::after { content:""; position:fixed; inset:0; z-index:5; pointer-events:none; opacity:.035; background:url("data:image/svg+xml,%3Csvg viewBox='0 0 180 180' xmlns='http://www.w3.org/2000/svg'%3E%3Cfilter id='n'%3E%3CfeTurbulence type='fractalNoise' baseFrequency='.95' numOctaves='3' stitchTiles='stitch'/%3E%3C/filter%3E%3Crect width='100%25' height='100%25' filter='url(%23n)'/%3E%3C/svg%3E"); }
+    main { min-height:100vh; display:grid; grid-template-columns:minmax(330px,.82fr) minmax(520px,1.18fr); }
+    .brand-panel { position:relative; padding:clamp(38px,5vw,76px); border-right:3px solid var(--black); display:flex; flex-direction:column; justify-content:center; overflow:hidden; }
+    .brand-panel::after { content:"0.3.3"; position:absolute; right:16px; bottom:18px; color:var(--grey); font-size:10px; letter-spacing:.28em; writing-mode:vertical-rl; }
+    .brand { margin:0; font-family:"Bebas Neue", Impact, sans-serif; font-size:clamp(72px,10vw,160px); font-weight:400; line-height:.85; letter-spacing:-2px; text-transform:uppercase; }
+    .brand .outline { color:transparent; -webkit-text-stroke:2px var(--black); }
+    .brand .accent { color:var(--accent); display:inline-block; animation:glitch 4s infinite; }
+    .search-panel { position:relative; padding:clamp(42px,6vw,84px); display:flex; flex-direction:column; justify-content:center; background:var(--black); color:var(--white); }
+    h1 { max-width:640px; margin:0 0 34px; font-family:"Bebas Neue",Impact,sans-serif; font-size:clamp(54px,7vw,96px); font-weight:400; line-height:.9; letter-spacing:1px; text-transform:uppercase; }
+    form { display:grid; grid-template-columns:minmax(0,1fr) auto; border:2px solid var(--white); background:var(--black); transition:transform .15s, box-shadow .15s; }
+    form:focus-within { transform:translate(-4px,-4px); box-shadow:6px 6px 0 var(--accent); }
+    input { min-width:0; height:62px; padding:0 18px; border:0; outline:0; background:transparent; color:var(--white); font:14px ui-monospace,"Cascadia Mono","Courier New",monospace; }
+    input::placeholder { color:#777671; }
+    button { min-width:132px; height:62px; padding:0 22px; border:0; border-left:2px solid var(--white); background:var(--white); color:var(--black); font:700 10px ui-monospace,"Cascadia Mono","Courier New",monospace; letter-spacing:.22em; text-transform:uppercase; cursor:pointer; }
+    button:hover { background:var(--accent); }
+    @keyframes glitch { 0%,94%,100%{transform:none} 95%{transform:translate(-3px,1px)} 97%{transform:translate(3px,-1px)} 99%{transform:translate(-1px,-1px)} }
+    @media(max-width:900px) { body{overflow:auto} main{grid-template-columns:1fr} .brand-panel{min-height:38vh;border-right:0;border-bottom:3px solid var(--black)} .brand{font-size:clamp(72px,17vw,120px)} .search-panel{min-height:62vh} }
+    @media(max-width:620px) { .search-panel,.brand-panel{padding:30px 22px} form{grid-template-columns:1fr} button{width:100%;border-left:0;border-top:2px solid var(--white)} }
+  </style>
+</head>
+<body>
+  <main>
+    <section class="brand-panel">
+      <div class="brand"><span class="outline">MONO</span><br><span class="accent">BROW</span><br>SER</div>
+    </section>
+    <section class="search-panel">
+      <h1>${copy.heading}</h1>
+      <form id="search-form">
+        <input id="query" type="text" inputmode="url" placeholder="${copy.placeholder}" autocomplete="off" autofocus aria-label="${copy.placeholder}">
+        <button type="submit">${copy.search}</button>
+      </form>
+    </section>
+  </main>
+  <script>
+    (() => {
+      const template = ${searchTemplateJson};
+      const form = document.getElementById('search-form');
+      const input = document.getElementById('query');
+      const destinationFor = value => {
+        if (/^https?:\\/\\//i.test(value)) return value;
+        const host = value.split('/')[0];
+        const looksLikeHost = /^localhost(?::\\d+)?$/i.test(host) ||
+          /^(?:\\d{1,3}\\.){3}\\d{1,3}(?::\\d+)?$/.test(host) ||
+          /^(?:[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?\\.)+[a-z]{2,63}(?::\\d+)?$/i.test(host);
+        return looksLikeHost && !/\\s/.test(value)
+          ? 'https://' + value
+          : template.replaceAll('{query}', encodeURIComponent(value));
+      };
+      form.addEventListener('submit', event => {
+        event.preventDefault();
+        const query = input.value.trim();
+        if (!query) return;
+        location.assign(destinationFor(query));
+      });
+    })();
+  </script>
+</body>
+</html>`;
+};
+
+const getStartPageDataUrl = (): string => {
+  const url = `data:text/html;charset=utf-8,${encodeURIComponent(renderStartPageHtml())}`;
+  startPageDataUrls.add(url);
+  if (startPageDataUrls.size > 12) {
+    const oldest = startPageDataUrls.values().next().value as string | undefined;
+    if (oldest) startPageDataUrls.delete(oldest);
+  }
+  return url;
+};
+
+const resolveUrlForLoading = (url: string): string =>
+  isDefaultStartPageUrl(url) ? getStartPageDataUrl() : url;
+
 const normalizeInputToUrl = (input: string): string => {
   const trimmed = input.trim();
 
   if (!trimmed) {
     return DEFAULT_URL;
+  }
+
+  if (trimmed === START_PAGE_URL) {
+    return START_PAGE_URL;
   }
 
   if (/^about:blank(?:[?#].*)?$/i.test(trimmed)) {
@@ -721,13 +877,17 @@ const normalizeInputToUrl = (input: string): string => {
     return trimmed;
   }
 
-  const looksLikeHost =
-    /^localhost(:\d+)?(\/.*)?$/i.test(trimmed) || /\./.test(trimmed);
+  const host = trimmed.split("/")[0];
+  const looksLikeHost = !/\s/.test(trimmed) && (
+    /^localhost(?::\d+)?$/i.test(host) ||
+    /^(?:\d{1,3}\.){3}\d{1,3}(?::\d+)?$/.test(host) ||
+    /^(?:[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?\.)+[a-z]{2,63}(?::\d+)?$/i.test(host)
+  );
   if (looksLikeHost) {
     return `https://${trimmed}`;
   }
 
-  return `https://www.google.com/search?q=${encodeURIComponent(trimmed)}`;
+  return buildSearchUrl(trimmed);
 };
 
 const openUrlInNewTab = (url: string): void => {
@@ -900,6 +1060,130 @@ const saveLanguage = async (): Promise<void> => {
   await writeJsonAtomically(languageFilePath, { language: appLanguage });
 };
 
+const normalizeSearchSettings = (value: unknown): SearchSettings | null => {
+  if (typeof value !== "object" || value === null) {
+    return null;
+  }
+
+  const raw = value as { engine?: unknown; customUrl?: unknown };
+  if (raw.engine !== "google" && raw.engine !== "duckduckgo" && raw.engine !== "custom") {
+    return null;
+  }
+
+  const customUrl = typeof raw.customUrl === "string"
+    ? raw.customUrl.trim()
+    : DEFAULT_SEARCH_SETTINGS.customUrl;
+
+  if (customUrl.length > 2048) {
+    return null;
+  }
+
+  if (raw.engine === "custom") {
+    if (!customUrl.includes("{query}")) {
+      return null;
+    }
+    try {
+      const parsed = new URL(customUrl.replaceAll("{query}", "test"));
+      if (parsed.protocol !== "https:" && parsed.protocol !== "http:") {
+        return null;
+      }
+    } catch {
+      return null;
+    }
+  }
+
+  return { engine: raw.engine, customUrl };
+};
+
+const loadSearchSettings = async (): Promise<void> => {
+  try {
+    const raw = await fs.readFile(searchSettingsFilePath, "utf8");
+    searchSettings = normalizeSearchSettings(JSON.parse(raw)) ?? { ...DEFAULT_SEARCH_SETTINGS };
+  } catch {
+    searchSettings = { ...DEFAULT_SEARCH_SETTINGS };
+  }
+};
+
+const saveSearchSettings = async (): Promise<void> => {
+  await writeJsonAtomically(searchSettingsFilePath, searchSettings);
+};
+
+const refreshStartPages = async (): Promise<void> => {
+  const reloads: Promise<void>[] = [];
+  for (const tab of tabs.values()) {
+    if (tab.url !== START_PAGE_URL || tab.view.webContents.isDestroyed()) {
+      continue;
+    }
+    reloads.push(tab.view.webContents.loadURL(getStartPageDataUrl()).then(() => undefined));
+  }
+  await Promise.all(reloads);
+};
+
+const setSearchSettings = async (value: unknown): Promise<SearchSettingsResult> => {
+  const normalized = normalizeSearchSettings(value);
+  if (!normalized) {
+    return {
+      ok: false,
+      message: appLanguage === "pl"
+        ? "Podaj poprawny adres HTTP(S) zawierający znacznik {query}."
+        : "Enter a valid HTTP(S) URL containing the {query} placeholder.",
+      settings: { ...searchSettings },
+    };
+  }
+
+  searchSettings = normalized;
+  await saveSearchSettings();
+  await refreshStartPages();
+  return {
+    ok: true,
+    message: appLanguage === "pl" ? "Ustawienia zapisane." : "Settings saved.",
+    settings: { ...searchSettings },
+  };
+};
+
+const getBundledUBlockPath = (): string | null => {
+  const candidates = [
+    path.join(process.resourcesPath, "extensions", "ublock-origin"),
+    path.join(app.getAppPath(), "vendor", "ublock-origin"),
+    path.join(__dirname, "..", "..", "vendor", "ublock-origin"),
+  ];
+
+  for (const candidate of candidates) {
+    if (fsSync.existsSync(path.join(candidate, "manifest.json"))) {
+      return candidate;
+    }
+  }
+
+  return null;
+};
+
+const loadBundledUBlock = async (): Promise<void> => {
+  const extensionPath = getBundledUBlockPath();
+  if (!extensionPath) {
+    ublockLoadError = appLanguage === "pl"
+      ? "Nie znaleziono plików rozszerzenia."
+      : "Extension files were not found.";
+    return;
+  }
+
+  try {
+    ublockExtension = await session.defaultSession.extensions.loadExtension(extensionPath);
+    ublockLoadError = null;
+    console.info(`Loaded ${ublockExtension.name} ${ublockExtension.version}`);
+  } catch (error) {
+    ublockExtension = null;
+    ublockLoadError = error instanceof Error ? error.message : String(error);
+    console.error("Failed to load uBlock Origin:", error);
+  }
+};
+
+const getUBlockStatus = (): UBlockStatus => ({
+  loaded: ublockExtension !== null,
+  name: ublockExtension?.name ?? "uBlock Origin",
+  version: ublockExtension?.version ?? "1.72.2",
+  error: ublockLoadError,
+});
+
 const localeForLanguage = (): string => appLanguage === "pl" ? "pl-PL" : "en-US";
 
 const saveDownloads = async (): Promise<void> => {
@@ -911,10 +1195,106 @@ const getDownloadStatePayload = (): DownloadStatePayload => ({
   downloads: downloadRecords.map((record) => ({ ...record })),
 });
 
+let downloadProgressHideTimer: NodeJS.Timeout | null = null;
+
+const positionDownloadProgressView = (): void => {
+  if (!mainWindow || mainWindow.isDestroyed() || !downloadProgressView || downloadProgressView.webContents.isDestroyed()) {
+    return;
+  }
+
+  const [contentWidth, contentHeight] = mainWindow.getContentSize();
+  const width = 340;
+  const height = 92;
+  const margin = 16;
+  downloadProgressView.setBounds({
+    x: Math.max(0, contentWidth - width - margin),
+    y: Math.max(viewportTop, contentHeight - height - margin),
+    width,
+    height,
+  });
+};
+
+const attachDownloadProgressView = (): void => {
+  if (!mainWindow || mainWindow.isDestroyed() || !downloadProgressView || downloadProgressView.webContents.isDestroyed()) {
+    return;
+  }
+  if (!mainWindow.getBrowserViews().includes(downloadProgressView)) {
+    mainWindow.addBrowserView(downloadProgressView);
+  }
+  mainWindow.setTopBrowserView(downloadProgressView);
+  positionDownloadProgressView();
+  downloadProgressVisible = true;
+};
+
+const hideDownloadProgressView = (): void => {
+  if (mainWindow && !mainWindow.isDestroyed() && downloadProgressView && mainWindow.getBrowserViews().includes(downloadProgressView)) {
+    mainWindow.removeBrowserView(downloadProgressView);
+  }
+  downloadProgressVisible = false;
+};
+
+const createDownloadProgressView = async (): Promise<BrowserView | null> => {
+  if (!mainWindow || mainWindow.isDestroyed()) {
+    return null;
+  }
+  if (downloadProgressView && !downloadProgressView.webContents.isDestroyed()) {
+    return downloadProgressView;
+  }
+
+  downloadProgressView = new BrowserView({
+    webPreferences: {
+      preload: path.join(__dirname, "download-progress-preload.js"),
+      contextIsolation: true,
+      nodeIntegration: false,
+      sandbox: true,
+    },
+  });
+  downloadProgressView.setBackgroundColor("#00000000");
+  downloadProgressView.webContents.on("destroyed", () => {
+    downloadProgressView = null;
+    downloadProgressVisible = false;
+  });
+  await downloadProgressView.webContents.loadFile(path.join(__dirname, "../renderer/download-progress.html"));
+  positionDownloadProgressView();
+  return downloadProgressView;
+};
+
+const broadcastDownloadProgress = (): void => {
+  const active = downloadRecords.filter((record) => record.status === "in-progress");
+  if (!active.length && (!downloadProgressView || downloadProgressView.webContents.isDestroyed())) {
+    return;
+  }
+
+  void createDownloadProgressView().then((view) => {
+    if (!view || view.webContents.isDestroyed()) {
+      return;
+    }
+    const visibleRecords = active.length ? active : downloadRecords.slice(0, 1);
+    view.webContents.send("download-progress:updated", {
+      downloads: visibleRecords.map((record) => ({ ...record })),
+      language: appLanguage,
+    });
+
+    if (downloadProgressHideTimer) {
+      clearTimeout(downloadProgressHideTimer);
+      downloadProgressHideTimer = null;
+    }
+    if (active.length) {
+      attachDownloadProgressView();
+      return;
+    }
+    downloadProgressHideTimer = setTimeout(() => {
+      hideDownloadProgressView();
+      downloadProgressHideTimer = null;
+    }, 3_000);
+  }).catch((error) => console.error("Failed to show download progress:", error));
+};
+
 const broadcastDownloads = (): void => {
   if (downloadsWindow && !downloadsWindow.isDestroyed()) {
     downloadsWindow.webContents.send("downloads:updated", getDownloadStatePayload());
   }
+  broadcastDownloadProgress();
 };
 
 const loadDownloads = async (): Promise<void> => {
@@ -946,21 +1326,9 @@ const loadDownloads = async (): Promise<void> => {
   }
 };
 
-const getAvailableDownloadPath = (suggestedName: string): string => {
+const getSafeDownloadFileName = (suggestedName: string): string => {
   const rawName = path.basename(suggestedName.trim() || "download");
-  const safeName = rawName.replace(/[\u0000-\u001f<>:"/\\|?*]/g, "_") || "download";
-  const extension = path.extname(safeName);
-  const stem = path.basename(safeName, extension) || "download";
-  const downloadsDirectory = app.getPath("downloads");
-
-  for (let suffix = 0; ; suffix += 1) {
-    const fileName = suffix === 0 ? `${stem}${extension}` : `${stem} (${suffix})${extension}`;
-    const candidate = path.join(downloadsDirectory, fileName);
-    if (!fsSync.existsSync(candidate) && !reservedDownloadPaths.has(candidate)) {
-      reservedDownloadPaths.add(candidate);
-      return candidate;
-    }
-  }
+  return rawName.replace(/[\u0000-\u001f<>:"/\\|?*]/g, "_") || "download";
 };
 
 const registerDownloadHandling = (): void => {
@@ -969,13 +1337,17 @@ const registerDownloadHandling = (): void => {
     let savePath = "";
 
     try {
-      savePath = getAvailableDownloadPath(item.getFilename() || "download");
-      item.setSavePath(savePath);
+      const fileName = getSafeDownloadFileName(item.getFilename() || "download");
+      item.setSaveDialogOptions({
+        title: appLanguage === "pl" ? "Zapisz pobierany plik" : "Save download",
+        buttonLabel: appLanguage === "pl" ? "Zapisz" : "Save",
+        defaultPath: path.join(app.getPath("downloads"), fileName),
+      });
 
       const sourceUrl = item.getURL();
       const record: DownloadRecord = {
         id,
-        fileName: path.basename(savePath),
+        fileName,
         sourceUrl,
         sourceOrigin: normalizeHttpOrigin(sourceUrl) ?? "Nieznane źródło",
         savePath,
@@ -992,6 +1364,11 @@ const registerDownloadHandling = (): void => {
       broadcastDownloads();
 
       item.on("updated", (_updatedEvent, state) => {
+        savePath = item.getSavePath();
+        if (savePath) {
+          record.savePath = savePath;
+          record.fileName = path.basename(savePath);
+        }
         record.receivedBytes = item.getReceivedBytes();
         record.totalBytes = item.getTotalBytes();
         if (state === "interrupted") {
@@ -1003,6 +1380,11 @@ const registerDownloadHandling = (): void => {
       });
 
       item.once("done", (_doneEvent, state) => {
+        savePath = item.getSavePath();
+        if (savePath) {
+          record.savePath = savePath;
+          record.fileName = path.basename(savePath);
+        }
         record.receivedBytes = item.getReceivedBytes();
         record.totalBytes = item.getTotalBytes();
         record.finishedAt = new Date().toISOString();
@@ -1015,14 +1397,10 @@ const registerDownloadHandling = (): void => {
           delete record.error;
         }
         activeDownloads.delete(id);
-        reservedDownloadPaths.delete(savePath);
         void saveDownloads().catch((error) => console.error("Failed to save downloads:", error));
         broadcastDownloads();
       });
     } catch (error) {
-      if (savePath) {
-        reservedDownloadPaths.delete(savePath);
-      }
       item.cancel();
       const message = error instanceof Error ? error.message : "Nieznany błąd pobierania.";
       const failedRecord: DownloadRecord = {
@@ -1214,8 +1592,12 @@ const renderHistoryWindowHtml = (entries: HistoryEntry[]): string => {
     <title>${copy.documentTitle}</title>
     <style>
       :root {
-        color-scheme: dark;
-        font-family: "Segoe UI", system-ui, sans-serif;
+        color-scheme: light;
+        --black: #0a0a0a;
+        --white: #f0efe9;
+        --accent: #9c9b95;
+        --grey: #5c5b57;
+        font-family: ui-monospace, "Cascadia Mono", "Courier New", monospace;
       }
 
       html,
@@ -1226,16 +1608,27 @@ const renderHistoryWindowHtml = (entries: HistoryEntry[]): string => {
 
       body {
         margin: 0;
-        background: #1e1f22;
-        color: #dde1e6;
+        background: var(--white);
+        color: var(--black);
         display: flex;
         flex-direction: column;
         overflow: hidden;
       }
 
+      body::after {
+        content: "";
+        position: fixed;
+        inset: 0;
+        pointer-events: none;
+        opacity: .03;
+        background: url("data:image/svg+xml,%3Csvg viewBox='0 0 180 180' xmlns='http://www.w3.org/2000/svg'%3E%3Cfilter id='n'%3E%3CfeTurbulence type='fractalNoise' baseFrequency='.95' numOctaves='3' stitchTiles='stitch'/%3E%3C/filter%3E%3Crect width='100%25' height='100%25' filter='url(%23n)'/%3E%3C/svg%3E");
+      }
+
       header {
-        padding: 14px 16px;
-        border-bottom: 1px solid #3c3f41;
+        padding: 15px 18px;
+        border-bottom: 3px solid var(--black);
+        background: var(--black);
+        color: var(--white);
         font-size: 14px;
         font-weight: 600;
         display: flex;
@@ -1246,24 +1639,30 @@ const renderHistoryWindowHtml = (entries: HistoryEntry[]): string => {
       }
 
       header > span {
-        color: #dde1e6;
-        font-size: 14px;
+        color: var(--white);
+        font-size: 13px;
+        font-weight: 700;
+        letter-spacing: .12em;
+        text-transform: uppercase;
       }
 
       .clear-history {
-        border: 1px solid #4a4d50;
-        background: #2b2d30;
-        color: #dde1e6;
-        border-radius: 8px;
-        padding: 6px 10px;
-        font-size: 12px;
+        border: 2px solid var(--white);
+        background: var(--white);
+        color: var(--black);
+        border-radius: 0;
+        padding: 8px 11px;
+        font-size: 10px;
+        font-weight: 700;
+        letter-spacing: .08em;
+        text-transform: uppercase;
         font-family: inherit;
         cursor: pointer;
         transition: background 0.12s;
       }
 
       .clear-history:hover:not(:disabled) {
-        background: #3a3d40;
+        background: var(--accent);
       }
 
       .clear-history:disabled {
@@ -1272,16 +1671,16 @@ const renderHistoryWindowHtml = (entries: HistoryEntry[]): string => {
       }
 
       main {
-        padding: 8px;
+        padding: 14px;
         flex: 1 1 auto;
         min-height: 0;
         display: flex;
       }
 
       .panel {
-        background: #25272a;
-        border: 1px solid #3c3f41;
-        border-radius: 10px;
+        background: var(--white);
+        border: 3px solid var(--black);
+        border-radius: 0;
         flex: 1 1 auto;
         min-width: 0;
         min-height: 0;
@@ -1306,16 +1705,16 @@ const renderHistoryWindowHtml = (entries: HistoryEntry[]): string => {
       li {
         display: grid;
         gap: 2px;
-        padding: 10px;
-        border-radius: 8px;
+        padding: 12px;
+        border-bottom: 1px solid var(--black);
       }
 
       li:hover {
-        background: #2b2d30;
+        background: #d7d6d0;
       }
 
       a {
-        color: #6ab4ff;
+        color: var(--black);
         text-decoration: none;
         overflow: hidden;
         text-overflow: ellipsis;
@@ -1327,13 +1726,13 @@ const renderHistoryWindowHtml = (entries: HistoryEntry[]): string => {
       }
 
       span {
-        color: #8c9198;
+        color: var(--grey);
         font-size: 12px;
       }
 
       .empty {
         padding: 16px;
-        color: #8c9198;
+        color: var(--grey);
         flex: 1 1 auto;
       }
 
@@ -1417,20 +1816,23 @@ const handleHistoryWindowNavigation = async (url: string): Promise<void> => {
 };
 
 const INTERNAL_WINDOW_STYLES = `
-  :root { color-scheme: dark; font-family: "Segoe UI", system-ui, sans-serif; }
+  :root { color-scheme:light; --black:#0a0a0a; --white:#f0efe9; --accent:#9c9b95; --grey:#5c5b57; font-family:ui-monospace,"Cascadia Mono","Courier New",monospace; }
   * { box-sizing: border-box; }
-  body { margin: 0; background: #1e1f22; color: #dde1e6; }
-  header { position: sticky; top: 0; z-index: 2; display: flex; align-items: center; justify-content: space-between; gap: 12px; padding: 14px 18px; border-bottom: 1px solid #3c3f41; background: #1e1f22; }
-  h1 { margin: 0; font-size: 16px; }
+  body { min-height:100vh; margin:0; background:var(--white); color:var(--black); }
+  body::after { content:""; position:fixed; inset:0; z-index:20; pointer-events:none; opacity:.03; background:url("data:image/svg+xml,%3Csvg viewBox='0 0 180 180' xmlns='http://www.w3.org/2000/svg'%3E%3Cfilter id='n'%3E%3CfeTurbulence type='fractalNoise' baseFrequency='.95' numOctaves='3' stitchTiles='stitch'/%3E%3C/filter%3E%3Crect width='100%25' height='100%25' filter='url(%23n)'/%3E%3C/svg%3E"); }
+  header { position:sticky; top:0; z-index:2; display:flex; align-items:center; justify-content:space-between; gap:12px; padding:15px 18px; border-bottom:3px solid var(--black); background:var(--black); color:var(--white); }
+  h1 { margin:0; font-size:14px; letter-spacing:.12em; text-transform:uppercase; }
   button, input { font: inherit; }
-  button { border: 1px solid #4a4d50; background: #2b2d30; color: #dde1e6; border-radius: 8px; padding: 7px 11px; cursor: pointer; }
-  button:hover:not(:disabled) { background: #3a3d40; }
+  button { border:2px solid var(--black); background:var(--black); color:var(--white); border-radius:0; padding:8px 11px; font-size:10px; font-weight:700; letter-spacing:.06em; text-transform:uppercase; cursor:pointer; }
+  header button { border-color:var(--white); background:var(--white); color:var(--black); }
+  button:hover:not(:disabled) { background:var(--accent); color:var(--black); }
   button:disabled { opacity: .45; cursor: not-allowed; }
-  button.danger { border-color: #724247; color: #ffb7bd; }
+  button.danger { border-color:var(--black); background:var(--white); color:var(--black); }
+  header button.danger { border-color:var(--white); }
   main { padding: 14px 18px; }
-  .empty, .muted { color: #969ca4; }
+  .empty, .muted { color:var(--grey); }
   .empty { padding: 30px 12px; text-align: center; }
-  .status-message { margin: 10px 0; padding: 9px 11px; border: 1px solid #4a4d50; border-radius: 8px; background: #25272a; font-size: 13px; }
+  .status-message { margin:10px 0; padding:10px 12px; border:2px solid var(--black); border-radius:0; background:var(--white); font-size:12px; }
 `;
 
 const renderDownloadsWindowHtml = (): string => {
@@ -1456,20 +1858,20 @@ const renderDownloadsWindowHtml = (): string => {
   const copyJson = JSON.stringify(copy).replace(/</g, "\\u003c");
   return `<!doctype html>
 <html lang="${appLanguage}"><head><meta charset="UTF-8"><meta name="viewport" content="width=device-width,initial-scale=1">
-<meta http-equiv="Content-Security-Policy" content="default-src 'none'; style-src 'unsafe-inline'; script-src 'unsafe-inline'">
+<meta http-equiv="Content-Security-Policy" content="default-src 'none'; style-src 'unsafe-inline'; script-src 'unsafe-inline'; img-src data:">
 <title>${copy.title}</title><style>${INTERNAL_WINDOW_STYLES}
   .downloads { display: grid; gap: 10px; }
-  .download { background: #25272a; border: 1px solid #3c3f41; border-radius: 10px; padding: 12px; display: grid; gap: 8px; }
+  .download { background:var(--white); border:2px solid var(--black); border-radius:0; padding:13px; display:grid; gap:9px; }
   .download-top { display: flex; justify-content: space-between; align-items: start; gap: 12px; }
   .name { font-weight: 600; overflow-wrap: anywhere; }
-  .status { font-size: 12px; border-radius: 999px; padding: 3px 8px; background: #34373b; white-space: nowrap; }
-  .status.completed { color: #9ee6af; } .status.cancelled,.status.interrupted,.status.failed { color: #ffb7bd; }
-  .details { display: grid; gap: 3px; color: #aeb4bc; font-size: 12px; }
+  .status { font-size:10px; border:1px solid var(--black); border-radius:0; padding:4px 7px; background:var(--black); color:var(--white); text-transform:uppercase; white-space:nowrap; }
+  .status.completed { color:#b8e1b9; } .status.cancelled,.status.interrupted,.status.failed { color:#f0b8b8; }
+  .details { display:grid; gap:3px; color:var(--grey); font-size:11px; }
   .path { overflow-wrap: anywhere; }
   .progress-row { display: flex; align-items: center; gap: 10px; font-size: 12px; }
-  progress { flex: 1; height: 10px; accent-color: #4a9eff; }
+  progress { flex:1; height:10px; accent-color:var(--black); }
   .actions { display: flex; flex-wrap: wrap; gap: 7px; }
-  .error { color: #ffb7bd; font-size: 12px; }
+  .error { color:#8b2931; font-size:11px; }
 </style></head><body>
 <header><h1>${copy.heading}</h1><button id="clear" class="danger">${copy.clearHistory}</button></header>
 <main><div id="message" hidden class="status-message"></div><div id="list" class="downloads"></div></main>
@@ -1556,20 +1958,20 @@ const renderSiteDataWindowHtml = (): string => {
 <title>${copy.title}</title><style>${INTERNAL_WINDOW_STYLES}
   header { align-items: stretch; flex-direction: column; }
   .heading { display:flex; align-items:center; justify-content:space-between; }
-  #filter { width: 100%; border: 1px solid #4a4d50; background: #2b2d30; color: #dde1e6; border-radius: 8px; padding: 9px 11px; outline: none; }
-  #filter:focus { border-color: #4a9eff; }
-  table { width:100%; border-collapse:collapse; background:#25272a; border:1px solid #3c3f41; }
-  th,td { padding:10px 12px; border-bottom:1px solid #3c3f41; text-align:left; font-size:13px; }
-  th { color:#aeb4bc; font-size:12px; } td:first-child { overflow-wrap:anywhere; }
-  footer { margin-top:16px; padding:14px; background:#25272a; border:1px solid #3c3f41; border-radius:10px; }
+  #filter { width:100%; border:2px solid var(--white); background:var(--black); color:var(--white); border-radius:0; padding:10px 11px; outline:none; }
+  #filter:focus { box-shadow:4px 4px 0 var(--accent); }
+  table { width:100%; border-collapse:collapse; background:var(--white); border:2px solid var(--black); }
+  th,td { padding:11px 12px; border-bottom:1px solid var(--black); text-align:left; font-size:12px; }
+  th { color:var(--grey); font-size:10px; letter-spacing:.08em; text-transform:uppercase; } td:first-child { overflow-wrap:anywhere; }
+  footer { margin-top:16px; padding:15px; background:var(--white); border:2px solid var(--black); border-radius:0; }
   footer h2 { margin:0 0 6px; font-size:14px; } .global-actions { display:flex; flex-wrap:wrap; gap:8px; margin-top:10px; }
-  dialog { width:min(520px,calc(100vw - 30px)); border:1px solid #4a4d50; border-radius:12px; padding:0; background:#25272a; color:#dde1e6; }
+  dialog { width:min(520px,calc(100vw - 30px)); border:3px solid var(--black); border-radius:0; padding:0; background:var(--white); color:var(--black); }
   dialog::backdrop { background:rgba(0,0,0,.65); } .modal-body { padding:18px; } .modal-body h2 { margin:0 0 7px; font-size:16px; overflow-wrap:anywhere; }
-  .warning { color:#ffc48a; font-size:12px; line-height:1.45; } .choices { display:grid; gap:9px; margin:16px 0; } label { display:flex; align-items:center; gap:9px; }
+  .warning { color:#8b4c12; font-size:12px; line-height:1.45; } .choices { display:grid; gap:9px; margin:16px 0; } label { display:flex; align-items:center; gap:9px; } input[type=checkbox] { accent-color:var(--black); }
   .modal-actions { display:flex; justify-content:flex-end; gap:8px; }
   @media(max-width:720px) { th:nth-child(2),td:nth-child(2) { display:none; } }
 </style></head><body>
-<header><div class="heading"><h1>${copy.heading}</h1><button id="refresh">${copy.refresh}</button></div><input id="filter" type="search" placeholder="${copy.filter}" autocomplete="off"></header>
+<header><div class="heading"><h1>${copy.heading}</h1><button id="refresh">${copy.refresh}</button></div><input id="filter" type="text" placeholder="${copy.filter}" autocomplete="off"></header>
 <main><div id="message" hidden class="status-message"></div><div id="content"></div>
 <footer><h2>${copy.allSites}</h2><div class="muted">${copy.globalNote}</div><div class="global-actions"><button id="clear-history" class="danger">${copy.clearHistory}</button><button id="clear-cookies" class="danger">${copy.clearCookies}</button><button id="clear-cache" class="danger">${copy.clearCache}</button></div></footer></main>
 <dialog id="dialog"><form method="dialog" class="modal-body"><h2 id="modal-title"></h2><p class="warning">${copy.warning}</p><div class="choices">
@@ -1643,10 +2045,131 @@ const openSiteDataWindow = async (): Promise<void> => {
   await siteDataWindow.loadURL(`data:text/html;charset=utf-8,${encodeURIComponent(renderSiteDataWindowHtml())}`);
 };
 
+const renderSettingsWindowHtml = (): string => {
+  const copy = appLanguage === "pl" ? {
+    title: "MonoBrowser — Ustawienia", heading: "Ustawienia", searchHeading: "Domyślna wyszukiwarka",
+    searchDescription: "Wybierz usługę używaną przez pasek adresu i stronę startową.",
+    googleDescription: "Szybkie wyniki wyszukiwania Google.", duckDescription: "Wyszukiwanie z naciskiem na prywatność.",
+    custom: "Własna", customDescription: "Użyj dowolnego adresu wyszukiwania HTTP(S).",
+    customLabel: "Adres wyszukiwania", customHint: "Wstaw {query} w miejscu wyszukiwanego tekstu.",
+    save: "Zapisz ustawienia", blockerHeading: "Blokowanie treści", blockerDescription: "Wbudowana ochrona przed reklamami i modułami śledzącymi.",
+    active: "Aktywny", unavailable: "Niedostępny", loading: "Wczytywanie ustawień…", loadFailed: "Nie udało się wczytać ustawień.",
+  } : {
+    title: "MonoBrowser — Settings", heading: "Settings", searchHeading: "Default search engine",
+    searchDescription: "Choose the service used by the address bar and start page.",
+    googleDescription: "Fast results powered by Google Search.", duckDescription: "Search with a focus on privacy.",
+    custom: "Custom", customDescription: "Use any HTTP(S) search URL.",
+    customLabel: "Search URL", customHint: "Place {query} where the search text should appear.",
+    save: "Save settings", blockerHeading: "Content blocking", blockerDescription: "Built-in protection against ads and trackers.",
+    active: "Active", unavailable: "Unavailable", loading: "Loading settings…", loadFailed: "Settings could not be loaded.",
+  };
+  const copyJson = JSON.stringify(copy).replace(/</g, "\\u003c");
+  return `<!doctype html>
+<html lang="${appLanguage}"><head><meta charset="UTF-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+<meta http-equiv="Content-Security-Policy" content="default-src 'none'; style-src 'unsafe-inline'; script-src 'unsafe-inline'; img-src data:">
+<title>${copy.title}</title><style>${INTERNAL_WINDOW_STYLES}
+  :root { color-scheme:light; --black:#0a0a0a; --white:#f0efe9; --accent:#9c9b95; --grey:#5c5b57; font-family:ui-monospace,"Cascadia Mono","Courier New",monospace; }
+  body { min-height:100vh; background:var(--white); color:var(--black); }
+  body::after { content:""; position:fixed; inset:0; pointer-events:none; opacity:.03; background:url("data:image/svg+xml,%3Csvg viewBox='0 0 180 180' xmlns='http://www.w3.org/2000/svg'%3E%3Cfilter id='n'%3E%3CfeTurbulence type='fractalNoise' baseFrequency='.95' numOctaves='3' stitchTiles='stitch'/%3E%3C/filter%3E%3Crect width='100%25' height='100%25' filter='url(%23n)'/%3E%3C/svg%3E"); }
+  header { padding:19px 24px; border-bottom:3px solid var(--black); background:var(--black); color:var(--white); }
+  header h1 { font-family:Impact,Haettenschweiler,"Arial Narrow Bold",sans-serif; font-size:30px; letter-spacing:.06em; text-transform:uppercase; }
+  main { width:min(760px,100%); margin:0 auto; padding:24px; display:grid; gap:16px; }
+  .card { border:3px solid var(--black); border-radius:0; background:var(--white); padding:20px; box-shadow:none; }
+  h2 { margin:0 0 5px; font-family:Impact,Haettenschweiler,"Arial Narrow Bold",sans-serif; font-size:22px; letter-spacing:.05em; text-transform:uppercase; } .description { margin:0 0 16px; color:var(--grey); font-size:11px; line-height:1.6; }
+  .engines { display:grid; grid-template-columns:repeat(3,1fr); gap:9px; }
+  .engine { position:relative; display:block; min-width:0; }
+  .engine input { position:absolute; opacity:0; pointer-events:none; }
+  .engine-body { height:100%; min-height:94px; padding:13px; border:2px solid var(--black); border-radius:0; background:transparent; cursor:pointer; display:block; transition:background .12s,color .12s,transform .12s,box-shadow .12s; }
+  .engine-body:hover { transform:translate(-2px,-2px); box-shadow:3px 3px 0 var(--black); }
+  .engine input:checked + .engine-body { background:var(--black); color:var(--white); box-shadow:4px 4px 0 var(--accent); }
+  .engine-name { display:flex; align-items:center; gap:8px; margin-bottom:7px; font-size:13px; font-weight:650; }
+  .engine-mark { width:9px; height:9px; border:1px solid currentColor; border-radius:0; background:transparent; }
+  input:checked + .engine-body .engine-mark { background:var(--white); }
+  .engine-copy { display:block; color:var(--grey); font-size:10px; line-height:1.5; } input:checked + .engine-body .engine-copy { color:#aaa9a3; }
+  .custom-field { margin-top:14px; display:grid; gap:7px; }
+  .custom-field label { color:var(--black); font-size:11px; font-weight:700; text-transform:uppercase; letter-spacing:.08em; }
+  #custom-url { width:100%; padding:11px; border:2px solid var(--black); border-radius:0; outline:0; background:var(--white); color:var(--black); font:11px ui-monospace,"Cascadia Mono","Courier New",monospace; }
+  #custom-url:focus { box-shadow:4px 4px 0 var(--accent); } #custom-url:disabled { opacity:.42; }
+  .hint { color:var(--grey); font-size:10px; } code { color:var(--black); font-weight:700; }
+  .actions { display:flex; align-items:center; justify-content:space-between; gap:12px; margin-top:17px; }
+  #message { min-height:18px; color:#34633e; font-size:11px; } #message.error { color:#8b2931; }
+  #save { border:2px solid var(--black); border-radius:0; background:var(--black); color:var(--white); font-weight:700; text-transform:uppercase; letter-spacing:.12em; }
+  #save:hover { background:var(--accent); color:var(--black); }
+  .blocker-row { display:flex; align-items:center; justify-content:space-between; gap:16px; }
+  .blocker-copy { display:grid; gap:4px; } .blocker-name { font-size:11px; font-weight:700; }
+  .badge { display:inline-flex; align-items:center; gap:7px; padding:7px 10px; border:2px solid var(--black); border-radius:0; color:var(--white); background:var(--black); font-size:10px; text-transform:uppercase; letter-spacing:.1em; white-space:nowrap; }
+  .badge::before { content:""; width:7px; height:7px; background:#7fc78e; }
+  .badge.off::before { background:#c87f84; }
+  @media(max-width:640px) { .engines { grid-template-columns:1fr; } .engine-body { min-height:0; } .blocker-row { align-items:flex-start; flex-direction:column; } }
+</style></head><body>
+<header><h1>${copy.heading}</h1></header>
+<main>
+  <form id="settings-form" class="card">
+    <h2>${copy.searchHeading}</h2><p class="description">${copy.searchDescription}</p>
+    <div class="engines">
+      <label class="engine"><input type="radio" name="engine" value="google"><span class="engine-body"><span class="engine-name"><i class="engine-mark"></i>Google</span><span class="engine-copy">${copy.googleDescription}</span></span></label>
+      <label class="engine"><input type="radio" name="engine" value="duckduckgo"><span class="engine-body"><span class="engine-name"><i class="engine-mark"></i>DuckDuckGo</span><span class="engine-copy">${copy.duckDescription}</span></span></label>
+      <label class="engine"><input type="radio" name="engine" value="custom"><span class="engine-body"><span class="engine-name"><i class="engine-mark"></i>${copy.custom}</span><span class="engine-copy">${copy.customDescription}</span></span></label>
+    </div>
+    <div class="custom-field"><label for="custom-url">${copy.customLabel}</label><input id="custom-url" type="url" maxlength="2048" spellcheck="false"><span class="hint">${copy.customHint.replace("{query}", "<code>{query}</code>")}</span></div>
+    <div class="actions"><span id="message">${copy.loading}</span><button id="save" type="submit">${copy.save}</button></div>
+  </form>
+  <section class="card blocker-row"><div class="blocker-copy"><h2>${copy.blockerHeading}</h2><p class="description">${copy.blockerDescription}</p><span id="blocker-name" class="blocker-name">uBlock Origin</span></div><span id="blocker-status" class="badge">${copy.active}</span></section>
+</main>
+<script>
+(() => {
+  const copy = ${copyJson};
+  const form = document.getElementById('settings-form');
+  const customUrl = document.getElementById('custom-url');
+  const message = document.getElementById('message');
+  const blockerName = document.getElementById('blocker-name');
+  const blockerStatus = document.getElementById('blocker-status');
+  const selectedEngine = () => form.querySelector('input[name=engine]:checked')?.value || 'google';
+  const syncCustomState = () => { customUrl.disabled = selectedEngine() !== 'custom'; };
+  form.querySelectorAll('input[name=engine]').forEach(input => input.addEventListener('change', syncCustomState));
+  form.addEventListener('submit', async event => {
+    event.preventDefault(); message.className = ''; message.textContent = '';
+    const result = await window.browserApi.setSearchSettings({ engine:selectedEngine(), customUrl:customUrl.value });
+    message.textContent = result.message; message.className = result.ok ? '' : 'error';
+  });
+  Promise.all([window.browserApi.getSearchSettings(), window.browserApi.getUBlockStatus()]).then(([settings, blocker]) => {
+    const option = form.querySelector('input[value="' + settings.engine + '"]'); if (option) option.checked = true;
+    customUrl.value = settings.customUrl; syncCustomState(); message.textContent = '';
+    blockerName.textContent = blocker.name + ' ' + blocker.version;
+    blockerStatus.textContent = blocker.loaded ? copy.active : copy.unavailable;
+    blockerStatus.classList.toggle('off', !blocker.loaded);
+    if (!blocker.loaded && blocker.error) blockerStatus.title = blocker.error;
+  }).catch(() => { message.textContent = copy.loadFailed; message.className = 'error'; });
+})();
+</script></body></html>`;
+};
+
+const loadSettingsWindowContent = async (): Promise<void> => {
+  if (!settingsWindow || settingsWindow.isDestroyed()) return;
+  await settingsWindow.loadURL(`data:text/html;charset=utf-8,${encodeURIComponent(renderSettingsWindowHtml())}`);
+};
+
+const openSettingsWindow = async (): Promise<void> => {
+  if (settingsWindow && !settingsWindow.isDestroyed()) {
+    settingsWindow.focus();
+    return;
+  }
+  settingsWindow = new BrowserWindow({
+    width: 760, height: 650, minWidth: 560, minHeight: 520,
+    title: appLanguage === "pl" ? "MonoBrowser — Ustawienia" : "MonoBrowser — Settings", autoHideMenuBar: true,
+    icon: path.join(app.getAppPath(), "assets", "icon.png"),
+    webPreferences: { preload: path.join(__dirname, "preload.js"), contextIsolation: true, nodeIntegration: false, sandbox: true },
+  });
+  configureInternalWindow(settingsWindow);
+  settingsWindow.on("closed", () => { settingsWindow = null; });
+  await loadSettingsWindowContent();
+};
+
 const refreshLocalizedWindows = async (): Promise<void> => {
   if (mainWindow && !mainWindow.isDestroyed()) {
     mainWindow.webContents.send("language:changed", appLanguage);
   }
+  broadcastDownloadProgress();
   if (historyWindow && !historyWindow.isDestroyed()) {
     await loadHistoryWindowContent();
   }
@@ -1656,6 +2179,10 @@ const refreshLocalizedWindows = async (): Promise<void> => {
   if (siteDataWindow && !siteDataWindow.isDestroyed()) {
     await siteDataWindow.loadURL(`data:text/html;charset=utf-8,${encodeURIComponent(renderSiteDataWindowHtml())}`);
   }
+  if (settingsWindow && !settingsWindow.isDestroyed()) {
+    await loadSettingsWindowContent();
+  }
+  await refreshStartPages();
 };
 
 const setApplicationLanguage = async (language: AppLanguage): Promise<boolean> => {
@@ -1678,11 +2205,13 @@ const openNavigationMenu = (anchor: unknown): boolean => {
     return false;
   }
   const copy = appLanguage === "pl" ? {
-    history: "Historia", downloads: "Pobieranie", siteData: "Dane witryn", language: "Język", polish: "Polski", english: "Angielski",
+    settings: "Ustawienia", history: "Historia", downloads: "Pobieranie", siteData: "Dane witryn", language: "Język", polish: "Polski", english: "Angielski",
   } : {
-    history: "History", downloads: "Downloads", siteData: "Site data", language: "Language", polish: "Polish", english: "English",
+    settings: "Settings", history: "History", downloads: "Downloads", siteData: "Site data", language: "Language", polish: "Polish", english: "English",
   };
   const menu = Menu.buildFromTemplate([
+    { label: copy.settings, click: () => { void openSettingsWindow(); } },
+    { type: "separator" },
     { label: copy.history, click: () => { void openHistoryWindow(); } },
     { label: copy.downloads, click: () => { void openDownloadsWindow(); } },
     { label: copy.siteData, click: () => { void openSiteDataWindow(); } },
@@ -1833,9 +2362,13 @@ const updateTabFromWebContents = (tab: TabRecord): void => {
     return;
   }
 
+  const loadedUrl = contents.getURL();
+  const isStartPage = startPageDataUrls.has(loadedUrl);
   const nextState = {
-    url: contents.getURL() || tab.url,
-    title: contents.getTitle() || tab.title,
+    url: isStartPage ? START_PAGE_URL : loadedUrl || tab.url,
+    title: isStartPage
+      ? appLanguage === "pl" ? "Nowa karta" : "New Tab"
+      : contents.getTitle() || tab.title,
     isLoading: contents.isLoading(),
     canGoBack: contents.navigationHistory.canGoBack(),
     canGoForward: contents.navigationHistory.canGoForward(),
@@ -1866,6 +2399,9 @@ const setActiveTab = (id: number): boolean => {
   }
 
   mainWindow.setBrowserView(tab.view);
+  if (downloadProgressVisible) {
+    attachDownloadProgressView();
+  }
   activeTabId = id;
   promoteTabInMruOrder(id);
   applyActiveViewBounds();
@@ -1952,7 +2488,7 @@ const createTab = (
     broadcastTabsState();
   }
 
-  contents.loadURL(normalizedInitialUrl).catch(() => undefined);
+  contents.loadURL(resolveUrlForLoading(normalizedInitialUrl)).catch(() => undefined);
 
   return id;
 };
@@ -2016,7 +2552,9 @@ const registerIpc = (): void => {
     }
 
     try {
-      await tab.view.webContents.loadURL(normalizeInputToUrl(input));
+      const normalizedUrl = normalizeInputToUrl(input);
+      tab.url = normalizedUrl;
+      await tab.view.webContents.loadURL(resolveUrlForLoading(normalizedUrl));
     } catch (err: any) {
       // Ignorujemy ERR_ABORTED, ponieważ występuje naturalnie podczas szybkiej nawigacji lub przekierowań na stronach
       if (err?.code !== "ERR_ABORTED") {
@@ -2181,6 +2719,13 @@ const registerIpc = (): void => {
     }
     return setApplicationLanguage(language);
   });
+  ipcMain.handle("settings:get-search", () => ({ ...searchSettings }));
+  ipcMain.handle("settings:set-search", async (_event, value: unknown) => setSearchSettings(value));
+  ipcMain.handle("settings:open-window", async () => {
+    await openSettingsWindow();
+    return true;
+  });
+  ipcMain.handle("ublock:get-status", () => getUBlockStatus());
   ipcMain.handle("navigation-menu:open", (_event, anchor: unknown) => openNavigationMenu(anchor));
 
   ipcMain.handle("layout:set-viewport-top", (_event, top: number) => {
@@ -2237,6 +2782,24 @@ const registerAutoUpdater = (): void => {
   });
 };
 
+const parseReleaseVersion = (value: string): [number, number, number] | null => {
+  const match = /^v?(\d+)\.(\d+)\.(\d+)(?:[-+].*)?$/.exec(value.trim());
+  if (!match) return null;
+  return [Number(match[1]), Number(match[2]), Number(match[3])];
+};
+
+const isNewerRelease = (candidate: string, current: string): boolean => {
+  const candidateParts = parseReleaseVersion(candidate);
+  const currentParts = parseReleaseVersion(current);
+  if (!candidateParts || !currentParts) return false;
+  for (let index = 0; index < candidateParts.length; index += 1) {
+    if (candidateParts[index] !== currentParts[index]) {
+      return candidateParts[index] > currentParts[index];
+    }
+  }
+  return false;
+};
+
 const scheduleAutoUpdateChecks = (): void => {
   if (!app.isPackaged) {
     return;
@@ -2244,19 +2807,43 @@ const scheduleAutoUpdateChecks = (): void => {
 
   registerAutoUpdater();
 
-  const checkForUpdates = (): void => {
+  const checkForUpdates = async (): Promise<void> => {
     if (updateCheckInProgress) {
       return;
     }
 
     updateCheckInProgress = true;
-    void autoUpdater.checkForUpdatesAndNotify();
+    try {
+      const response = await fetch(
+        "https://api.github.com/repos/4tmwz7/monobrowser/releases/latest",
+        {
+          headers: {
+            Accept: "application/vnd.github+json",
+            "User-Agent": `MonoBrowser/${app.getVersion()}`,
+          },
+          signal: AbortSignal.timeout(8_000),
+        },
+      );
+      if (!response.ok) {
+        throw new Error(`GitHub release check failed with HTTP ${response.status}`);
+      }
+      const release = await response.json() as { tag_name?: unknown };
+      const tagName = typeof release.tag_name === "string" ? release.tag_name : "";
+      if (!isNewerRelease(tagName, app.getVersion())) {
+        updateCheckInProgress = false;
+        return;
+      }
+      await autoUpdater.checkForUpdatesAndNotify();
+    } catch (error) {
+      updateCheckInProgress = false;
+      console.error("Lightweight update check failed:", error);
+    }
   };
 
   const initialDelayMs = 45 * 1000;
   const sixHoursMs = 6 * 60 * 60 * 1000;
-  setTimeout(checkForUpdates, initialDelayMs);
-  setInterval(checkForUpdates, sixHoursMs);
+  setTimeout(() => { void checkForUpdates(); }, initialDelayMs);
+  setInterval(() => { void checkForUpdates(); }, sixHoursMs);
 };
 
 type CreateMainWindowOptions = {
@@ -2290,8 +2877,22 @@ const createMainWindow = async (
     },
   });
 
-  mainWindow.on("resize", () => applyActiveViewBounds());
+  mainWindow.on("resize", () => {
+    applyActiveViewBounds();
+    positionDownloadProgressView();
+  });
+  mainWindow.on("minimize", hideDownloadProgressView);
+  mainWindow.on("restore", broadcastDownloadProgress);
   mainWindow.on("closed", () => {
+    if (downloadProgressHideTimer) {
+      clearTimeout(downloadProgressHideTimer);
+      downloadProgressHideTimer = null;
+    }
+    if (downloadProgressView && !downloadProgressView.webContents.isDestroyed()) {
+      downloadProgressView.webContents.close();
+    }
+    downloadProgressView = null;
+    downloadProgressVisible = false;
     mainWindow = null;
   });
 
@@ -2424,12 +3025,13 @@ const bootstrap = async (): Promise<void> => {
   downloadsFilePath = path.join(app.getPath("userData"), "downloads.json");
   siteOriginsFilePath = path.join(app.getPath("userData"), "site-origins.json");
   languageFilePath = path.join(app.getPath("userData"), "language.json");
+  searchSettingsFilePath = path.join(app.getPath("userData"), "search-settings.json");
   startPageBackgroundFilePath = path.join(
     app.getPath("userData"),
     START_PAGE_BACKGROUND_FILE,
   );
 
-  await Promise.all([loadStartPageBackgroundColor(), loadLanguage()]);
+  await Promise.all([loadStartPageBackgroundColor(), loadLanguage(), loadSearchSettings()]);
   applyStartPageBackgroundColor();
 
   const persistentDataLoad = Promise.all([
@@ -2449,6 +3051,7 @@ const bootstrap = async (): Promise<void> => {
   registerIpc();
   await persistentDataLoad;
   registerDownloadHandling();
+  await loadBundledUBlock();
 
   updateSplashProgress(28, "Preparing interface...");
   setupApplicationMenu();

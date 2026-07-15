@@ -6,9 +6,13 @@ const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
 
 const root = path.resolve(__dirname, "..");
-const source = path.join(root, "src", "renderer", "index.html");
 const destinationDir = path.join(root, "dist", "renderer");
-const destination = path.join(destinationDir, "index.html");
 
 await mkdir(destinationDir, { recursive: true });
-await copyFile(source, destination);
+await Promise.all([
+  "index.html",
+  "download-progress.html",
+].map((fileName) => copyFile(
+  path.join(root, "src", "renderer", fileName),
+  path.join(destinationDir, fileName),
+)));

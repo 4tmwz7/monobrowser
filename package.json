@@ -1,6 +1,6 @@
 {
   "name": "monobrowser",
-  "version": "0.3.2",
+  "version": "0.3.3",
   "productName": "MonoBrowser",
   "description": "Electron Browser MVP",
   "main": "dist/main/main.js",
@@ -59,8 +59,14 @@
     ],
     "files": [
       "dist/**/*",
-      "assets/icon.png",
+      "assets/**/*",
       "package.json"
+    ],
+    "extraResources": [
+      {
+        "from": "vendor/ublock-origin",
+        "to": "extensions/ublock-origin"
+      }
     ],
     "directories": {
       "buildResources": "assets",

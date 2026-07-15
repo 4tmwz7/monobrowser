@@ -13,6 +13,10 @@ type TabsStatePayload = {
 };
 
 type AppLanguage = "pl" | "en";
+type SearchEngine = "google" | "duckduckgo" | "custom";
+type SearchSettings = { engine: SearchEngine; customUrl: string };
+type SearchSettingsResult = { ok: boolean; message: string; settings: SearchSettings };
+type UBlockStatus = { loaded: boolean; name: string; version: string; error: string | null };
 
 type BrowserApi = {
   createTab: (initialUrl?: string) => Promise<number>;
@@ -29,6 +33,10 @@ type BrowserApi = {
   openNavigationMenu: (position: { x: number; y: number }) => Promise<boolean>;
   getLanguage: () => Promise<AppLanguage>;
   setLanguage: (language: AppLanguage) => Promise<boolean>;
+  getSearchSettings: () => Promise<SearchSettings>;
+  setSearchSettings: (settings: SearchSettings) => Promise<SearchSettingsResult>;
+  openSettingsWindow: () => Promise<boolean>;
+  getUBlockStatus: () => Promise<UBlockStatus>;
   onLanguageChanged: (callback: (language: AppLanguage) => void) => () => void;
   setViewportTop: (top: number) => Promise<boolean>;
   onTabsState: (callback: (payload: TabsStatePayload) => void) => () => void;
@@ -43,7 +51,7 @@ declare global {
   }
 }
 
-const DEFAULT_URL = "https://www.google.com";
+const DEFAULT_URL = "monobrowser://new-tab";
 
 const translations = {
   pl: {

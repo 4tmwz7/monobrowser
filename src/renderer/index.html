@@ -8,24 +8,27 @@
     <title>MonoBrowser</title>
     <style>
       :root {
-        --chrome-bg: #1e1f22;
-        --chrome-surface: #2b2d30;
-        --chrome-border: #3c3f41;
-        --chrome-hover: #3a3d40;
-        --chrome-active-tab: #2b2d30;
-        --chrome-inactive-tab: #1e1f22;
-        --text-primary: #dde1e6;
-        --text-secondary: #8c9198;
-        --accent: #4a9eff;
-        --accent-hover: #6ab4ff;
-        --address-bg: #3c3f41;
-        --address-border: #4a4d50;
-        --address-focus: #4a9eff;
+        color-scheme: light;
+        --black: #0a0a0a;
+        --white: #f0efe9;
+        --accent: #9c9b95;
+        --grey: #5c5b57;
+        --chrome-bg: var(--black);
+        --chrome-surface: var(--white);
+        --chrome-border: var(--black);
+        --chrome-hover: var(--accent);
+        --chrome-active-tab: var(--white);
+        --chrome-inactive-tab: var(--black);
+        --text-primary: var(--black);
+        --text-secondary: #a5a49e;
+        --address-bg: var(--white);
+        --address-border: var(--black);
+        --address-focus: var(--black);
         font-family:
-          "Segoe UI",
-          system-ui,
-          -apple-system,
-          sans-serif;
+          ui-monospace,
+          "Cascadia Mono",
+          "Courier New",
+          monospace;
       }
 
       * {
@@ -35,9 +38,19 @@
       }
 
       body {
-        background: #000;
+        background: var(--black);
         color: var(--text-primary);
         overflow: hidden;
+      }
+
+      body::after {
+        content: "";
+        position: fixed;
+        inset: 0;
+        z-index: 100;
+        pointer-events: none;
+        opacity: 0.025;
+        background: url("data:image/svg+xml,%3Csvg viewBox='0 0 180 180' xmlns='http://www.w3.org/2000/svg'%3E%3Cfilter id='n'%3E%3CfeTurbulence type='fractalNoise' baseFrequency='.95' numOctaves='3' stitchTiles='stitch'/%3E%3C/filter%3E%3Crect width='100%25' height='100%25' filter='url(%23n)'/%3E%3C/svg%3E");
       }
 
       #tab-strip {
@@ -49,8 +62,8 @@
         background: var(--chrome-bg);
         display: flex;
         align-items: flex-end;
-        padding: 0 4px;
-        gap: 1px;
+        padding: 0;
+        gap: 0;
         user-select: none;
         -webkit-app-region: drag;
         z-index: 10;
@@ -59,7 +72,7 @@
       #tabs {
         display: flex;
         align-items: flex-end;
-        gap: 1px;
+        gap: 0;
         flex: 1;
         overflow-x: auto;
         overflow-y: hidden;
@@ -71,7 +84,7 @@
       #tab-list {
         display: flex;
         align-items: flex-end;
-        gap: 1px;
+        gap: 0;
         flex-shrink: 0;
       }
 
@@ -83,17 +96,17 @@
         display: inline-flex;
         align-items: center;
         gap: 6px;
-        height: 32px;
+        height: 33px;
         width: max-content;
         max-width: 220px;
         min-width: 120px;
         padding: 0 10px 0 12px;
         background: var(--chrome-inactive-tab);
-        border: 1px solid transparent;
+        border: 1px solid #3b3b38;
         border-bottom: none;
-        border-radius: 8px 8px 0 0;
+        border-radius: 0;
         color: var(--text-secondary);
-        font-size: 12px;
+        font-size: 11px;
         font-family: inherit;
         cursor: pointer;
         transition:
@@ -105,8 +118,8 @@
       }
 
       .tab-btn:hover {
-        background: var(--chrome-hover);
-        color: var(--text-primary);
+        background: #242421;
+        color: var(--white);
       }
 
       .tab-btn.active {
@@ -120,7 +133,7 @@
         width: 14px;
         height: 14px;
         flex-shrink: 0;
-        border-radius: 2px;
+        border-radius: 0;
         display: flex;
         align-items: center;
         justify-content: center;
@@ -139,8 +152,8 @@
         width: 12px;
         height: 12px;
         flex-shrink: 0;
-        border: 2px solid var(--text-secondary);
-        border-top-color: var(--accent);
+        border: 2px solid var(--accent);
+        border-top-color: var(--white);
         border-radius: 50%;
         animation: spin 0.7s linear infinite;
         display: none;
@@ -169,7 +182,7 @@
         border: none;
         background: transparent;
         color: var(--text-secondary);
-        border-radius: 4px;
+        border-radius: 0;
         cursor: pointer;
         font-size: 14px;
         line-height: 1;
@@ -180,8 +193,13 @@
       }
 
       .close-tab:hover {
-        background: rgba(255, 255, 255, 0.12);
-        color: var(--text-primary);
+        background: var(--black);
+        color: var(--white);
+      }
+
+      .tab-btn:not(.active) .close-tab:hover {
+        background: var(--white);
+        color: var(--black);
       }
 
       #new-tab {
@@ -194,7 +212,7 @@
         border: none;
         background: transparent;
         color: var(--text-secondary);
-        border-radius: 6px;
+        border-radius: 0;
         cursor: pointer;
         font-size: 18px;
         line-height: 1;
@@ -206,8 +224,8 @@
       }
 
       #new-tab:hover {
-        background: var(--chrome-hover);
-        color: var(--text-primary);
+        background: var(--white);
+        color: var(--black);
       }
 
       /* ── Nav bar ───────────────────────────────────────────── */
@@ -218,11 +236,11 @@
         right: 0;
         height: 46px;
         background: var(--chrome-surface);
-        border-bottom: 1px solid var(--chrome-border);
+        border-bottom: 3px solid var(--chrome-border);
         display: flex;
         align-items: center;
-        padding: 0 8px;
-        gap: 4px;
+        padding: 0 7px;
+        gap: 3px;
         z-index: 10;
       }
 
@@ -232,10 +250,10 @@
         display: flex;
         align-items: center;
         justify-content: center;
-        border: none;
+        border: 1px solid transparent;
         background: transparent;
-        color: var(--text-secondary);
-        border-radius: 8px;
+        color: var(--black);
+        border-radius: 0;
         cursor: pointer;
         flex-shrink: 0;
         transition:
@@ -244,8 +262,9 @@
       }
 
       .nav-btn:hover:not(:disabled) {
-        background: var(--chrome-hover);
-        color: var(--text-primary);
+        border-color: var(--black);
+        background: var(--black);
+        color: var(--white);
       }
 
       .nav-btn:disabled {
@@ -277,24 +296,26 @@
         display: flex;
         align-items: center;
         background: var(--address-bg);
-        border: 1.5px solid var(--address-border);
-        border-radius: 22px;
+        border: 2px solid var(--address-border);
+        border-radius: 0;
         height: 34px;
         padding: 0 12px 0 14px;
         transition:
-          border-color 0.15s,
-          background 0.15s;
+          transform 0.12s,
+          box-shadow 0.12s;
         gap: 8px;
       }
 
       #address-form:focus-within {
         border-color: var(--address-focus);
-        background: #2a2d30;
+        background: var(--white);
+        transform: translate(-2px, -2px);
+        box-shadow: 3px 3px 0 var(--accent);
       }
 
       .address-icon {
         flex-shrink: 0;
-        color: var(--text-secondary);
+        color: var(--grey);
         display: flex;
         align-items: center;
       }
@@ -313,7 +334,7 @@
         color: var(--text-primary);
         font-size: 13px;
         font-family: inherit;
-        caret-color: var(--accent);
+        caret-color: var(--black);
       }
 
       #address::placeholder {
@@ -321,7 +342,7 @@
       }
 
       #address::selection {
-        background: rgba(74, 158, 255, 0.3);
+        background: var(--accent);
       }
 
       #go {
@@ -333,8 +354,8 @@
         justify-content: center;
         background: transparent;
         border: none;
-        border-radius: 8px;
-        color: var(--text-secondary);
+        border-radius: 0;
+        color: var(--grey);
         cursor: pointer;
         transition:
           background 0.1s,
@@ -343,8 +364,8 @@
       }
 
       #go:hover {
-        background: var(--chrome-hover);
-        color: var(--text-primary);
+        background: var(--black);
+        color: var(--white);
       }
 
       /* ── Placeholder black screen ─────────────────────────── */
