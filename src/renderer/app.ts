@@ -5,6 +5,8 @@ type TabState = {
   isLoading: boolean;
   canGoBack: boolean;
   canGoForward: boolean;
+  isPinned: boolean;
+  isMuted: boolean;
 };
 
 type TabsStatePayload = {
@@ -17,12 +19,13 @@ type SearchEngine = "google" | "duckduckgo" | "custom";
 type SearchSettings = { engine: SearchEngine; customUrl: string };
 type SearchSettingsResult = { ok: boolean; message: string; settings: SearchSettings };
 type UBlockStatus = { loaded: boolean; name: string; version: string; error: string | null };
-
 type BrowserApi = {
   createTab: (initialUrl?: string) => Promise<number>;
   closeTab: (tabId: number) => Promise<boolean>;
   switchTab: (tabId: number) => Promise<boolean>;
   getTabsState: () => Promise<TabsStatePayload>;
+  openTabContextMenu: (tabId: number, position: { x: number; y: number }) => Promise<boolean>;
+  showFindWindow: () => Promise<boolean>;
   navigate: (input: string) => Promise<boolean>;
   back: () => Promise<boolean>;
   forward: () => Promise<boolean>;
@@ -31,6 +34,7 @@ type BrowserApi = {
   openDownloadsWindow: () => Promise<boolean>;
   openSiteDataWindow: () => Promise<boolean>;
   openNavigationMenu: (position: { x: number; y: number }) => Promise<boolean>;
+  openSiteInfoMenu: (position: { x: number; y: number }) => Promise<boolean>;
   getLanguage: () => Promise<AppLanguage>;
   setLanguage: (language: AppLanguage) => Promise<boolean>;
   getSearchSettings: () => Promise<SearchSettings>;
@@ -38,6 +42,7 @@ type BrowserApi = {
   openSettingsWindow: () => Promise<boolean>;
   getUBlockStatus: () => Promise<UBlockStatus>;
   onLanguageChanged: (callback: (language: AppLanguage) => void) => () => void;
+  onFocusAddress: (callback: () => void) => () => void;
   setViewportTop: (top: number) => Promise<boolean>;
   onTabsState: (callback: (payload: TabsStatePayload) => void) => () => void;
   triggerNewTabShortcut: (initialUrl?: string) => void;
@@ -57,13 +62,13 @@ const translations = {
   pl: {
     tabs: "Karty", newTab: "Nowa karta", closeTab: "Zamknij kartę (Ctrl+W)",
     back: "Wstecz", forward: "Dalej", reload: "Odśwież", menu: "Menu",
-    addressPlaceholder: "Szukaj lub wpisz adres", go: "Przejdź", history: "Historia",
+    siteInfo: "Informacje o stronie", addressPlaceholder: "Szukaj lub wpisz adres", go: "Przejdź", history: "Historia",
     downloads: "Pobieranie", siteData: "Dane witryn", language: "Język",
   },
   en: {
     tabs: "Tabs", newTab: "New tab", closeTab: "Close tab (Ctrl+W)",
     back: "Back", forward: "Forward", reload: "Reload", menu: "Menu",
-    addressPlaceholder: "Search or enter address", go: "Go", history: "History",
+    siteInfo: "Page information", addressPlaceholder: "Search or enter address", go: "Go", history: "History",
     downloads: "Downloads", siteData: "Site data", language: "Language",
   },
 } as const;
@@ -78,7 +83,7 @@ const state: {
   language: "pl",
 };
 
-const CHROME_HEIGHT = 84; // 38px tab-strip + 46px nav-bar
+const BASE_CHROME_HEIGHT = 84; // 38px tab-strip + 46px nav-bar
 
 const tabsContainer = document.getElementById("tab-list") as HTMLDivElement;
 const addressForm = document.getElementById("address-form") as HTMLFormElement;
@@ -86,6 +91,7 @@ const addressInput = document.getElementById("address") as HTMLInputElement;
 const backButton = document.getElementById("back") as HTMLButtonElement;
 const forwardButton = document.getElementById("forward") as HTMLButtonElement;
 const reloadButton = document.getElementById("reload") as HTMLButtonElement;
+const siteInfoButton = document.getElementById("site-info-button") as HTMLButtonElement;
 const menuButton = document.getElementById("menu-button") as HTMLButtonElement;
 const newTabButton = document.getElementById("new-tab") as HTMLButtonElement;
 const placeholder = document.getElementById("placeholder") as HTMLDivElement;
@@ -104,6 +110,8 @@ const applyLanguage = (language: AppLanguage): void => {
   forwardButton.setAttribute("aria-label", copy.forward);
   reloadButton.title = `${copy.reload} (Ctrl+R)`;
   reloadButton.setAttribute("aria-label", copy.reload);
+  siteInfoButton.title = copy.siteInfo;
+  siteInfoButton.setAttribute("aria-label", copy.siteInfo);
   addressInput.placeholder = copy.addressPlaceholder;
   const goButton = document.getElementById("go") as HTMLButtonElement;
   goButton.title = `${copy.go} (Enter)`;
@@ -136,13 +144,22 @@ const renderTabs = (): void => {
   state.tabs.forEach((tab) => {
     const isActive = tab.id === state.activeTabId;
     const button = document.createElement("button");
-    button.className = `tab-btn${isActive ? " active" : ""}${tab.isLoading ? " loading" : ""}`;
+    button.className = `tab-btn${isActive ? " active" : ""}${tab.isLoading ? " loading" : ""}${tab.isPinned ? " pinned" : ""}${tab.isMuted ? " muted" : ""}`;
     button.type = "button";
     button.title = tab.title || tab.url;
 
     // Loading spinner
     const spinner = document.createElement("span");
     spinner.className = "tab-loading";
+
+    const status = document.createElement("span");
+    status.className = "tab-status";
+    if (tab.isPinned) {
+      status.innerHTML += `<svg viewBox="0 0 16 16" aria-hidden="true"><path d="M5 2.5h6l-1 3 2 2v1H8.75v4.75L8 14l-.75-.75V8.5H4v-1l2-2-1-3Z"/></svg>`;
+    }
+    if (tab.isMuted) {
+      status.innerHTML += `<svg viewBox="0 0 16 16" aria-hidden="true"><path d="M2 6h2l3-2.5v9L4 10H2V6Zm7.2-.8 1.3 1.3 1.3-1.3 1 1-1.3 1.3 1.3 1.3-1 1-1.3-1.3L9.2 9l-1-1 1.3-1.3-1.3-1.3 1-1Z"/></svg>`;
+    }
 
     const title = document.createElement("span");
     title.className = "tab-title";
@@ -165,7 +182,15 @@ const renderTabs = (): void => {
       await window.browserApi.switchTab(tab.id);
     });
 
-    button.append(spinner, title, close);
+    button.addEventListener("contextmenu", async (event) => {
+      event.preventDefault();
+      await window.browserApi.openTabContextMenu(tab.id, {
+        x: Math.round(event.clientX),
+        y: Math.round(event.clientY),
+      });
+    });
+
+    button.append(spinner, status, title, close);
     tabsContainer.append(button);
   });
 };
@@ -190,7 +215,8 @@ const scheduleRender = (): void => {
 };
 
 const syncViewportTop = async (): Promise<void> => {
-  await window.browserApi.setViewportTop(CHROME_HEIGHT);
+  placeholder.style.top = `${BASE_CHROME_HEIGHT}px`;
+  await window.browserApi.setViewportTop(BASE_CHROME_HEIGHT);
 };
 
 const navigateFromAddress = async (): Promise<void> => {
@@ -209,6 +235,12 @@ const handleKeyboardShortcut = async (event: KeyboardEvent): Promise<void> => {
   }
 
   const key = event.key.toLowerCase();
+
+  if (key === "f") {
+    event.preventDefault();
+    await window.browserApi.showFindWindow();
+    return;
+  }
 
   if (key === "t") {
     event.preventDefault();
@@ -244,6 +276,14 @@ const wireEvents = (): void => {
 
   reloadButton.addEventListener("click", async () => {
     await window.browserApi.reload();
+  });
+
+  siteInfoButton.addEventListener("click", async () => {
+    const rect = siteInfoButton.getBoundingClientRect();
+    await window.browserApi.openSiteInfoMenu({
+      x: Math.round(rect.left),
+      y: Math.round(rect.bottom),
+    });
   });
 
   menuButton.addEventListener("click", async () => {
@@ -303,6 +343,12 @@ const wireEvents = (): void => {
   window.browserApi.onLanguageChanged((language) => {
     applyLanguage(language);
   });
+
+  window.browserApi.onFocusAddress(() => {
+    addressInput.focus();
+    addressInput.select();
+  });
+
 };
 
 const bootstrap = async (): Promise<void> => {

@@ -35,13 +35,22 @@ jobs:
       GH_TOKEN: ${{ github.token }}
     steps:
       - name: Create draft release
-        run: >-
-          gh release create "$GITHUB_REF_NAME"
-          --repo "$GITHUB_REPOSITORY"
-          --verify-tag
-          --draft
-          --title "MonoBrowser $GITHUB_REF_NAME"
-          --generate-notes
+        shell: bash
+        run: |
+          notes_file=".github/release-notes/${GITHUB_REF_NAME}.md"
+          args=(
+            release create "$GITHUB_REF_NAME"
+            --repo "$GITHUB_REPOSITORY"
+            --verify-tag
+            --draft
+            --title "MonoBrowser $GITHUB_REF_NAME"
+          )
+          if [[ -f "$notes_file" ]]; then
+            args+=(--notes-file "$notes_file")
+          else
+            args+=(--generate-notes)
+          fi
+          gh "${args[@]}"
 
   build:
     needs: prepare-release
@@ -91,7 +100,6 @@ jobs:
             "MonoBrowser-Setup-${version}.exe.blockmap"
             "latest-linux.yml"
             "MonoBrowser-${version}-x86_64.AppImage"
-            "MonoBrowser-${version}-x86_64.AppImage.blockmap"
           )
 
           for asset in "${required[@]}"; do

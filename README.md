@@ -1,20 +1,24 @@
 # MonoBrowser
 
-MonoBrowser is a small desktop browser for Windows and Linux, built with Electron, TypeScript, and esbuild. The latest stable release is [v0.3.3](https://github.com/4tmwz7/monobrowser/releases/tag/v0.3.3).
+MonoBrowser is a small desktop browser for Windows and Linux, built with Electron, TypeScript, and esbuild. The latest stable release is [v0.4.0](https://github.com/4tmwz7/monobrowser/releases/tag/v0.4.0).
 
 ## Download
 
-- [Windows x64 installer](https://github.com/4tmwz7/monobrowser/releases/download/v0.3.3/MonoBrowser-Setup-0.3.3.exe)
-- [Linux x64 AppImage](https://github.com/4tmwz7/monobrowser/releases/download/v0.3.3/MonoBrowser-0.3.3-x86_64.AppImage)
+- [Windows x64 installer](https://github.com/4tmwz7/monobrowser/releases/download/v0.4.0/MonoBrowser-Setup-0.4.0.exe)
+- [Linux x64 AppImage](https://github.com/4tmwz7/monobrowser/releases/download/v0.4.0/MonoBrowser-0.4.0-x86_64.AppImage)
 
 ## Features
 
-- Multiple tabs with tab switching and closing
+- Multiple tabs with switching, pinning, muting, duplication, and bulk closing through a branded tab context menu
+- Find in page with `Ctrl+F`, live result count, next/previous navigation, and highlighted matches
 - Back, forward, reload, and address bar navigation
 - Branded start page with an integrated web search field
 - Configurable default search engine: Google, DuckDuckGo, or a custom HTTP(S) search URL
 - Bundled uBlock Origin network filtering with its standard filter lists
-- Three-dot navigation menu with History, Downloads, Site data, and language selection
+- Hamburger navigation menu with persistent bookmarks, History, Downloads, Site data, and language selection
+- Address-bar site information menu with HTTPS status, cookie count, tab RAM use, sandbox, content-blocking, zoom, and loading details
+- Responsive, multi-column page context menu for link, image, selection, editing, page, developer, and navigation actions
+- Detached page DevTools available from the main menu, page inspector, `F12`, or `Ctrl+Shift+I`
 - Polish and English application interface, with the selected language saved between launches
 - History window with clickable entries and history clearing
 - Native download location picker, persistent history, bottom-right live progress, cancellation, opening completed files, and showing them in the folder
@@ -22,6 +26,7 @@ MonoBrowser is a small desktop browser for Windows and Linux, built with Electro
 - Global browsing-data controls that do not delete downloaded files or download history
 - Links opened with `window.open` or `target="_blank"` open in a new tab
 - Batched tab-state updates and frame-scheduled UI rendering to reduce unnecessary work
+- Modern Electron `WebContentsView` composition for tabs and download progress
 - No permanently preloaded Google tab, reducing idle RAM use
 - Auto-updates from GitHub Releases
 - Generated monochrome app icon during build
@@ -29,8 +34,19 @@ MonoBrowser is a small desktop browser for Windows and Linux, built with Electro
 ## Keyboard shortcuts
 
 - `Ctrl+T` - open new tab
+- `Ctrl+Shift+T` - reopen the last closed tab
 - `Ctrl+W` - close current tab
-- `Ctrl+R` - reload current tab
+- `Ctrl+R` or `F5` - reload current tab
+- `Ctrl+L` - focus and select the address bar
+- `Ctrl+D` - add or remove the current bookmark
+- `Ctrl+F` - find text on the current page
+- `F12` or `Ctrl+Shift+I` - toggle DevTools for the current page
+- `Ctrl+Tab` / `Ctrl+Shift+Tab` - switch between tabs
+- `Ctrl+PageDown` / `Ctrl+PageUp` - switch between tabs
+- `Ctrl+1`…`Ctrl+9` - select a tab (`9` selects the last tab)
+- `Alt+Left` / `Alt+Right` - navigate back or forward
+- `Ctrl++` / `Ctrl+-` / `Ctrl+0` - control page zoom
+- `F11` - toggle full screen
 
 ## Scripts
 

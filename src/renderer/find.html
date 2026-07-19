@@ -1,0 +1,77 @@
+<!doctype html>
+<html lang="pl">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <meta http-equiv="Content-Security-Policy" content="default-src 'none'; script-src 'self'; style-src 'unsafe-inline'" />
+    <title>MonoBrowser Find</title>
+    <style>
+      :root {
+        color-scheme: light;
+        --black: #0a0a0a;
+        --white: #f0efe9;
+        --accent: #9c9b95;
+        --grey: #5c5b57;
+        font-family: ui-monospace, "Cascadia Mono", "Courier New", monospace;
+      }
+      * { box-sizing: border-box; margin: 0; padding: 0; }
+      html, body { width: 100%; height: 100%; overflow: hidden; background: transparent; }
+      #find-bar {
+        width: 100%;
+        height: 100%;
+        display: flex;
+        align-items: center;
+        gap: 6px;
+        padding: 7px;
+        border: 2px solid var(--black);
+        background: var(--white);
+      }
+      #find-input {
+        min-width: 0;
+        flex: 1;
+        height: 30px;
+        padding: 0 9px;
+        border: 2px solid var(--black);
+        border-radius: 0;
+        outline: 0;
+        background: var(--white);
+        color: var(--black);
+        font: 11px inherit;
+      }
+      #find-input:focus { box-shadow: 3px 3px 0 var(--accent); transform: translate(-1px, -1px); }
+      #find-result { min-width: 42px; color: var(--grey); font-size: 10px; text-align: center; }
+      .find-btn {
+        width: 30px;
+        height: 30px;
+        flex: 0 0 30px;
+        display: flex;
+        align-items: center;
+        justify-content: center;
+        border: 2px solid var(--black);
+        border-radius: 0;
+        background: var(--white);
+        color: var(--black);
+        cursor: pointer;
+      }
+      .find-btn:hover:not(:disabled), .find-btn:focus-visible { outline: 0; background: var(--black); color: var(--white); }
+      .find-btn:disabled { opacity: .35; cursor: not-allowed; }
+      .find-btn svg { width: 13px; height: 13px; fill: currentColor; }
+    </style>
+  </head>
+  <body>
+    <div id="find-bar" role="search">
+      <input id="find-input" type="text" placeholder="Znajdź na stronie" autocomplete="off" spellcheck="false" />
+      <span id="find-result" aria-live="polite">0/0</span>
+      <button id="find-previous" class="find-btn" type="button" aria-label="Poprzedni wynik" title="Poprzedni wynik" disabled>
+        <svg viewBox="0 0 16 16"><path d="M8 3.25a.75.75 0 0 1 .53.22l4 4a.75.75 0 0 1-1.06 1.06L8.75 5.81v6.94a.75.75 0 0 1-1.5 0V5.81L4.53 8.53a.75.75 0 0 1-1.06-1.06l4-4A.75.75 0 0 1 8 3.25Z" /></svg>
+      </button>
+      <button id="find-next" class="find-btn" type="button" aria-label="Następny wynik" title="Następny wynik" disabled>
+        <svg viewBox="0 0 16 16"><path d="M8 12.75a.75.75 0 0 1-.53-.22l-4-4a.75.75 0 0 1 1.06-1.06l2.72 2.72V3.25a.75.75 0 0 1 1.5 0v6.94l2.72-2.72a.75.75 0 0 1 1.06 1.06l-4 4a.75.75 0 0 1-.53.22Z" /></svg>
+      </button>
+      <button id="find-close" class="find-btn" type="button" aria-label="Zamknij wyszukiwanie" title="Zamknij wyszukiwanie">
+        <svg viewBox="0 0 16 16"><path d="M3.72 3.72a.75.75 0 0 1 1.06 0L8 6.94l3.22-3.22a.75.75 0 1 1 1.06 1.06L9.06 8l3.22 3.22a.75.75 0 1 1-1.06 1.06L8 9.06l-3.22 3.22a.75.75 0 0 1-1.06-1.06L6.94 8 3.72 4.78a.75.75 0 0 1 0-1.06Z" /></svg>
+      </button>
+    </div>
+    <script src="./find.js"></script>
+  </body>
+</html>

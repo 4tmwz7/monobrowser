@@ -140,12 +140,42 @@
         opacity: 0.7;
       }
 
+      .tab-status {
+        display: inline-flex;
+        align-items: center;
+        gap: 3px;
+        flex-shrink: 0;
+      }
+
+      .tab-status:empty {
+        display: none;
+      }
+
+      .tab-status svg {
+        width: 12px;
+        height: 12px;
+        fill: currentColor;
+      }
+
       .tab-title {
         flex: 1;
         overflow: hidden;
         text-overflow: ellipsis;
         white-space: nowrap;
         font-size: 12px;
+      }
+
+      .tab-btn.pinned {
+        width: 52px;
+        min-width: 52px;
+        max-width: 52px;
+        padding: 0 8px;
+        justify-content: center;
+      }
+
+      .tab-btn.pinned .tab-title,
+      .tab-btn.pinned .close-tab {
+        display: none;
       }
 
       .tab-loading {
@@ -285,9 +315,7 @@
       }
 
       #menu-button {
-        font-size: 22px;
         line-height: 1;
-        padding-bottom: 4px;
       }
 
       /* ── Address bar ──────────────────────────────────────── */
@@ -314,10 +342,23 @@
       }
 
       .address-icon {
+        width: 24px;
+        height: 26px;
         flex-shrink: 0;
         color: var(--grey);
         display: flex;
         align-items: center;
+        justify-content: center;
+        border: 0;
+        background: transparent;
+        cursor: pointer;
+      }
+
+      .address-icon:hover,
+      .address-icon:focus-visible {
+        background: var(--black);
+        color: var(--white);
+        outline: none;
       }
 
       .address-icon svg {
@@ -437,12 +478,18 @@
         </svg>
       </button>
       <form id="address-form">
-        <span class="address-icon">
+        <button
+          id="site-info-button"
+          class="address-icon"
+          type="button"
+          aria-haspopup="menu"
+          aria-label="Informacje o stronie"
+          title="Informacje o stronie">
           <svg viewBox="0 0 16 16">
             <path
               d="M8 1a7 7 0 1 0 0 14A7 7 0 0 0 8 1Zm-1 3.75A.75.75 0 0 1 8 4a.75.75 0 0 1 .75.75v.5a.75.75 0 0 1-1.5 0v-.5Zm.25 2.5h1.5a.75.75 0 0 1 0 1.5H8.5V11a.75.75 0 0 1-1.5 0V8a.75.75 0 0 1 .75-.75h.5Z" />
           </svg>
-        </span>
+        </button>
         <input
           id="address"
           placeholder="Szukaj lub wpisz adres"
@@ -464,7 +511,11 @@
         </button>
       </form>
       <div id="app-menu-wrap">
-        <button id="menu-button" class="nav-btn" type="button" aria-haspopup="menu" aria-label="Menu" title="Menu">⋮</button>
+        <button id="menu-button" class="nav-btn" type="button" aria-haspopup="menu" aria-label="Menu" title="Menu">
+          <svg viewBox="0 0 16 16" aria-hidden="true">
+            <path d="M2.5 3.25h11a.75.75 0 0 1 0 1.5h-11a.75.75 0 0 1 0-1.5Zm0 4h11a.75.75 0 0 1 0 1.5h-11a.75.75 0 0 1 0-1.5Zm0 4h11a.75.75 0 0 1 0 1.5h-11a.75.75 0 0 1 0-1.5Z" />
+          </svg>
+        </button>
       </div>
     </div>
 

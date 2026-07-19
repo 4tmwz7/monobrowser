@@ -7,6 +7,8 @@ type TabState = {
   isLoading: boolean;
   canGoBack: boolean;
   canGoForward: boolean;
+  isPinned: boolean;
+  isMuted: boolean;
 };
 
 type TabsStatePayload = {
@@ -43,6 +45,7 @@ type SearchEngine = "google" | "duckduckgo" | "custom";
 type SearchSettings = { engine: SearchEngine; customUrl: string };
 type SearchSettingsResult = { ok: boolean; message: string; settings: SearchSettings };
 type UBlockStatus = { loaded: boolean; name: string; version: string; error: string | null };
+type FindResult = { requestId: number; activeMatchOrdinal: number; matches: number; finalUpdate: boolean };
 
 const browserApi = {
   createTab: (initialUrl?: string): Promise<number> =>
@@ -53,6 +56,14 @@ const browserApi = {
     ipcRenderer.invoke("tabs:switch", tabId),
   getTabsState: (): Promise<TabsStatePayload> =>
     ipcRenderer.invoke("tabs:get-state"),
+  openTabContextMenu: (tabId: number, anchor: { x: number; y: number }): Promise<boolean> =>
+    ipcRenderer.invoke("tabs:open-context-menu", tabId, anchor),
+  findInPage: (query: string, options: { forward: boolean; findNext: boolean }): Promise<FindResult | null> =>
+    ipcRenderer.invoke("find:start", query, options),
+  stopFindInPage: (action: "clearSelection" | "keepSelection" | "activateSelection"): Promise<boolean> =>
+    ipcRenderer.invoke("find:stop", action),
+  showFindWindow: (): Promise<boolean> => ipcRenderer.invoke("find:show-window"),
+  hideFindWindow: (): Promise<boolean> => ipcRenderer.invoke("find:hide-window"),
   navigate: (input: string): Promise<boolean> =>
     ipcRenderer.invoke("nav:go", input),
   back: (): Promise<boolean> => ipcRenderer.invoke("nav:back"),
@@ -85,6 +96,8 @@ const browserApi = {
   getUBlockStatus: (): Promise<UBlockStatus> => ipcRenderer.invoke("ublock:get-status"),
   openNavigationMenu: (anchor: { x: number; y: number }): Promise<boolean> =>
     ipcRenderer.invoke("navigation-menu:open", anchor),
+  openSiteInfoMenu: (anchor: { x: number; y: number }): Promise<boolean> =>
+    ipcRenderer.invoke("site-info-menu:open", anchor),
   setViewportTop: (top: number): Promise<boolean> =>
     ipcRenderer.invoke("layout:set-viewport-top", top),
   onTabsState: (
@@ -121,6 +134,11 @@ const browserApi = {
     const listener = (_event: Electron.IpcRendererEvent, language: AppLanguage) => callback(language);
     ipcRenderer.on("language:changed", listener);
     return () => ipcRenderer.removeListener("language:changed", listener);
+  },
+  onFocusAddress: (callback: () => void): (() => void) => {
+    const listener = () => callback();
+    ipcRenderer.on("address:focus", listener);
+    return () => ipcRenderer.removeListener("address:focus", listener);
   },
   triggerNewTabShortcut: (initialUrl?: string): void => {
     ipcRenderer.send("tabs:create-shortcut", initialUrl);

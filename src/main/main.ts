@@ -1,4 +1,4 @@
-import { app, BrowserView, BrowserWindow, dialog, ipcMain, session, Menu, shell, MenuItemConstructorOptions } from "electron";
+import { app, BrowserWindow, clipboard, dialog, ipcMain, session, Menu, shell, WebContentsView, MenuItemConstructorOptions } from "electron";
 import type { DownloadItem, Extension, WebContents } from "electron";
 import fsSync from "node:fs";
 import fs from "node:fs/promises";
@@ -12,19 +12,26 @@ type TabState = {
   isLoading: boolean;
   canGoBack: boolean;
   canGoForward: boolean;
+  isPinned: boolean;
+  isMuted: boolean;
 };
 
 type TabRecord = TabState & {
-  view: BrowserView;
+  view: WebContentsView;
 };
-
-type ShortcutAction = "new-tab" | "close-tab" | "reload";
 
 type HistoryEntry = {
   id: string;
   url: string;
   title: string;
   visitedAt: string;
+};
+
+type BookmarkEntry = {
+  id: string;
+  url: string;
+  title: string;
+  createdAt: string;
 };
 
 type DownloadStatus =
@@ -104,6 +111,7 @@ const DEFAULT_SEARCH_SETTINGS: SearchSettings = {
   customUrl: "https://example.com/search?q={query}",
 };
 const MAX_HISTORY_ITEMS = 500;
+const MAX_BOOKMARK_ITEMS = 250;
 const MAX_DOWNLOAD_ITEMS = 500;
 const ALLOWED_SITE_DATA_TYPES = new Set<SiteDataType>([
   "cookies",
@@ -120,19 +128,27 @@ const SPLASH_ONLY_MODE =
 let mainWindow: BrowserWindow | null = null;
 let historyWindow: BrowserWindow | null = null;
 let downloadsWindow: BrowserWindow | null = null;
-let downloadProgressView: BrowserView | null = null;
+let downloadProgressView: WebContentsView | null = null;
 let downloadProgressVisible = false;
 let siteDataWindow: BrowserWindow | null = null;
 let settingsWindow: BrowserWindow | null = null;
+let navigationPopupWindow: BrowserWindow | null = null;
+let siteInfoPopupWindow: BrowserWindow | null = null;
+let contextPopupWindow: BrowserWindow | null = null;
+let findView: WebContentsView | null = null;
+let findVisible = false;
 let historyFilePath = "";
+let bookmarksFilePath = "";
 let downloadsFilePath = "";
 let siteOriginsFilePath = "";
 let languageFilePath = "";
 let searchSettingsFilePath = "";
 let viewportTop = 170;
 let nextTabId = 1;
+let nextFindRequestId = 1;
 let activeTabId: number | null = null;
 let historyEntries: HistoryEntry[] = [];
+let bookmarkEntries: BookmarkEntry[] = [];
 let downloadRecords: DownloadRecord[] = [];
 let siteOriginRecords: SiteOriginRecord[] = [];
 let appLanguage: AppLanguage = "pl";
@@ -146,6 +162,7 @@ const tabs = new Map<number, TabRecord>();
 const activeDownloads = new Map<string, DownloadItem>();
 const jsonWriteQueues = new Map<string, Promise<void>>();
 const tabMruOrder: number[] = [];
+const recentlyClosedTabUrls: string[] = [];
 const startPageDataUrls = new Set<string>();
 let tabsBroadcastScheduled = false;
 
@@ -394,7 +411,7 @@ const getSplashTheme = (backgroundColor: string): SplashTheme => {
   };
 };
 
-const applyStartPageBackgroundToView = (view: BrowserView): void => {
+const applyStartPageBackgroundToView = (view: WebContentsView): void => {
   const color = getSafeStartPageBackgroundColor(startPageBackgroundColor);
 
   try {
@@ -787,7 +804,7 @@ const renderStartPageHtml = (): string => {
     body::after { content:""; position:fixed; inset:0; z-index:5; pointer-events:none; opacity:.035; background:url("data:image/svg+xml,%3Csvg viewBox='0 0 180 180' xmlns='http://www.w3.org/2000/svg'%3E%3Cfilter id='n'%3E%3CfeTurbulence type='fractalNoise' baseFrequency='.95' numOctaves='3' stitchTiles='stitch'/%3E%3C/filter%3E%3Crect width='100%25' height='100%25' filter='url(%23n)'/%3E%3C/svg%3E"); }
     main { min-height:100vh; display:grid; grid-template-columns:minmax(330px,.82fr) minmax(520px,1.18fr); }
     .brand-panel { position:relative; padding:clamp(38px,5vw,76px); border-right:3px solid var(--black); display:flex; flex-direction:column; justify-content:center; overflow:hidden; }
-    .brand-panel::after { content:"0.3.3"; position:absolute; right:16px; bottom:18px; color:var(--grey); font-size:10px; letter-spacing:.28em; writing-mode:vertical-rl; }
+    .brand-panel::after { content:"${app.getVersion()}"; position:absolute; right:16px; bottom:18px; color:var(--grey); font-size:10px; letter-spacing:.28em; writing-mode:vertical-rl; }
     .brand { margin:0; font-family:"Bebas Neue", Impact, sans-serif; font-size:clamp(72px,10vw,160px); font-weight:400; line-height:.85; letter-spacing:-2px; text-transform:uppercase; }
     .brand .outline { color:transparent; -webkit-text-stroke:2px var(--black); }
     .brand .accent { color:var(--accent); display:inline-block; animation:glitch 4s infinite; }
@@ -922,10 +939,17 @@ const getTabSnapshot = (tab: TabRecord): TabState => ({
   isLoading: tab.isLoading,
   canGoBack: tab.canGoBack,
   canGoForward: tab.canGoForward,
+  isPinned: tab.isPinned,
+  isMuted: tab.isMuted,
 });
 
+const getOrderedTabRecords = (): TabRecord[] => [
+  ...Array.from(tabs.values()).filter((tab) => tab.isPinned),
+  ...Array.from(tabs.values()).filter((tab) => !tab.isPinned),
+];
+
 const getTabsStatePayload = () => ({
-  tabs: Array.from(tabs.values()).map(getTabSnapshot),
+  tabs: getOrderedTabRecords().map(getTabSnapshot),
   activeTabId,
 });
 
@@ -964,14 +988,16 @@ const getMostRecentTabId = (): number | null => {
   return null;
 };
 
-const createTabView = (): BrowserView => {
-  const view = new BrowserView({
+const createTabView = (): WebContentsView => {
+  const view = new WebContentsView({
     webPreferences: {
       contextIsolation: true,
       nodeIntegration: false,
       sandbox: true,
     },
   });
+
+  view.setBackgroundColor("#f0efe9");
 
   view.webContents.setWindowOpenHandler(({ url }) => {
     openUrlInNewTab(url);
@@ -991,6 +1017,9 @@ const broadcastTabsState = (): void => {
     tabsBroadcastScheduled = false;
     if (mainWindow && !mainWindow.isDestroyed()) {
       mainWindow.webContents.send("tabs:state", getTabsStatePayload());
+    }
+    if (findView && !findView.webContents.isDestroyed()) {
+      findView.webContents.send("tabs:state", getTabsStatePayload());
     }
   });
 };
@@ -1214,26 +1243,35 @@ const positionDownloadProgressView = (): void => {
   });
 };
 
+const isViewAttached = (view: WebContentsView): boolean =>
+  Boolean(mainWindow && !mainWindow.isDestroyed() && mainWindow.contentView.children.includes(view));
+
+const attachViewOnTop = (view: WebContentsView): void => {
+  if (!mainWindow || mainWindow.isDestroyed()) return;
+  mainWindow.contentView.addChildView(view);
+};
+
+const detachView = (view: WebContentsView): void => {
+  if (mainWindow && !mainWindow.isDestroyed() && isViewAttached(view)) {
+    mainWindow.contentView.removeChildView(view);
+  }
+};
+
 const attachDownloadProgressView = (): void => {
   if (!mainWindow || mainWindow.isDestroyed() || !downloadProgressView || downloadProgressView.webContents.isDestroyed()) {
     return;
   }
-  if (!mainWindow.getBrowserViews().includes(downloadProgressView)) {
-    mainWindow.addBrowserView(downloadProgressView);
-  }
-  mainWindow.setTopBrowserView(downloadProgressView);
+  attachViewOnTop(downloadProgressView);
   positionDownloadProgressView();
   downloadProgressVisible = true;
 };
 
 const hideDownloadProgressView = (): void => {
-  if (mainWindow && !mainWindow.isDestroyed() && downloadProgressView && mainWindow.getBrowserViews().includes(downloadProgressView)) {
-    mainWindow.removeBrowserView(downloadProgressView);
-  }
+  if (downloadProgressView) detachView(downloadProgressView);
   downloadProgressVisible = false;
 };
 
-const createDownloadProgressView = async (): Promise<BrowserView | null> => {
+const createDownloadProgressView = async (): Promise<WebContentsView | null> => {
   if (!mainWindow || mainWindow.isDestroyed()) {
     return null;
   }
@@ -1241,7 +1279,7 @@ const createDownloadProgressView = async (): Promise<BrowserView | null> => {
     return downloadProgressView;
   }
 
-  downloadProgressView = new BrowserView({
+  downloadProgressView = new WebContentsView({
     webPreferences: {
       preload: path.join(__dirname, "download-progress-preload.js"),
       contextIsolation: true,
@@ -2169,6 +2207,9 @@ const refreshLocalizedWindows = async (): Promise<void> => {
   if (mainWindow && !mainWindow.isDestroyed()) {
     mainWindow.webContents.send("language:changed", appLanguage);
   }
+  if (findView && !findView.webContents.isDestroyed()) {
+    findView.webContents.send("language:changed", appLanguage);
+  }
   broadcastDownloadProgress();
   if (historyWindow && !historyWindow.isDestroyed()) {
     await loadHistoryWindowContent();
@@ -2196,40 +2237,695 @@ const setApplicationLanguage = async (language: AppLanguage): Promise<boolean> =
   return true;
 };
 
-const openNavigationMenu = (anchor: unknown): boolean => {
-  if (!mainWindow || mainWindow.isDestroyed() || typeof anchor !== "object" || anchor === null) {
-    return false;
+const getMenuAnchor = (anchor: unknown): { x: number; y: number } | null => {
+  if (typeof anchor !== "object" || anchor === null) {
+    return null;
   }
+
   const raw = anchor as { x?: unknown; y?: unknown };
   if (typeof raw.x !== "number" || typeof raw.y !== "number" || !Number.isFinite(raw.x) || !Number.isFinite(raw.y)) {
-    return false;
+    return null;
   }
-  const copy = appLanguage === "pl" ? {
-    settings: "Ustawienia", history: "Historia", downloads: "Pobieranie", siteData: "Dane witryn", language: "Język", polish: "Polski", english: "Angielski",
-  } : {
-    settings: "Settings", history: "History", downloads: "Downloads", siteData: "Site data", language: "Language", polish: "Polish", english: "English",
-  };
-  const menu = Menu.buildFromTemplate([
-    { label: copy.settings, click: () => { void openSettingsWindow(); } },
-    { type: "separator" },
-    { label: copy.history, click: () => { void openHistoryWindow(); } },
-    { label: copy.downloads, click: () => { void openDownloadsWindow(); } },
-    { label: copy.siteData, click: () => { void openSiteDataWindow(); } },
-    { type: "separator" },
-    {
-      label: copy.language,
-      submenu: [
-        { label: copy.polish, type: "radio", checked: appLanguage === "pl", click: () => { void setApplicationLanguage("pl"); } },
-        { label: copy.english, type: "radio", checked: appLanguage === "en", click: () => { void setApplicationLanguage("en"); } },
-      ],
-    },
-  ]);
-  menu.popup({
-    window: mainWindow,
+
+  return {
     x: Math.max(0, Math.floor(raw.x)),
     y: Math.max(0, Math.floor(raw.y)),
-  });
+  };
+};
+
+const getBookmarkableUrl = (value: string): string | null => {
+  try {
+    const parsed = new URL(value);
+    return parsed.protocol === "http:" || parsed.protocol === "https:"
+      ? parsed.href
+      : null;
+  } catch {
+    return null;
+  }
+};
+
+const saveBookmarks = async (): Promise<void> => {
+  bookmarkEntries = bookmarkEntries.slice(0, MAX_BOOKMARK_ITEMS);
+  await writeJsonAtomically(bookmarksFilePath, bookmarkEntries);
+};
+
+const loadBookmarks = async (): Promise<void> => {
+  try {
+    const raw = await fs.readFile(bookmarksFilePath, "utf8");
+    const parsed = JSON.parse(raw) as BookmarkEntry[];
+    if (!Array.isArray(parsed)) {
+      bookmarkEntries = [];
+      return;
+    }
+
+    bookmarkEntries = parsed
+      .filter((entry) => (
+        typeof entry?.id === "string" &&
+        typeof entry?.title === "string" &&
+        typeof entry?.createdAt === "string" &&
+        getBookmarkableUrl(entry?.url) === entry.url
+      ))
+      .slice(0, MAX_BOOKMARK_ITEMS);
+  } catch {
+    bookmarkEntries = [];
+  }
+};
+
+const findBookmarkByUrl = (url: string): BookmarkEntry | undefined =>
+  bookmarkEntries.find((bookmark) => bookmark.url === url);
+
+const toggleActiveBookmark = async (): Promise<boolean> => {
+  const tab = getActiveTab();
+  if (!tab) {
+    return false;
+  }
+
+  const url = getBookmarkableUrl(tab.url);
+  if (!url) {
+    return false;
+  }
+
+  const existing = findBookmarkByUrl(url);
+  if (existing) {
+    bookmarkEntries = bookmarkEntries.filter((bookmark) => bookmark.id !== existing.id);
+  } else {
+    bookmarkEntries = [{
+      id: `${Date.now()}-${Math.random().toString(16).slice(2)}`,
+      url,
+      title: tab.title.trim() || url,
+      createdAt: new Date().toISOString(),
+    }, ...bookmarkEntries].slice(0, MAX_BOOKMARK_ITEMS);
+  }
+
+  await saveBookmarks();
   return true;
+};
+
+const removeBookmark = async (id: string): Promise<void> => {
+  const nextEntries = bookmarkEntries.filter((bookmark) => bookmark.id !== id);
+  if (nextEntries.length === bookmarkEntries.length) {
+    return;
+  }
+
+  bookmarkEntries = nextEntries;
+  await saveBookmarks();
+};
+
+const clearBookmarks = async (): Promise<void> => {
+  if (!mainWindow || mainWindow.isDestroyed() || bookmarkEntries.length === 0) {
+    return;
+  }
+
+  const result = await dialog.showMessageBox(mainWindow, {
+    type: "warning",
+    title: appLanguage === "pl" ? "Wyczyść zakładki" : "Clear bookmarks",
+    message: appLanguage === "pl"
+      ? "Czy na pewno usunąć wszystkie zakładki?"
+      : "Are you sure you want to remove all bookmarks?",
+    buttons: appLanguage === "pl" ? ["Usuń wszystkie", "Anuluj"] : ["Remove all", "Cancel"],
+    defaultId: 1,
+    cancelId: 1,
+  });
+
+  if (result.response === 0) {
+    bookmarkEntries = [];
+    await saveBookmarks();
+  }
+};
+
+const getBookmarkMenuLabel = (bookmark: BookmarkEntry): string => {
+  let hostname = "";
+  try {
+    hostname = new URL(bookmark.url).hostname;
+  } catch {
+    hostname = "";
+  }
+  const title = bookmark.title.trim() || bookmark.url;
+  const label = hostname && !title.toLowerCase().includes(hostname.toLowerCase())
+    ? `${title} — ${hostname}`
+    : title;
+  return label.length > 80 ? `${label.slice(0, 77)}…` : label;
+};
+
+const POPUP_MENU_STYLES = `
+  :root { color-scheme:light; --black:#0a0a0a; --white:#f0efe9; --accent:#9c9b95; --grey:#5c5b57; font-family:ui-monospace,"Cascadia Mono","Courier New",monospace; }
+  * { box-sizing:border-box; }
+  html,body { width:100%; height:100%; margin:0; overflow:hidden; background:transparent; }
+  body { padding:7px 9px 9px 7px; color:var(--black); }
+  .popup { width:100%; height:100%; overflow:auto; scrollbar-width:thin; border:3px solid var(--black); border-radius:0; background:var(--white); box-shadow:5px 5px 0 var(--accent); }
+  .nav-popup { height:auto; max-height:calc(100vh - 16px); overflow:hidden; }
+  .nav-popup.height-limited { overflow:auto; }
+  .popup::after { content:""; position:fixed; inset:7px 9px 9px 7px; pointer-events:none; opacity:.025; background:url("data:image/svg+xml,%3Csvg viewBox='0 0 180 180' xmlns='http://www.w3.org/2000/svg'%3E%3Cfilter id='n'%3E%3CfeTurbulence type='fractalNoise' baseFrequency='.95' numOctaves='3' stitchTiles='stitch'/%3E%3C/filter%3E%3Crect width='100%25' height='100%25' filter='url(%23n)'/%3E%3C/svg%3E"); }
+  a,summary { position:relative; z-index:1; color:var(--black); text-decoration:none; }
+  .menu-item,summary { min-height:44px; padding:0 14px; display:flex; align-items:center; gap:10px; border:0; border-bottom:1px solid var(--black); background:var(--white); font-size:12px; font-weight:700; letter-spacing:.04em; cursor:pointer; user-select:none; }
+  .menu-item:hover,.menu-item:focus-visible,summary:hover,summary:focus-visible { outline:0; background:var(--black); color:var(--white); }
+  .menu-item.disabled { color:var(--grey); cursor:not-allowed; }
+  .menu-item.disabled:hover { background:var(--white); color:var(--grey); }
+  .shortcut { margin-left:auto; color:var(--grey); font-size:9px; font-weight:400; }
+  .menu-item:hover .shortcut,.menu-item:focus-visible .shortcut { color:var(--white); }
+  .menu-separator { height:7px; border-bottom:2px solid var(--black); background:#d8d7d1; }
+  details { border:0; }
+  summary { list-style:none; }
+  summary::-webkit-details-marker { display:none; }
+  summary::after { content:"+"; margin-left:auto; font-size:17px; font-weight:400; }
+  details[open] > summary { background:var(--black); color:var(--white); }
+  details[open] > summary::after { content:"−"; }
+  .submenu { border-bottom:2px solid var(--black); background:#d8d7d1; padding:7px; display:grid; gap:6px; }
+  .submenu .menu-item { min-height:38px; border:2px solid var(--black); background:var(--white); padding:0 10px; font-size:10px; }
+  .submenu .menu-item:hover,.submenu .menu-item:focus-visible { background:var(--black); color:var(--white); }
+  .bookmark-list { max-height:190px; overflow:auto; display:grid; gap:5px; }
+  .bookmark-row { display:grid; grid-template-columns:minmax(0,1fr) 36px; }
+  .bookmark-row .menu-item { min-width:0; border-right:0; }
+  .bookmark-title { overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
+  .remove { justify-content:center; padding:0; font-size:15px!important; }
+  .danger { background:var(--black)!important; color:var(--white)!important; }
+  .danger:hover { background:var(--accent)!important; color:var(--black)!important; }
+  .selected::before { content:"■"; font-size:8px; }
+  .popup-title { position:relative; z-index:1; margin:0; padding:15px 16px 13px; border-bottom:3px solid var(--black); background:var(--black); color:var(--white); font-size:13px; letter-spacing:.12em; text-transform:uppercase; }
+  .info-body { position:relative; z-index:1; padding:12px; display:grid; gap:10px; }
+  .site-popup { overflow:hidden; }
+  .site-popup .popup-title { padding:12px 14px 10px; font-size:12px; }
+  .site-popup .info-body { padding:8px; gap:7px; }
+  .security { border:3px solid var(--black); padding:12px; background:var(--white); display:grid; gap:5px; }
+  .site-popup .security { padding:8px 10px; gap:4px; }
+  .site-popup .info-row { min-height:31px; padding:5px 8px; }
+  .site-popup .notice { padding:6px 8px; }
+  .site-popup .info-action { min-height:36px; }
+
+  .security strong { font-size:12px; text-transform:uppercase; letter-spacing:.06em; }
+  .security.secure { box-shadow:4px 4px 0 #8da18f; }
+  .security.insecure { box-shadow:4px 4px 0 #b57f82; }
+  .security.internal { box-shadow:4px 4px 0 var(--accent); }
+  .host { color:var(--grey); font-size:11px; overflow-wrap:anywhere; }
+  .info-grid { border:2px solid var(--black); }
+  .info-row { min-height:39px; padding:8px 10px; display:grid; grid-template-columns:minmax(0,1fr) auto; align-items:center; gap:12px; border-bottom:1px solid var(--black); font-size:10px; }
+  .info-row:last-child { border-bottom:0; }
+  .info-row span { color:var(--grey); }
+  .info-row strong { text-align:right; font-size:10px; }
+  .notice { border:2px solid var(--black); padding:9px 10px; background:#d8d7d1; color:var(--black); font-size:9px; line-height:1.45; }
+  .info-action { min-height:42px; border:2px solid var(--black); display:flex; align-items:center; justify-content:center; background:var(--black); color:var(--white); font-size:10px; font-weight:700; letter-spacing:.1em; text-transform:uppercase; }
+  .info-action:hover,.info-action:focus-visible { outline:0; background:var(--accent); color:var(--black); }
+  .context-popup { overflow:hidden; }
+  .context-groups { padding:8px; display:grid; grid-template-columns:repeat(3,minmax(0,1fr)); align-items:start; gap:8px; }
+  .context-group { min-width:0; border:2px solid var(--black); background:var(--white); }
+  .context-group h2 { margin:0; min-height:28px; padding:7px 9px 5px; background:var(--black); color:var(--white); font-size:9px; letter-spacing:.1em; text-transform:uppercase; }
+  .context-group .menu-item { min-height:34px; padding:5px 9px; font-size:9px; line-height:1.25; }
+  .context-group .menu-item:last-child { border-bottom:0; }
+  @media(max-width:700px) { .context-groups { grid-template-columns:repeat(2,minmax(0,1fr)); } }
+`;
+
+const closePopupWindow = (windowRef: BrowserWindow | null): void => {
+  if (windowRef && !windowRef.isDestroyed()) {
+    windowRef.close();
+  }
+};
+
+const openStyledPopup = async (
+  kind: "navigation" | "site-info" | "context",
+  anchor: { x: number; y: number },
+  width: number,
+  preferredHeight: number,
+  html: string,
+  onAction: (actionUrl: URL) => void | Promise<void>,
+): Promise<boolean> => {
+  if (!mainWindow || mainWindow.isDestroyed()) {
+    return false;
+  }
+
+  closePopupWindow(navigationPopupWindow);
+  closePopupWindow(siteInfoPopupWindow);
+  closePopupWindow(contextPopupWindow);
+
+  const contentBounds = mainWindow.getContentBounds();
+  const popupWidth = Math.min(width, Math.max(260, contentBounds.width - 16));
+  const roomBelow = contentBounds.height - anchor.y - 7;
+  const availableHeight = kind === "context"
+    ? Math.max(180, contentBounds.height - 8)
+    : Math.max(180, roomBelow);
+  const popupHeight = Math.min(preferredHeight, availableHeight);
+  const x = Math.max(
+    contentBounds.x + 4,
+    Math.min(contentBounds.x + anchor.x, contentBounds.x + contentBounds.width - popupWidth - 4),
+  );
+  const requestedY = kind === "context"
+    ? Math.max(4, Math.min(anchor.y, contentBounds.height - popupHeight - 4))
+    : anchor.y;
+  const y = contentBounds.y + requestedY;
+
+  const popup = new BrowserWindow({
+    parent: mainWindow,
+    x,
+    y,
+    width: popupWidth,
+    height: popupHeight,
+    frame: false,
+    transparent: true,
+    resizable: false,
+    movable: false,
+    minimizable: false,
+    maximizable: false,
+    fullscreenable: false,
+    skipTaskbar: true,
+    show: false,
+    hasShadow: false,
+    backgroundColor: "#00000000",
+    webPreferences: {
+      contextIsolation: true,
+      nodeIntegration: false,
+      sandbox: true,
+    },
+  });
+
+  if (kind === "navigation") {
+    navigationPopupWindow = popup;
+  } else if (kind === "site-info") {
+    siteInfoPopupWindow = popup;
+  } else {
+    contextPopupWindow = popup;
+  }
+
+  popup.webContents.setWindowOpenHandler(() => ({ action: "deny" }));
+  popup.webContents.on("will-navigate", (event, targetUrl) => {
+    if (!targetUrl.startsWith("monobrowser-menu://")) {
+      return;
+    }
+    event.preventDefault();
+    let parsed: URL;
+    try {
+      parsed = new URL(targetUrl);
+    } catch {
+      return;
+    }
+    if (parsed.hostname === "resize") {
+      const requestedHeight = Number(parsed.searchParams.get("height"));
+      if (Number.isFinite(requestedHeight)) {
+        const maximumHeight = Math.max(180, mainWindow && !mainWindow.isDestroyed()
+          ? mainWindow.getContentBounds().height - anchor.y - 7
+          : preferredHeight);
+        const heightLimited = requestedHeight > maximumHeight;
+        const nextHeight = Math.max(180, Math.min(Math.ceil(requestedHeight), maximumHeight));
+        popup.setSize(popupWidth, nextHeight, false);
+        void popup.webContents.executeJavaScript(
+          `document.querySelector('.nav-popup')?.classList.toggle('height-limited', ${heightLimited});`,
+          true,
+        ).catch(() => undefined);
+      }
+      return;
+    }
+    closePopupWindow(popup);
+    void onAction(parsed);
+  });
+  popup.webContents.on("before-input-event", (event, input) => {
+    if (input.type === "keyDown" && input.key === "Escape") {
+      event.preventDefault();
+      closePopupWindow(popup);
+    }
+  });
+  popup.on("blur", () => {
+    setTimeout(() => closePopupWindow(popup), 80);
+  });
+  popup.on("closed", () => {
+    if (navigationPopupWindow === popup) navigationPopupWindow = null;
+    if (siteInfoPopupWindow === popup) siteInfoPopupWindow = null;
+    if (contextPopupWindow === popup) contextPopupWindow = null;
+  });
+
+  await popup.loadURL(`data:text/html;charset=utf-8,${encodeURIComponent(html)}`);
+  if (!popup.isDestroyed()) {
+    popup.show();
+    popup.focus();
+  }
+  return true;
+};
+
+const openNavigationMenu = async (anchor: unknown): Promise<boolean> => {
+  const position = getMenuAnchor(anchor);
+  if (!mainWindow || mainWindow.isDestroyed() || !position) {
+    return false;
+  }
+
+  const copy = appLanguage === "pl" ? {
+    title: "Menu", settings: "Ustawienia", devTools: "Narzędzia deweloperskie", bookmarks: "Zakładki", addBookmark: "Dodaj bieżącą stronę", removeCurrentBookmark: "Usuń bieżącą zakładkę",
+    noBookmarks: "Brak zapisanych zakładek", clearBookmarks: "Wyczyść wszystkie zakładki", history: "Historia", downloads: "Pobieranie",
+    siteData: "Dane witryn", language: "Język", polish: "Polski", english: "Angielski", remove: "Usuń",
+  } : {
+    title: "Menu", settings: "Settings", devTools: "Developer tools", bookmarks: "Bookmarks", addBookmark: "Bookmark current page", removeCurrentBookmark: "Remove current bookmark",
+    noBookmarks: "No saved bookmarks", clearBookmarks: "Clear all bookmarks", history: "History", downloads: "Downloads",
+    siteData: "Site data", language: "Language", polish: "Polish", english: "English", remove: "Remove",
+  };
+  const activeUrl = getBookmarkableUrl(getActiveTab()?.url ?? "");
+  const currentBookmark = activeUrl ? findBookmarkByUrl(activeUrl) : undefined;
+  const bookmarkRows = bookmarkEntries.map((bookmark) => `
+    <div class="bookmark-row">
+      <a class="menu-item" href="monobrowser-menu://bookmark-open?id=${encodeURIComponent(bookmark.id)}" title="${escapeHtml(bookmark.url)}"><span class="bookmark-title">${escapeHtml(getBookmarkMenuLabel(bookmark))}</span></a>
+      <a class="menu-item remove" href="monobrowser-menu://bookmark-remove?id=${encodeURIComponent(bookmark.id)}" title="${copy.remove}" aria-label="${copy.remove}">×</a>
+    </div>`).join("");
+  const bookmarkToggle = activeUrl
+    ? `<a class="menu-item" href="monobrowser-menu://bookmark-toggle">${currentBookmark ? copy.removeCurrentBookmark : copy.addBookmark}</a>`
+    : `<span class="menu-item disabled">${copy.addBookmark}</span>`;
+  const bookmarksContent = bookmarkEntries.length > 0
+    ? `<div class="bookmark-list">${bookmarkRows}</div><a class="menu-item danger" href="monobrowser-menu://bookmarks-clear">${copy.clearBookmarks}</a>`
+    : `<span class="menu-item disabled">${copy.noBookmarks}</span>`;
+  const html = `<!doctype html><html lang="${appLanguage}"><head><meta charset="UTF-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+<meta http-equiv="Content-Security-Policy" content="default-src 'none'; style-src 'unsafe-inline'; script-src 'unsafe-inline'"><title>${copy.title}</title><style>${POPUP_MENU_STYLES}</style></head><body>
+<nav class="popup nav-popup" aria-label="${copy.title}">
+  <h1 class="popup-title">MonoBrowser / ${copy.title}</h1>
+  <a class="menu-item" href="monobrowser-menu://settings">${copy.settings}</a>
+  <a class="menu-item" href="monobrowser-menu://dev-tools">${copy.devTools}<span class="shortcut">F12</span></a>
+  <details><summary>${copy.bookmarks}<span style="margin-left:auto;color:inherit;font-size:9px">${bookmarkEntries.length}</span></summary><div class="submenu">${bookmarkToggle}${bookmarksContent}</div></details>
+  <a class="menu-item" href="monobrowser-menu://history">${copy.history}</a>
+  <a class="menu-item" href="monobrowser-menu://downloads">${copy.downloads}</a>
+  <a class="menu-item" href="monobrowser-menu://site-data">${copy.siteData}</a>
+  <details><summary>${copy.language}</summary><div class="submenu">
+    <a class="menu-item${appLanguage === "pl" ? " selected" : ""}" href="monobrowser-menu://language?value=pl">${copy.polish}</a>
+    <a class="menu-item${appLanguage === "en" ? " selected" : ""}" href="monobrowser-menu://language?value=en">${copy.english}</a>
+  </div></details>
+</nav>
+<script>
+(() => {
+  const popup = document.querySelector('.nav-popup');
+  const reportHeight = () => {
+    const popupBorderHeight = popup.getBoundingClientRect().height - popup.clientHeight;
+    const windowPaddingHeight = window.innerHeight - popup.getBoundingClientRect().height;
+    const height = Math.ceil(popup.scrollHeight + popupBorderHeight + windowPaddingHeight + 1);
+    location.href = 'monobrowser-menu://resize?height=' + height;
+  };
+  document.querySelectorAll('details').forEach(details => details.addEventListener('toggle', () => requestAnimationFrame(reportHeight)));
+})();
+</script></body></html>`;
+
+  return openStyledPopup("navigation", position, 340, 390, html, async (actionUrl) => {
+    const action = actionUrl.hostname;
+    if (action === "settings") return openSettingsWindow();
+    if (action === "dev-tools") return toggleActiveTabDevTools();
+    if (action === "history") return openHistoryWindow();
+    if (action === "downloads") return openDownloadsWindow();
+    if (action === "site-data") return openSiteDataWindow();
+    if (action === "bookmark-toggle") return void await toggleActiveBookmark();
+    if (action === "bookmarks-clear") return clearBookmarks();
+    if (action === "language") {
+      const language = normalizeLanguage(actionUrl.searchParams.get("value"));
+      if (language) await setApplicationLanguage(language);
+      return;
+    }
+    const bookmark = bookmarkEntries.find((entry) => entry.id === actionUrl.searchParams.get("id"));
+    if (!bookmark) return;
+    if (action === "bookmark-open") openNewTab(bookmark.url);
+    if (action === "bookmark-remove") await removeBookmark(bookmark.id);
+  });
+};
+
+const formatMemorySize = (kilobytes: number): string => {
+  if (!Number.isFinite(kilobytes) || kilobytes <= 0) {
+    return appLanguage === "pl" ? "niedostępne" : "unavailable";
+  }
+  return `${(kilobytes / 1024).toFixed(kilobytes >= 1024 * 100 ? 0 : 1)} MB`;
+};
+
+const openSiteInfoMenu = async (anchor: unknown): Promise<boolean> => {
+  const position = getMenuAnchor(anchor);
+  const tab = getActiveTab();
+  if (!mainWindow || mainWindow.isDestroyed() || !position || !tab || tab.view.webContents.isDestroyed()) {
+    return false;
+  }
+
+  const contents = tab.view.webContents;
+  const url = tab.url;
+  let parsedUrl: URL | null = null;
+  try {
+    parsedUrl = new URL(url);
+  } catch {
+    parsedUrl = null;
+  }
+
+  let cookieCount = 0;
+  if (parsedUrl && (parsedUrl.protocol === "http:" || parsedUrl.protocol === "https:")) {
+    try {
+      cookieCount = (await contents.session.cookies.get({ url: parsedUrl.href })).length;
+    } catch {
+      cookieCount = 0;
+    }
+  }
+
+  if (!mainWindow || mainWindow.isDestroyed() || contents.isDestroyed() || getActiveTab()?.id !== tab.id) {
+    return false;
+  }
+
+  const rendererMetric = app.getAppMetrics().find((metric) => metric.pid === contents.getOSProcessId());
+  const memoryKilobytes = rendererMetric?.memory.workingSetSize ?? 0;
+  const isHttps = parsedUrl?.protocol === "https:";
+  const isHttp = parsedUrl?.protocol === "http:";
+  const isInternal = url === START_PAGE_URL || parsedUrl?.protocol === "data:";
+  const copy = appLanguage === "pl" ? {
+    title: "Informacje o stronie", internal: "Wewnętrzna strona MonoBrowser", secure: "Bezpieczne połączenie HTTPS", insecure: "Niezabezpieczone połączenie HTTP",
+    unknown: "Bezpieczeństwo połączenia nieznane", reputation: "HTTPS chroni połączenie, ale MonoBrowser nie skanuje reputacji ani treści witryny.", host: "Witryna",
+    cookies: "Pliki cookie", memory: "RAM karty", blocker: "Blokowanie treści", active: "Aktywne", inactive: "Nieaktywne", sandbox: "Sandbox", enabled: "Aktywny",
+    zoom: "Powiększenie", state: "Stan", loading: "Ładowanie", ready: "Gotowa", siteData: "Otwórz dane witryn", version: "Wersja",
+  } : {
+    title: "Page information", internal: "Internal MonoBrowser page", secure: "Secure HTTPS connection", insecure: "Unsecured HTTP connection",
+    unknown: "Connection security unknown", reputation: "HTTPS protects the connection, but MonoBrowser does not scan the site's reputation or content.", host: "Site",
+    cookies: "Cookies", memory: "Tab RAM", blocker: "Content blocking", active: "Active", inactive: "Inactive", sandbox: "Sandbox", enabled: "Active",
+    zoom: "Zoom", state: "State", loading: "Loading", ready: "Ready", siteData: "Open site data", version: "Version",
+  };
+  const securityLabel = isInternal ? copy.internal : isHttps ? copy.secure : isHttp ? copy.insecure : copy.unknown;
+  const securityClass = isInternal ? "internal" : isHttps ? "secure" : isHttp ? "insecure" : "internal";
+  const hostLabel = parsedUrl?.hostname || (isInternal ? "MonoBrowser / new-tab" : url || "—");
+  const html = `<!doctype html><html lang="${appLanguage}"><head><meta charset="UTF-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+<meta http-equiv="Content-Security-Policy" content="default-src 'none'; style-src 'unsafe-inline'"><title>${copy.title}</title><style>${POPUP_MENU_STYLES}</style></head><body>
+<section class="popup site-popup"><h1 class="popup-title">${copy.title}</h1><div class="info-body">
+  <div class="security ${securityClass}"><strong>${escapeHtml(securityLabel)}</strong><span class="host">${copy.host}: ${escapeHtml(hostLabel)}</span></div>
+  ${isInternal ? "" : `<div class="notice">${escapeHtml(copy.reputation)}</div>`}
+  <div class="info-grid">
+    <div class="info-row"><span>${copy.cookies}</span><strong>${cookieCount}</strong></div>
+    <div class="info-row"><span>${copy.memory}</span><strong>${formatMemorySize(memoryKilobytes)}</strong></div>
+    <div class="info-row"><span>${copy.blocker}</span><strong>${ublockExtension ? copy.active : copy.inactive}</strong></div>
+    <div class="info-row"><span>${copy.sandbox}</span><strong>${copy.enabled}</strong></div>
+    <div class="info-row"><span>${copy.zoom}</span><strong>${Math.round(contents.getZoomFactor() * 100)}%</strong></div>
+    <div class="info-row"><span>${copy.state}</span><strong>${contents.isLoading() ? copy.loading : copy.ready}</strong></div>
+    <div class="info-row"><span>${copy.version}</span><strong>${app.getVersion()}</strong></div>
+  </div>
+  <a class="info-action" href="monobrowser-menu://site-data">${copy.siteData}</a>
+</div></section></body></html>`;
+
+  return openStyledPopup("site-info", position, 410, isInternal ? 430 : 470, html, async (actionUrl) => {
+    if (actionUrl.hostname === "site-data") await openSiteDataWindow();
+  });
+};
+
+const openPageContextMenu = async (
+  tab: TabRecord,
+  params: Electron.ContextMenuParams,
+): Promise<boolean> => {
+  if (!mainWindow || mainWindow.isDestroyed() || tab.view.webContents.isDestroyed()) return false;
+
+  const copy = appLanguage === "pl" ? {
+    title: "Menu strony", link: "Link", image: "Obraz", selection: "Zaznaczenie", editing: "Edycja", page: "Strona", navigation: "Nawigacja",
+    openLinkHere: "Otwórz link w tej karcie", openLink: "Otwórz link w nowej karcie", openLinkBackground: "Otwórz w karcie w tle",
+    copyLink: "Kopiuj adres linku", copyLinkText: "Kopiuj tekst linku", saveLink: "Zapisz link jako…",
+    openImage: "Otwórz obraz w nowej karcie", copyImage: "Kopiuj adres obrazu", saveImage: "Zapisz obraz jako…",
+    searchSelection: "Wyszukaj zaznaczony tekst", copySelection: "Kopiuj zaznaczenie",
+    undo: "Cofnij", redo: "Ponów", cut: "Wytnij", copy: "Kopiuj", paste: "Wklej", selectAll: "Zaznacz wszystko",
+    addBookmark: "Dodaj stronę do zakładek", removeBookmark: "Usuń stronę z zakładek", copyPageAddress: "Kopiuj adres strony",
+    savePage: "Zapisz stronę jako…", print: "Drukuj stronę…", inspect: "Zbadaj element",
+    back: "Wstecz", forward: "Dalej", reload: "Odśwież", forceReload: "Odśwież bez pamięci podręcznej",
+    savePageTitle: "Zapisz stronę", htmlDocument: "Dokument HTML",
+  } : {
+    title: "Page menu", link: "Link", image: "Image", selection: "Selection", editing: "Editing", page: "Page", navigation: "Navigation",
+    openLinkHere: "Open link in this tab", openLink: "Open link in new tab", openLinkBackground: "Open in background tab",
+    copyLink: "Copy link address", copyLinkText: "Copy link text", saveLink: "Save link as…",
+    openImage: "Open image in new tab", copyImage: "Copy image address", saveImage: "Save image as…",
+    searchSelection: "Search selected text", copySelection: "Copy selection",
+    undo: "Undo", redo: "Redo", cut: "Cut", copy: "Copy", paste: "Paste", selectAll: "Select all",
+    addBookmark: "Bookmark this page", removeBookmark: "Remove page bookmark", copyPageAddress: "Copy page address",
+    savePage: "Save page as…", print: "Print page…", inspect: "Inspect element",
+    back: "Back", forward: "Forward", reload: "Reload", forceReload: "Reload without cache",
+    savePageTitle: "Save page", htmlDocument: "HTML document",
+  };
+  type ContextGroup = { title: string; items: string[] };
+  const action = (name: string, label: string): string =>
+    `<a class="menu-item" href="monobrowser-menu://${name}">${escapeHtml(label)}</a>`;
+  const groups: ContextGroup[] = [];
+  const linkUrl = getBookmarkableUrl(params.linkURL);
+  if (linkUrl) {
+    const items = [
+      action("context-open-link-here", copy.openLinkHere),
+      action("context-open-link", copy.openLink),
+      action("context-open-link-background", copy.openLinkBackground),
+      action("context-copy-link", copy.copyLink),
+    ];
+    if (params.linkText.trim()) items.push(action("context-copy-link-text", copy.copyLinkText));
+    items.push(action("context-save-link", copy.saveLink));
+    groups.push({ title: copy.link, items });
+  }
+
+  const imageUrl = params.mediaType === "image" ? getBookmarkableUrl(params.srcURL) : null;
+  if (imageUrl) {
+    groups.push({ title: copy.image, items: [
+      action("context-open-image", copy.openImage),
+      action("context-copy-image", copy.copyImage),
+      action("context-save-image", copy.saveImage),
+    ] });
+  }
+
+  const selection = params.selectionText.trim();
+  if (selection) {
+    groups.push({ title: copy.selection, items: [
+      action("context-search-selection", copy.searchSelection),
+      action("context-copy-selection", copy.copySelection),
+    ] });
+  }
+
+  if (params.isEditable) {
+    const items: string[] = [];
+    if (params.editFlags.canUndo) items.push(action("context-undo", copy.undo));
+    if (params.editFlags.canRedo) items.push(action("context-redo", copy.redo));
+    if (params.editFlags.canCut) items.push(action("context-cut", copy.cut));
+    if (params.editFlags.canCopy) items.push(action("context-copy", copy.copy));
+    if (params.editFlags.canPaste) items.push(action("context-paste", copy.paste));
+    if (params.editFlags.canSelectAll) items.push(action("context-select-all", copy.selectAll));
+    if (items.length) groups.push({ title: copy.editing, items });
+  }
+
+  const pageUrl = getBookmarkableUrl(tab.url);
+  const pageItems = [action("context-copy-page-address", copy.copyPageAddress)];
+  if (pageUrl) pageItems.push(action("context-toggle-bookmark", findBookmarkByUrl(pageUrl) ? copy.removeBookmark : copy.addBookmark));
+  pageItems.push(
+    action("context-save-page", copy.savePage),
+    action("context-print", copy.print),
+    action("context-inspect", copy.inspect),
+  );
+  groups.push({ title: copy.page, items: pageItems });
+
+  const navigationItems: string[] = [];
+  const contents = tab.view.webContents;
+  if (contents.navigationHistory.canGoBack()) navigationItems.push(action("context-back", copy.back));
+  if (contents.navigationHistory.canGoForward()) navigationItems.push(action("context-forward", copy.forward));
+  navigationItems.push(action("context-reload", copy.reload), action("context-force-reload", copy.forceReload));
+  groups.push({ title: copy.navigation, items: navigationItems });
+
+  const columns = Math.min(3, groups.length);
+  const rows: ContextGroup[][] = [];
+  for (let index = 0; index < groups.length; index += columns) rows.push(groups.slice(index, index + columns));
+  const groupsHeight = rows.reduce((height, row) => height + 32 + Math.max(...row.map((group) => group.items.length)) * 34, 0);
+  const preferredHeight = 86 + groupsHeight + Math.max(0, rows.length - 1) * 8;
+  const popupWidth = columns * 260 + 24;
+  const groupsHtml = groups.map((group) => `<section class="context-group"><h2>${escapeHtml(group.title)}</h2>${group.items.join("")}</section>`).join("");
+  const html = `<!doctype html><html lang="${appLanguage}"><head><meta charset="UTF-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+<meta http-equiv="Content-Security-Policy" content="default-src 'none'; style-src 'unsafe-inline'"><title>${copy.title}</title><style>${POPUP_MENU_STYLES}</style></head><body>
+<nav class="popup context-popup" aria-label="${copy.title}"><h1 class="popup-title">${copy.title}</h1><div class="context-groups" style="grid-template-columns:repeat(${columns},minmax(0,1fr))">${groupsHtml}</div></nav></body></html>`;
+  const anchor = { x: params.x, y: viewportTop + params.y };
+
+  return openStyledPopup("context", anchor, popupWidth, preferredHeight, html, async (actionUrl) => {
+    if (contents.isDestroyed()) return;
+    switch (actionUrl.hostname) {
+      case "context-open-link-here": await contents.loadURL(linkUrl!); break;
+      case "context-open-link": openNewTab(linkUrl!); break;
+      case "context-open-link-background": createTab(linkUrl!, false); break;
+      case "context-copy-link": clipboard.writeText(linkUrl!); break;
+      case "context-copy-link-text": clipboard.writeText(params.linkText.trim()); break;
+      case "context-save-link": contents.downloadURL(linkUrl!); break;
+      case "context-open-image": openNewTab(imageUrl!); break;
+      case "context-copy-image": clipboard.writeText(imageUrl!); break;
+      case "context-save-image": contents.downloadURL(imageUrl!); break;
+      case "context-search-selection": openNewTab(buildSearchUrl(selection)); break;
+      case "context-copy-selection": clipboard.writeText(selection); break;
+      case "context-undo": contents.undo(); break;
+      case "context-redo": contents.redo(); break;
+      case "context-cut": contents.cut(); break;
+      case "context-copy": contents.copy(); break;
+      case "context-paste": contents.paste(); break;
+      case "context-select-all": contents.selectAll(); break;
+      case "context-copy-page-address": clipboard.writeText(tab.url); break;
+      case "context-toggle-bookmark": await toggleActiveBookmark(); break;
+      case "context-print": contents.print({}); break;
+      case "context-inspect": contents.inspectElement(params.x, params.y); break;
+      case "context-back": contents.navigationHistory.goBack(); break;
+      case "context-forward": contents.navigationHistory.goForward(); break;
+      case "context-reload": contents.reload(); break;
+      case "context-force-reload": contents.reloadIgnoringCache(); break;
+      case "context-save-page": {
+        if (!mainWindow || mainWindow.isDestroyed()) break;
+        const fileName = `${getSafeDownloadFileName(tab.title || "page")}.html`;
+        const result = await dialog.showSaveDialog(mainWindow, {
+          title: copy.savePageTitle,
+          defaultPath: path.join(app.getPath("downloads"), fileName),
+          filters: [{ name: copy.htmlDocument, extensions: ["html", "htm"] }],
+        });
+        if (!result.canceled && result.filePath) await contents.savePage(result.filePath, "HTMLComplete");
+        break;
+      }
+    }
+  });
+};
+
+const openTabContextMenu = async (tabId: number, anchor: unknown): Promise<boolean> => {
+  const position = getMenuAnchor(anchor);
+  const tab = tabs.get(tabId);
+  if (!position || !tab || !mainWindow || mainWindow.isDestroyed()) return false;
+
+  const copy = appLanguage === "pl" ? {
+    title: "Menu karty", duplicate: "Duplikuj kartę", pin: "Przypnij kartę", unpin: "Odepnij kartę",
+    mute: "Wycisz kartę", unmute: "Włącz dźwięk karty", close: "Zamknij kartę",
+    closeOthers: "Zamknij pozostałe karty", closeRight: "Zamknij karty po prawej", reopen: "Przywróć zamkniętą kartę",
+  } : {
+    title: "Tab menu", duplicate: "Duplicate tab", pin: "Pin tab", unpin: "Unpin tab",
+    mute: "Mute tab", unmute: "Unmute tab", close: "Close tab",
+    closeOthers: "Close other tabs", closeRight: "Close tabs to the right", reopen: "Reopen closed tab",
+  };
+  const action = (name: string, label: string): string =>
+    `<a class="menu-item" href="monobrowser-menu://${name}">${escapeHtml(label)}</a>`;
+  const orderedTabs = getOrderedTabRecords();
+  const tabIndex = orderedTabs.findIndex((entry) => entry.id === tab.id);
+  const tabsToRight = orderedTabs.slice(tabIndex + 1).filter((entry) => !entry.isPinned);
+  const otherClosableTabs = orderedTabs.filter((entry) => entry.id !== tab.id && !entry.isPinned);
+  const groups = [
+    [
+      action("tab-duplicate", copy.duplicate),
+      action("tab-toggle-pin", tab.isPinned ? copy.unpin : copy.pin),
+      action("tab-toggle-mute", tab.isMuted ? copy.unmute : copy.mute),
+    ],
+    [
+      action("tab-close", copy.close),
+      ...(otherClosableTabs.length ? [action("tab-close-others", copy.closeOthers)] : []),
+      ...(tabsToRight.length ? [action("tab-close-right", copy.closeRight)] : []),
+    ],
+    ...(recentlyClosedTabUrls.length ? [[action("tab-reopen", copy.reopen)]] : []),
+  ];
+  const rows = groups.map((group) => group.join("")).join('<div class="menu-separator"></div>');
+  const itemCount = groups.reduce((count, group) => count + group.length, 0);
+  const preferredHeight = 66 + itemCount * 44 + Math.max(0, groups.length - 1) * 7;
+  const html = `<!doctype html><html lang="${appLanguage}"><head><meta charset="UTF-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+<meta http-equiv="Content-Security-Policy" content="default-src 'none'; style-src 'unsafe-inline'"><title>${copy.title}</title><style>${POPUP_MENU_STYLES}</style></head><body>
+<nav class="popup context-popup" aria-label="${copy.title}"><h1 class="popup-title">${copy.title}</h1>${rows}</nav></body></html>`;
+
+  return openStyledPopup("context", position, 340, preferredHeight, html, async (actionUrl) => {
+    const currentTab = tabs.get(tabId);
+    switch (actionUrl.hostname) {
+      case "tab-duplicate": if (currentTab) createTab(currentTab.url, true); break;
+      case "tab-toggle-pin":
+        if (currentTab) {
+          currentTab.isPinned = !currentTab.isPinned;
+          broadcastTabsState();
+        }
+        break;
+      case "tab-toggle-mute":
+        if (currentTab && !currentTab.view.webContents.isDestroyed()) {
+          currentTab.isMuted = !currentTab.isMuted;
+          currentTab.view.webContents.setAudioMuted(currentTab.isMuted);
+          broadcastTabsState();
+        }
+        break;
+      case "tab-close": closeTab(tabId); break;
+      case "tab-close-others":
+        if (currentTab) setActiveTab(currentTab.id);
+        for (const entry of [...otherClosableTabs]) closeTab(entry.id);
+        break;
+      case "tab-close-right":
+        for (const entry of [...tabsToRight]) closeTab(entry.id);
+        break;
+      case "tab-reopen": reopenLastClosedTab(); break;
+    }
+  });
 };
 
 const saveHistory = async (): Promise<void> => {
@@ -2278,60 +2974,228 @@ const clearHistory = async (): Promise<void> => {
   broadcastHistory();
 };
 
+const focusAddressBar = (): void => {
+  if (!mainWindow || mainWindow.isDestroyed()) return;
+  mainWindow.webContents.focus();
+  mainWindow.webContents.send("address:focus");
+};
+
+const clearActiveFindHighlights = async (): Promise<boolean> => {
+  const tab = getActiveTab();
+  if (!tab) return false;
+  try {
+    await tab.view.webContents.executeJavaScript(`(() => {
+      CSS.highlights?.delete('monobrowser-find-all');
+      CSS.highlights?.delete('monobrowser-find-active');
+      document.getElementById('monobrowser-find-style')?.remove();
+      delete document.documentElement.dataset.monobrowserFindQuery;
+      delete document.documentElement.dataset.monobrowserFindIndex;
+    })()`, true);
+  } catch {
+    // The page may have navigated while the find panel was closing.
+  }
+  return true;
+};
+
+const positionFindView = (): void => {
+  if (!mainWindow || mainWindow.isDestroyed() || !findView || findView.webContents.isDestroyed()) return;
+  const [contentWidth, contentHeight] = mainWindow.getContentSize();
+  const margin = 12;
+  const width = Math.min(560, Math.max(320, contentWidth - margin * 2));
+  const height = 48;
+  findView.setBounds({
+    x: margin,
+    y: Math.max(viewportTop, contentHeight - height - margin),
+    width,
+    height,
+  });
+};
+
+const hideFindWindow = async (): Promise<void> => {
+  findVisible = false;
+  if (findView) detachView(findView);
+  await clearActiveFindHighlights();
+  getActiveTab()?.view.webContents.focus();
+};
+
+const focusFindBar = (): void => {
+  void (async () => {
+    if (!mainWindow || mainWindow.isDestroyed()) return;
+    if (!findView || findView.webContents.isDestroyed()) {
+      findView = new WebContentsView({
+        webPreferences: {
+          preload: path.join(__dirname, "preload.js"),
+          contextIsolation: true,
+          nodeIntegration: false,
+          sandbox: true,
+        },
+      });
+      findView.setBackgroundColor("#f0efe9");
+      findView.webContents.setWindowOpenHandler(() => ({ action: "deny" }));
+      findView.webContents.on("before-input-event", (event, input) => {
+        if ((input.type === "keyDown" || input.type === "rawKeyDown") && input.key === "Escape") {
+          event.preventDefault();
+          void hideFindWindow();
+          return;
+        }
+        handleBeforeInputEvent(event, input);
+      });
+      await findView.webContents.loadFile(path.join(__dirname, "../renderer/find.html"));
+      findView.webContents.on("will-navigate", (event) => event.preventDefault());
+    }
+    if (!findView || findView.webContents.isDestroyed()) return;
+    findVisible = true;
+    positionFindView();
+    attachViewOnTop(findView);
+    findView.webContents.focus();
+    await findView.webContents.executeJavaScript(`(() => {
+      const input = document.getElementById('find-input');
+      input?.focus();
+      input?.select();
+      if (input?.value) input.dispatchEvent(new Event('input', { bubbles: true }));
+    })()`);
+  })();
+};
+
+const cycleActiveTab = (direction: 1 | -1): void => {
+  const tabIds = getOrderedTabRecords().map((tab) => tab.id);
+  if (tabIds.length < 2) return;
+  const currentIndex = activeTabId === null ? 0 : Math.max(0, tabIds.indexOf(activeTabId));
+  const nextIndex = (currentIndex + direction + tabIds.length) % tabIds.length;
+  setActiveTab(tabIds[nextIndex]);
+};
+
+const activateTabByNumber = (number: number): void => {
+  const tabIds = getOrderedTabRecords().map((tab) => tab.id);
+  const targetId = number === 9 ? tabIds.at(-1) : tabIds[number - 1];
+  if (targetId !== undefined) setActiveTab(targetId);
+};
+
+const reopenLastClosedTab = (): void => {
+  const url = recentlyClosedTabUrls.shift();
+  if (url) openNewTab(url);
+};
+
+const toggleActiveTabDevTools = (): void => {
+  const tab = getActiveTab();
+  if (!tab || tab.view.webContents.isDestroyed()) return;
+  const contents = tab.view.webContents;
+  if (contents.isDevToolsOpened()) {
+    contents.closeDevTools();
+    contents.focus();
+    return;
+  }
+  contents.openDevTools({
+    mode: "detach",
+    activate: true,
+    title: appLanguage === "pl" ? `Narzędzia deweloperskie — ${tab.title}` : `Developer Tools — ${tab.title}`,
+  });
+};
+
+const changeActiveTabZoom = (change: "in" | "out" | "reset"): void => {
+  const tab = getActiveTab();
+  if (!tab) return;
+  const contents = tab.view.webContents;
+  if (change === "reset") {
+    contents.setZoomFactor(1);
+    return;
+  }
+  const delta = change === "in" ? 0.1 : -0.1;
+  contents.setZoomFactor(Math.max(0.5, Math.min(3, Math.round((contents.getZoomFactor() + delta) * 10) / 10)));
+};
+
 const handleBeforeInputEvent = (
   event: Electron.Event,
   input: Electron.Input,
 ): void => {
-  if (input.type !== "keyDown" && input.type !== "rawKeyDown") {
-    return;
-  }
-
-  const hasCommandModifier = !!(input.control || input.meta);
-  if (!hasCommandModifier || input.alt) {
-    return;
-  }
+  if (input.type !== "keyDown" && input.type !== "rawKeyDown") return;
 
   const key = (input.key || "").toLowerCase();
   const code = (input.code || "").toLowerCase();
-  let action: ShortcutAction | null = null;
+  const commandPressed = Boolean(input.control || input.meta);
+  const tab = getActiveTab();
 
+  if (!commandPressed && !input.alt && (key === "f5" || key === "f11" || key === "f12")) {
+    event.preventDefault();
+    if (key === "f5") tab?.view.webContents.reload();
+    if (key === "f11" && mainWindow) mainWindow.setFullScreen(!mainWindow.isFullScreen());
+    if (key === "f12") toggleActiveTabDevTools();
+    return;
+  }
+
+  if (!commandPressed && input.alt && (key === "arrowleft" || key === "arrowright")) {
+    event.preventDefault();
+    if (!tab) return;
+    if (key === "arrowleft" && tab.view.webContents.navigationHistory.canGoBack()) tab.view.webContents.navigationHistory.goBack();
+    if (key === "arrowright" && tab.view.webContents.navigationHistory.canGoForward()) tab.view.webContents.navigationHistory.goForward();
+    return;
+  }
+
+  if (!commandPressed || input.alt) return;
+
+  if (input.shift && (key === "i" || code === "keyi")) {
+    event.preventDefault();
+    toggleActiveTabDevTools();
+    return;
+  }
+  if (key === "f" || code === "keyf") {
+    event.preventDefault();
+    focusFindBar();
+    return;
+  }
   if (key === "t" || code === "keyt") {
-    action = "new-tab";
-  } else if (key === "w" || code === "keyw") {
-    action = "close-tab";
-  } else if (key === "r" || code === "keyr") {
-    action = "reload";
-  }
-
-  if (!action) {
+    event.preventDefault();
+    input.shift ? reopenLastClosedTab() : openNewTab();
     return;
   }
-
-  event.preventDefault();
-
-  if (action === "new-tab") {
-    openNewTab();
-    return;
-  }
-
-  if (action === "close-tab") {
-    const activeTab = getActiveTab();
-    if (!activeTab) {
-      return;
-    }
-
+  if (key === "w" || code === "keyw") {
+    event.preventDefault();
     closeCurrentTab();
     return;
   }
-
-  const activeTab = getActiveTab();
-  if (activeTab) {
-    activeTab.view.webContents.reload();
+  if (key === "r" || code === "keyr") {
+    event.preventDefault();
+    tab?.view.webContents.reload();
+    return;
+  }
+  if (key === "l" || code === "keyl") {
+    event.preventDefault();
+    focusAddressBar();
+    return;
+  }
+  if (key === "d" || code === "keyd") {
+    event.preventDefault();
+    void toggleActiveBookmark();
+    return;
+  }
+  if (key === "tab" || key === "pagedown" || key === "pageup") {
+    event.preventDefault();
+    cycleActiveTab(input.shift || key === "pageup" ? -1 : 1);
+    return;
+  }
+  if (/^[1-9]$/.test(key)) {
+    event.preventDefault();
+    activateTabByNumber(Number(key));
+    return;
+  }
+  if (key === "+" || key === "=" || code === "numpadadd") {
+    event.preventDefault();
+    changeActiveTabZoom("in");
+    return;
+  }
+  if (key === "-" || code === "numpadsubtract") {
+    event.preventDefault();
+    changeActiveTabZoom("out");
+    return;
+  }
+  if (key === "0" || code === "numpad0") {
+    event.preventDefault();
+    changeActiveTabZoom("reset");
   }
 };
 
 const registerWindowShortcuts = (windowRef: BrowserWindow): void => {
-  // Menu is now configured globally via setApplicationMenu.
+  windowRef.webContents.on("before-input-event", handleBeforeInputEvent);
 };
 
 const applyActiveViewBounds = (): void => {
@@ -2398,9 +3262,16 @@ const setActiveTab = (id: number): boolean => {
     return false;
   }
 
-  mainWindow.setBrowserView(tab.view);
+  const previousActiveTab = activeTabId === null ? null : tabs.get(activeTabId);
+  if (previousActiveTab && previousActiveTab.id !== id) {
+    detachView(previousActiveTab.view);
+  }
+  attachViewOnTop(tab.view);
   if (downloadProgressVisible) {
     attachDownloadProgressView();
+  }
+  if (findVisible && findView && !findView.webContents.isDestroyed()) {
+    attachViewOnTop(findView);
   }
   activeTabId = id;
   promoteTabInMruOrder(id);
@@ -2418,22 +3289,23 @@ const closeTab = (id: number): boolean => {
 
   const wasActive = activeTabId === id;
   const tabToClose = tabs.get(id)!;
+  if (tabToClose.url) {
+    recentlyClosedTabUrls.unshift(tabToClose.url);
+    recentlyClosedTabUrls.splice(20);
+  }
+  detachView(tabToClose.view);
   tabs.delete(id);
   removeTabFromMruOrder(id);
   tabToClose.view.webContents.close();
 
   if (tabs.size === 0) {
     activeTabId = null;
-    if (mainWindow) {
-      mainWindow.setBrowserView(null);
-    }
   } else if (wasActive) {
     const nextId = getMostRecentTabId();
     if (nextId !== null) {
       setActiveTab(nextId);
-    } else if (mainWindow) {
+    } else {
       activeTabId = null;
-      mainWindow.setBrowserView(null);
     }
   }
 
@@ -2460,6 +3332,8 @@ const createTab = (
     isLoading: false,
     canGoBack: false,
     canGoForward: false,
+    isPinned: false,
+    isMuted: false,
     view,
   };
 
@@ -2467,6 +3341,10 @@ const createTab = (
 
   contents.on("dom-ready", () => {
     runBackgroundProbeIfStartPage(contents);
+  });
+  contents.on("before-input-event", handleBeforeInputEvent);
+  contents.on("context-menu", (_event, params) => {
+    void openPageContextMenu(tab, params);
   });
   contents.on("did-start-loading", () => updateTabFromWebContents(tab));
   contents.on("did-stop-loading", () => updateTabFromWebContents(tab));
@@ -2543,6 +3421,104 @@ const registerIpc = (): void => {
 
   ipcMain.handle("tabs:get-state", () => {
     return getTabsStatePayload();
+  });
+
+  ipcMain.handle("tabs:open-context-menu", (_event, tabId: unknown, anchor: unknown) => {
+    if (typeof tabId !== "number" || !Number.isInteger(tabId)) return false;
+    return openTabContextMenu(tabId, anchor);
+  });
+
+  ipcMain.handle("find:start", async (_event, query: unknown, options: unknown) => {
+    const tab = getActiveTab();
+    if (!tab || typeof query !== "string" || query.length === 0 || query.length > 1000) return null;
+    const raw = typeof options === "object" && options !== null
+      ? options as { forward?: unknown; findNext?: unknown }
+      : {};
+    const requestId = nextFindRequestId++;
+    const queryJson = JSON.stringify(query);
+    const forward = raw.forward !== false;
+    const findNext = raw.findNext === true;
+    const script = `(() => {
+      const query = ${queryJson};
+      const root = document.documentElement;
+      const allName = 'monobrowser-find-all';
+      const activeName = 'monobrowser-find-active';
+      if (!globalThis.CSS?.highlights || typeof globalThis.Highlight !== 'function') {
+        return { matches: 0, activeMatchOrdinal: 0 };
+      }
+      let ranges = [...(CSS.highlights.get(allName) || [])];
+      if (!${findNext} || root.dataset.monobrowserFindQuery !== query) {
+        ranges = [];
+        root.dataset.monobrowserFindQuery = query;
+        root.dataset.monobrowserFindIndex = '-1';
+        const lowerQuery = query.toLocaleLowerCase();
+        const walker = document.createTreeWalker(document.body || root, NodeFilter.SHOW_TEXT);
+        while (walker.nextNode()) {
+          const node = walker.currentNode;
+          const parent = node.parentElement;
+          const text = node.nodeValue || '';
+          if (!parent || !text || parent.closest('script,style,noscript,textarea,select')) continue;
+          const lowerText = text.toLocaleLowerCase();
+          let cursor = 0;
+          while (cursor < text.length) {
+            const index = lowerText.indexOf(lowerQuery, cursor);
+            if (index === -1) break;
+            const range = document.createRange();
+            range.setStart(node, index);
+            range.setEnd(node, index + query.length);
+            ranges.push(range);
+            cursor = index + query.length;
+          }
+        }
+        CSS.highlights.set(allName, new Highlight(...ranges));
+        let style = document.getElementById('monobrowser-find-style');
+        if (!style) {
+          style = document.createElement('style');
+          style.id = 'monobrowser-find-style';
+          (document.head || root).append(style);
+        }
+        style.textContent = '::highlight(monobrowser-find-all){background:#c9c76a;color:#0a0a0a}::highlight(monobrowser-find-active){background:#0a0a0a;color:#f0efe9;text-decoration:underline}';
+      }
+      if (!ranges.length) {
+        CSS.highlights.delete(activeName);
+        return { matches: 0, activeMatchOrdinal: 0 };
+      }
+      let current = Number.parseInt(root.dataset.monobrowserFindIndex || '-1', 10);
+      if (!${findNext} || current < 0 || current >= ranges.length) current = 0;
+      else current = (current + (${forward} ? 1 : -1) + ranges.length) % ranges.length;
+      root.dataset.monobrowserFindIndex = String(current);
+      const active = ranges[current];
+      CSS.highlights.set(activeName, new Highlight(active));
+      const rect = active.getBoundingClientRect();
+      const outsideViewport = rect.top < 0 || rect.bottom > window.innerHeight || rect.left < 0 || rect.right > window.innerWidth;
+      if ((rect.width || rect.height) && outsideViewport) {
+        window.scrollBy({ top: rect.top - (window.innerHeight / 2), left: rect.left - (window.innerWidth / 2), behavior: 'instant' });
+      }
+      return { matches: ranges.length, activeMatchOrdinal: current + 1 };
+    })()`;
+    try {
+      const result = await tab.view.webContents.executeJavaScript(script, true) as { matches?: unknown; activeMatchOrdinal?: unknown };
+      return {
+        requestId,
+        matches: typeof result?.matches === "number" ? result.matches : 0,
+        activeMatchOrdinal: typeof result?.activeMatchOrdinal === "number" ? result.activeMatchOrdinal : 0,
+        finalUpdate: true,
+      };
+    } catch {
+      return { requestId, matches: 0, activeMatchOrdinal: 0, finalUpdate: true };
+    }
+  });
+
+  ipcMain.handle("find:stop", async () => clearActiveFindHighlights());
+
+  ipcMain.handle("find:show-window", () => {
+    focusFindBar();
+    return true;
+  });
+
+  ipcMain.handle("find:hide-window", async () => {
+    await hideFindWindow();
+    return true;
   });
 
   ipcMain.handle("nav:go", async (_event, input: string) => {
@@ -2727,6 +3703,7 @@ const registerIpc = (): void => {
   });
   ipcMain.handle("ublock:get-status", () => getUBlockStatus());
   ipcMain.handle("navigation-menu:open", (_event, anchor: unknown) => openNavigationMenu(anchor));
+  ipcMain.handle("site-info-menu:open", async (_event, anchor: unknown) => openSiteInfoMenu(anchor));
 
   ipcMain.handle("layout:set-viewport-top", (_event, top: number) => {
     if (typeof top !== "number" || Number.isNaN(top)) {
@@ -2880,6 +3857,7 @@ const createMainWindow = async (
   mainWindow.on("resize", () => {
     applyActiveViewBounds();
     positionDownloadProgressView();
+    positionFindView();
   });
   mainWindow.on("minimize", hideDownloadProgressView);
   mainWindow.on("restore", broadcastDownloadProgress);
@@ -2891,8 +3869,17 @@ const createMainWindow = async (
     if (downloadProgressView && !downloadProgressView.webContents.isDestroyed()) {
       downloadProgressView.webContents.close();
     }
+    for (const tab of tabs.values()) {
+      if (!tab.view.webContents.isDestroyed()) tab.view.webContents.close();
+    }
+    tabs.clear();
+    tabMruOrder.splice(0);
+    activeTabId = null;
     downloadProgressView = null;
     downloadProgressVisible = false;
+    if (findView && !findView.webContents.isDestroyed()) findView.webContents.close();
+    findView = null;
+    findVisible = false;
     mainWindow = null;
   });
 
@@ -2988,8 +3975,15 @@ const setupApplicationMenu = (): void => {
             }
           },
         },
-        { role: "forceReload", label: copy.forceReload },
-        { role: "toggleDevTools", label: copy.devTools },
+        {
+          label: copy.forceReload,
+          click: () => getActiveTab()?.view.webContents.reloadIgnoringCache(),
+        },
+        {
+          label: copy.devTools,
+          accelerator: "CmdOrCtrl+Shift+I",
+          click: toggleActiveTabDevTools,
+        },
         { type: "separator" },
         { role: "resetZoom", label: copy.resetZoom },
         { role: "zoomIn", label: copy.zoomIn },
@@ -3022,6 +4016,7 @@ const setupApplicationMenu = (): void => {
 const bootstrap = async (): Promise<void> => {
   app.setName("MonoBrowser");
   historyFilePath = path.join(app.getPath("userData"), "history.json");
+  bookmarksFilePath = path.join(app.getPath("userData"), "bookmarks.json");
   downloadsFilePath = path.join(app.getPath("userData"), "downloads.json");
   siteOriginsFilePath = path.join(app.getPath("userData"), "site-origins.json");
   languageFilePath = path.join(app.getPath("userData"), "language.json");
@@ -3036,6 +4031,7 @@ const bootstrap = async (): Promise<void> => {
 
   const persistentDataLoad = Promise.all([
     loadHistory(),
+    loadBookmarks(),
     loadDownloads(),
     loadSiteOrigins(),
   ]);
