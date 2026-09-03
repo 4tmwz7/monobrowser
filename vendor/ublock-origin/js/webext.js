@@ -59,42 +59,6 @@ const promisify = function(thisArg, fnName) {
     };
 };
 
-// Electron implements only the extension APIs that are useful to embedded
-// web contents. Keep uBO's network engine running when cosmetic browser UI
-// APIs (toolbar badges, context menus, windows and webNavigation) are absent.
-const noopEvent = {
-    addListener() {},
-    removeListener() {},
-    hasListener() { return false; },
-};
-
-const makeNoopApi = function(methods) {
-    const api = {};
-    for ( const method of methods ) {
-        api[method] = function(...args) {
-            const callback = args.at(-1);
-            if ( callback instanceof Function ) {
-                queueMicrotask(( ) => callback());
-            }
-        };
-    }
-    return api;
-};
-
-const browserActionApi = chrome.browserAction || makeNoopApi([
-    'setBadgeBackgroundColor', 'setBadgeText', 'setIcon', 'setTitle',
-]);
-const contextMenusApi = chrome.contextMenus || {
-    ...makeNoopApi([ 'create', 'remove', 'removeAll' ]),
-    onClicked: noopEvent,
-};
-const webNavigationApi = chrome.webNavigation || makeNoopApi([
-    'getFrame', 'getAllFrames',
-]);
-const windowsApi = chrome.windows || makeNoopApi([
-    'get', 'create', 'update',
-]);
-
 const webext = {
     // https://developer.mozilla.org/en-US/docs/Mozilla/Add-ons/WebExtensions/API/alarms
     alarms: {
@@ -107,21 +71,21 @@ const webext = {
     },
     // https://developer.mozilla.org/en-US/docs/Mozilla/Add-ons/WebExtensions/API/browserAction
     browserAction: {
-        setBadgeBackgroundColor: promisifyNoFail(browserActionApi, 'setBadgeBackgroundColor'),
-        setBadgeText: promisifyNoFail(browserActionApi, 'setBadgeText'),
-        setIcon: promisifyNoFail(browserActionApi, 'setIcon'),
-        setTitle: promisifyNoFail(browserActionApi, 'setTitle'),
+        setBadgeBackgroundColor: promisifyNoFail(chrome.browserAction, 'setBadgeBackgroundColor'),
+        setBadgeText: promisifyNoFail(chrome.browserAction, 'setBadgeText'),
+        setIcon: promisifyNoFail(chrome.browserAction, 'setIcon'),
+        setTitle: promisifyNoFail(chrome.browserAction, 'setTitle'),
     },
     // https://developer.mozilla.org/en-US/docs/Mozilla/Add-ons/WebExtensions/API/menus
     menus: {
         create: function() {
-            return contextMenusApi.create(...arguments, ( ) => {
+            return chrome.contextMenus.create(...arguments, ( ) => {
                 void chrome.runtime.lastError;
             });
         },
-        onClicked: contextMenusApi.onClicked,
-        remove: promisifyNoFail(contextMenusApi, 'remove'),
-        removeAll: promisifyNoFail(contextMenusApi, 'removeAll'),
+        onClicked: chrome.contextMenus.onClicked,
+        remove: promisifyNoFail(chrome.contextMenus, 'remove'),
+        removeAll: promisifyNoFail(chrome.contextMenus, 'removeAll'),
     },
     // https://developer.mozilla.org/en-US/docs/Mozilla/Add-ons/WebExtensions/API/privacy
     privacy: {
@@ -151,14 +115,14 @@ const webext = {
     },
     // https://developer.mozilla.org/en-US/docs/Mozilla/Add-ons/WebExtensions/API/webNavigation
     webNavigation: {
-        getFrame: promisify(webNavigationApi, 'getFrame'),
-        getAllFrames: promisify(webNavigationApi, 'getAllFrames'),
+        getFrame: promisify(chrome.webNavigation, 'getFrame'),
+        getAllFrames: promisify(chrome.webNavigation, 'getAllFrames'),
     },
     // https://developer.mozilla.org/en-US/docs/Mozilla/Add-ons/WebExtensions/API/windows
     windows: {
-        get: promisifyNoFail(windowsApi, 'get', win => win instanceof Object ? win : null),
-        create: promisifyNoFail(windowsApi, 'create', win => win instanceof Object ? win : null),
-        update: promisifyNoFail(windowsApi, 'update', win => win instanceof Object ? win : null),
+        get: promisifyNoFail(chrome.windows, 'get', win => win instanceof Object ? win : null),
+        create: promisifyNoFail(chrome.windows, 'create', win => win instanceof Object ? win : null),
+        update: promisifyNoFail(chrome.windows, 'update', win => win instanceof Object ? win : null),
     },
 };
 
@@ -172,13 +136,12 @@ const webext = {
         [ 'websites', 'hyperlinkAuditingEnabled' ],
     ];
     for ( const [ category, setting ] of settings ) {
-        const thisArg = chrome.privacy?.[category]?.[setting];
-        if ( thisArg instanceof Object === false ) { continue; }
         let categoryEntry = webext.privacy[category];
         if ( categoryEntry instanceof Object === false ) {
             categoryEntry = webext.privacy[category] = {};
         }
         const settingEntry = categoryEntry[setting] = {};
+        const thisArg = chrome.privacy[category][setting];
         settingEntry.clear = promisifyNoFail(thisArg, 'clear');
         settingEntry.get = promisifyNoFail(thisArg, 'get');
         settingEntry.set = promisifyNoFail(thisArg, 'set');

@@ -46,6 +46,29 @@ type SearchSettings = { engine: SearchEngine; customUrl: string };
 type SearchSettingsResult = { ok: boolean; message: string; settings: SearchSettings };
 type UBlockStatus = { loaded: boolean; name: string; version: string; error: string | null };
 type FindResult = { requestId: number; activeMatchOrdinal: number; matches: number; finalUpdate: boolean };
+type UserScriptRunAt = "document-start" | "document-idle";
+type UserScript = {
+  id: string;
+  name: string;
+  enabled: boolean;
+  matches: string[];
+  excludes: string[];
+  runAt: UserScriptRunAt;
+  code: string;
+  createdAt: string;
+  updatedAt: string;
+};
+type UserScriptDraft = {
+  id: string | null;
+  name: string;
+  enabled: boolean;
+  matches: string;
+  excludes: string;
+  runAt: UserScriptRunAt;
+  code: string;
+};
+type UserScriptResult = { ok: boolean; message: string; script?: UserScript };
+type UserScriptImportResult = { ok: boolean; message: string; draft: UserScriptDraft | null };
 
 const browserApi = {
   createTab: (initialUrl?: string): Promise<number> =>
@@ -94,6 +117,14 @@ const browserApi = {
     ipcRenderer.invoke("settings:set-search", settings),
   openSettingsWindow: (): Promise<boolean> => ipcRenderer.invoke("settings:open-window"),
   getUBlockStatus: (): Promise<UBlockStatus> => ipcRenderer.invoke("ublock:get-status"),
+  listUserScripts: (): Promise<UserScript[]> => ipcRenderer.invoke("userscripts:list"),
+  saveUserScript: (draft: UserScriptDraft): Promise<UserScriptResult> =>
+    ipcRenderer.invoke("userscripts:save", draft),
+  toggleUserScript: (id: string, enabled: boolean): Promise<boolean> =>
+    ipcRenderer.invoke("userscripts:toggle", id, enabled),
+  removeUserScript: (id: string): Promise<boolean> => ipcRenderer.invoke("userscripts:remove", id),
+  importUserScriptFromFile: (): Promise<UserScriptImportResult> =>
+    ipcRenderer.invoke("userscripts:import-file"),
   openNavigationMenu: (anchor: { x: number; y: number }): Promise<boolean> =>
     ipcRenderer.invoke("navigation-menu:open", anchor),
   openSiteInfoMenu: (anchor: { x: number; y: number }): Promise<boolean> =>

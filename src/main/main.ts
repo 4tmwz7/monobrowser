@@ -104,6 +104,42 @@ type SearchSettingsResult = {
   settings: SearchSettings;
 };
 
+type UserScriptRunAt = "document-start" | "document-idle";
+
+type UserScript = {
+  id: string;
+  name: string;
+  enabled: boolean;
+  matches: string[];
+  excludes: string[];
+  runAt: UserScriptRunAt;
+  code: string;
+  createdAt: string;
+  updatedAt: string;
+};
+
+type UserScriptDraft = {
+  id: string | null;
+  name: string;
+  enabled: boolean;
+  matches: string;
+  excludes: string;
+  runAt: UserScriptRunAt;
+  code: string;
+};
+
+type UserScriptResult = {
+  ok: boolean;
+  message: string;
+  script?: UserScript;
+};
+
+type UserScriptImportResult = {
+  ok: boolean;
+  message: string;
+  draft: UserScriptDraft | null;
+};
+
 const START_PAGE_URL = "monobrowser://new-tab";
 const DEFAULT_URL = START_PAGE_URL;
 const DEFAULT_SEARCH_SETTINGS: SearchSettings = {
@@ -113,6 +149,12 @@ const DEFAULT_SEARCH_SETTINGS: SearchSettings = {
 const MAX_HISTORY_ITEMS = 500;
 const MAX_BOOKMARK_ITEMS = 250;
 const MAX_DOWNLOAD_ITEMS = 500;
+const MAX_USERSCRIPT_ITEMS = 100;
+const MAX_USERSCRIPT_CODE_LENGTH = 500_000;
+const MAX_USERSCRIPT_NAME_LENGTH = 200;
+const MAX_USERSCRIPT_PATTERNS = 50;
+const USERSCRIPT_HEADER_START = "==UserScript==";
+const USERSCRIPT_HEADER_END = "==/UserScript==";
 const ALLOWED_SITE_DATA_TYPES = new Set<SiteDataType>([
   "cookies",
   "localStorage",
@@ -139,6 +181,7 @@ let findView: WebContentsView | null = null;
 let findVisible = false;
 let historyFilePath = "";
 let bookmarksFilePath = "";
+let userscriptsFilePath = "";
 let downloadsFilePath = "";
 let siteOriginsFilePath = "";
 let languageFilePath = "";
@@ -149,6 +192,7 @@ let nextFindRequestId = 1;
 let activeTabId: number | null = null;
 let historyEntries: HistoryEntry[] = [];
 let bookmarkEntries: BookmarkEntry[] = [];
+let userScriptEntries: UserScript[] = [];
 let downloadRecords: DownloadRecord[] = [];
 let siteOriginRecords: SiteOriginRecord[] = [];
 let appLanguage: AppLanguage = "pl";
@@ -1853,6 +1897,475 @@ const handleHistoryWindowNavigation = async (url: string): Promise<void> => {
   }
 };
 
+const createUserscriptId = (): string =>
+  `${Date.now()}-${Math.random().toString(16).slice(2)}`;
+
+const isUserScriptRunAt = (value: unknown): value is UserScriptRunAt =>
+  value === "document-start" || value === "document-idle";
+
+const escapeUserScriptRegExp = (value: string): string =>
+  value.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+
+const userScriptPatternCache = new Map<string, RegExp | null>();
+
+const compileUserScriptPattern = (pattern: string): RegExp | null => {
+  const trimmed = pattern.trim();
+  if (!trimmed || trimmed.length > 2048) {
+    return null;
+  }
+
+  if (userScriptPatternCache.has(trimmed)) {
+    return userScriptPatternCache.get(trimmed) ?? null;
+  }
+
+  let compiled: RegExp | null = null;
+  const structured = trimmed.match(/^(\*|http|https|file):\/\/(\*|(?:\*\.)?[^/*]+)(\/.*)$/i);
+  if (structured) {
+    const [, rawScheme, rawHost, rawPath] = structured;
+    const scheme = rawScheme.toLowerCase() === "*"
+      ? "(?:https?|file)"
+      : rawScheme.toLowerCase();
+    let host: string;
+    if (rawHost === "*") {
+      host = "[^/]*";
+    } else if (rawHost.toLowerCase().startsWith("*.")) {
+      host = `(?:[^/]*\\.)?${escapeUserScriptRegExp(rawHost.slice(2))}`;
+    } else {
+      host = escapeUserScriptRegExp(rawHost);
+    }
+    const path = escapeUserScriptRegExp(rawPath).replaceAll("\\*", ".*");
+    try {
+      compiled = new RegExp(`^${scheme}:\\/\\/${host}${path}$`, "i");
+    } catch {
+      compiled = null;
+    }
+  } else {
+    // Fallback: treat the value as a simple glob with '*' wildcards (@include-style).
+    try {
+      compiled = new RegExp(`^${escapeUserScriptRegExp(trimmed).replaceAll("\\*", ".*")}$`, "i");
+    } catch {
+      compiled = null;
+    }
+  }
+
+  if (userScriptPatternCache.size > 500) {
+    userScriptPatternCache.clear();
+  }
+  userScriptPatternCache.set(trimmed, compiled);
+  return compiled;
+};
+
+const userScriptMatchesUrl = (script: UserScript, url: string): boolean => {
+  let parsed: URL;
+  try {
+    parsed = new URL(url);
+  } catch {
+    return false;
+  }
+
+  const protocol = parsed.protocol.replace(":", "").toLowerCase();
+  if (protocol !== "http" && protocol !== "https" && protocol !== "file") {
+    return false;
+  }
+
+  if (script.excludes.some((pattern) => compileUserScriptPattern(pattern)?.test(url))) {
+    return false;
+  }
+
+  // An empty match list means the script runs on every http(s)/file page.
+  if (script.matches.length === 0) {
+    return true;
+  }
+
+  return script.matches.some((pattern) => compileUserScriptPattern(pattern)?.test(url));
+};
+
+const normalizeUserScriptPatterns = (value: unknown): string[] => {
+  const items = typeof value === "string"
+    ? value.split(/\r?\n/)
+    : Array.isArray(value)
+      ? value
+      : [];
+  const patterns: string[] = [];
+  for (const item of items) {
+    if (typeof item !== "string") {
+      continue;
+    }
+    const trimmed = item.trim();
+    if (!trimmed || trimmed.length > 2048 || patterns.includes(trimmed)) {
+      continue;
+    }
+    patterns.push(trimmed);
+    if (patterns.length >= MAX_USERSCRIPT_PATTERNS) {
+      break;
+    }
+  }
+  return patterns;
+};
+
+const parseUserScriptHeader = (code: string): {
+  name: string;
+  matches: string[];
+  excludes: string[];
+  runAt: UserScriptRunAt | null;
+} => {
+  const result = { name: "", matches: [] as string[], excludes: [] as string[], runAt: null as UserScriptRunAt | null };
+  const startIndex = code.indexOf(USERSCRIPT_HEADER_START);
+  if (startIndex < 0) {
+    return result;
+  }
+
+  const endIndex = code.indexOf(USERSCRIPT_HEADER_END, startIndex);
+  const header = code.slice(
+    startIndex + USERSCRIPT_HEADER_START.length,
+    endIndex >= 0 ? endIndex : undefined,
+  );
+
+  for (const rawLine of header.split(/\r?\n/)) {
+    const line = rawLine.trim().replace(/^\/\/+/, "").trim();
+    if (!line.startsWith("@")) {
+      continue;
+    }
+    const separator = line.search(/\s/);
+    if (separator < 0) {
+      continue;
+    }
+    const key = line.slice(1, separator).toLowerCase();
+    const value = line.slice(separator + 1).trim();
+    if (!value) {
+      continue;
+    }
+    if (key === "name" && !result.name) {
+      result.name = value;
+    } else if (key === "match" || key === "include") {
+      if (result.matches.length < MAX_USERSCRIPT_PATTERNS) {
+        result.matches.push(value);
+      }
+    } else if (key === "exclude") {
+      if (result.excludes.length < MAX_USERSCRIPT_PATTERNS) {
+        result.excludes.push(value);
+      }
+    } else if (key === "run-at" && isUserScriptRunAt(value)) {
+      result.runAt = value;
+    }
+  }
+
+  return result;
+};
+
+const normalizeUserScript = (value: unknown, index: number): UserScript | null => {
+  if (typeof value !== "object" || value === null) {
+    return null;
+  }
+
+  const raw = value as Partial<UserScript>;
+  if (typeof raw.code !== "string" || !raw.code.trim() || raw.code.length > MAX_USERSCRIPT_CODE_LENGTH) {
+    return null;
+  }
+
+  const now = new Date().toISOString();
+  const header = parseUserScriptHeader(raw.code);
+  const name = typeof raw.name === "string" && raw.name.trim()
+    ? raw.name.trim()
+    : header.name || `User script ${index + 1}`;
+
+  return {
+    id: typeof raw.id === "string" && raw.id.length >= 8 && raw.id.length <= 64
+      ? raw.id
+      : createUserscriptId(),
+    name: name.slice(0, MAX_USERSCRIPT_NAME_LENGTH),
+    enabled: raw.enabled !== false,
+    matches: normalizeUserScriptPatterns(raw.matches).length > 0
+      ? normalizeUserScriptPatterns(raw.matches)
+      : header.matches,
+    excludes: normalizeUserScriptPatterns(raw.excludes).length > 0
+      ? normalizeUserScriptPatterns(raw.excludes)
+      : header.excludes,
+    runAt: isUserScriptRunAt(raw.runAt) ? raw.runAt : (header.runAt ?? "document-idle"),
+    code: raw.code,
+    createdAt: typeof raw.createdAt === "string" ? raw.createdAt : now,
+    updatedAt: typeof raw.updatedAt === "string" ? raw.updatedAt : now,
+  };
+};
+
+const saveUserScripts = async (): Promise<void> => {
+  await writeJsonAtomically(userscriptsFilePath, userScriptEntries.slice(0, MAX_USERSCRIPT_ITEMS));
+};
+
+const loadUserScripts = async (): Promise<void> => {
+  try {
+    const raw = await fs.readFile(userscriptsFilePath, "utf8");
+    const parsed = JSON.parse(raw) as unknown;
+    if (!Array.isArray(parsed)) {
+      userScriptEntries = [];
+      return;
+    }
+
+    userScriptEntries = parsed
+      .map((entry, index) => normalizeUserScript(entry, index))
+      .filter((entry): entry is UserScript => entry !== null)
+      .slice(0, MAX_USERSCRIPT_ITEMS);
+  } catch {
+    userScriptEntries = [];
+  }
+};
+
+const buildUserScriptWrapper = (script: UserScript): string => {
+  const nameLiteral = JSON.stringify(script.name);
+  const infoLiteral = JSON.stringify({
+    name: script.name,
+    runAt: script.runAt,
+    source: "MonoBrowser",
+  });
+
+  return [
+    "(function(){",
+    `"use strict";`,
+    `var GM_info = ${infoLiteral};`,
+    "var GM_addStyle = function(css){ var element = document.createElement('style'); element.textContent = String(css); (document.head || document.documentElement).appendChild(element); return element; };",
+    "var GM_setClipboard = function(text){ if (navigator.clipboard) { return navigator.clipboard.writeText(String(text)); } };",
+    "try {",
+    `(function(){\n${script.code}\n})();`,
+    "} catch (error) {",
+    `console.error('[MonoBrowser userscript] ' + ${nameLiteral} + ':', error);`,
+    "}",
+    "})();",
+  ].join("\n");
+};
+
+const executedUserScriptKeys = new WeakMap<WebContents, Set<string>>();
+
+const injectUserScriptsIntoContents = async (
+  contents: WebContents,
+  runAt: UserScriptRunAt,
+): Promise<void> => {
+  if (contents.isDestroyed() || userScriptEntries.length === 0) {
+    return;
+  }
+
+  const url = contents.getURL();
+  if (!url) {
+    return;
+  }
+
+  const matching = userScriptEntries.filter((script) =>
+    script.enabled &&
+    script.runAt === runAt &&
+    userScriptMatchesUrl(script, url)
+  );
+  if (matching.length === 0) {
+    return;
+  }
+
+  const key = `${runAt}|${url}`;
+  let executed = executedUserScriptKeys.get(contents);
+  if (!executed) {
+    executed = new Set();
+    executedUserScriptKeys.set(contents, executed);
+  }
+  if (executed.has(key)) {
+    return;
+  }
+  executed.add(key);
+
+  for (const script of matching) {
+    if (contents.isDestroyed()) {
+      return;
+    }
+    try {
+      await contents.executeJavaScript(buildUserScriptWrapper(script), true);
+    } catch (error) {
+      console.error(`Failed to run user script "${script.name}":`, error);
+    }
+  }
+};
+
+const saveUserScriptInput = async (input: unknown): Promise<UserScriptResult> => {
+  const copy = appLanguage === "pl"
+    ? {
+      invalid: "Nieprawidłowe dane skryptu.",
+      noCode: "Kod skryptu nie może być pusty.",
+      codeTooLong: "Kod skryptu jest za długi.",
+      tooMany: `Osiągnięto limit skryptów (${MAX_USERSCRIPT_ITEMS}).`,
+      saved: "Skrypt zapisany.",
+      fallbackName: "Nowy skrypt",
+    }
+    : {
+      invalid: "Invalid script data.",
+      noCode: "Script code cannot be empty.",
+      codeTooLong: "Script code is too long.",
+      tooMany: `Reached the script limit (${MAX_USERSCRIPT_ITEMS}).`,
+      saved: "Script saved.",
+      fallbackName: "New script",
+    };
+
+  if (typeof input !== "object" || input === null) {
+    return { ok: false, message: copy.invalid };
+  }
+
+  const raw = input as {
+    id?: unknown;
+    name?: unknown;
+    enabled?: unknown;
+    matches?: unknown;
+    excludes?: unknown;
+    runAt?: unknown;
+    code?: unknown;
+  };
+
+  const code = typeof raw.code === "string" ? raw.code : "";
+  if (!code.trim()) {
+    return { ok: false, message: copy.noCode };
+  }
+  if (code.length > MAX_USERSCRIPT_CODE_LENGTH) {
+    return { ok: false, message: copy.codeTooLong };
+  }
+
+  const header = parseUserScriptHeader(code);
+  const providedName = typeof raw.name === "string" ? raw.name.trim() : "";
+  const name = (providedName || header.name || copy.fallbackName).slice(0, MAX_USERSCRIPT_NAME_LENGTH);
+  const matches = normalizeUserScriptPatterns(raw.matches);
+  const excludes = normalizeUserScriptPatterns(raw.excludes);
+  const runAt = isUserScriptRunAt(raw.runAt) ? raw.runAt : (header.runAt ?? "document-idle");
+  const enabled = raw.enabled !== false;
+
+  const existingId = typeof raw.id === "string" && raw.id
+    ? userScriptEntries.find((script) => script.id === raw.id)?.id ?? null
+    : null;
+
+  if (existingId) {
+    const existing = userScriptEntries.find((script) => script.id === existingId);
+    if (!existing) {
+      return { ok: false, message: copy.invalid };
+    }
+    const updated: UserScript = {
+      ...existing,
+      name,
+      enabled,
+      matches,
+      excludes,
+      runAt,
+      code,
+      updatedAt: new Date().toISOString(),
+    };
+    userScriptEntries = userScriptEntries.map((script) => script.id === existingId ? updated : script);
+    await saveUserScripts();
+    return { ok: true, message: copy.saved, script: updated };
+  }
+
+  if (userScriptEntries.length >= MAX_USERSCRIPT_ITEMS) {
+    return { ok: false, message: copy.tooMany };
+  }
+
+  const created: UserScript = {
+    id: createUserscriptId(),
+    name,
+    enabled,
+    matches,
+    excludes,
+    runAt,
+    code,
+    createdAt: new Date().toISOString(),
+    updatedAt: new Date().toISOString(),
+  };
+  userScriptEntries = [...userScriptEntries, created];
+  await saveUserScripts();
+  return { ok: true, message: copy.saved, script: created };
+};
+
+const toggleUserScript = async (id: unknown, enabled: unknown): Promise<boolean> => {
+  if (typeof id !== "string" || typeof enabled !== "boolean") {
+    return false;
+  }
+
+  const existing = userScriptEntries.find((script) => script.id === id);
+  if (!existing) {
+    return false;
+  }
+
+  const updated: UserScript = {
+    ...existing,
+    enabled,
+    updatedAt: new Date().toISOString(),
+  };
+  userScriptEntries = userScriptEntries.map((script) => script.id === id ? updated : script);
+  await saveUserScripts();
+  return true;
+};
+
+const removeUserScript = async (id: unknown): Promise<boolean> => {
+  if (typeof id !== "string") {
+    return false;
+  }
+
+  const next = userScriptEntries.filter((script) => script.id !== id);
+  if (next.length === userScriptEntries.length) {
+    return false;
+  }
+
+  userScriptEntries = next;
+  await saveUserScripts();
+  return true;
+};
+
+const importUserScriptFromFile = async (): Promise<UserScriptImportResult> => {
+  const copy = appLanguage === "pl"
+    ? {
+      title: "Importuj skrypt użytkownika",
+      readFailed: "Nie udało się odczytać pliku.",
+      codeTooLong: "Kod skryptu jest za długi.",
+      imported: "Skrypt wczytany — sprawdź szczegóły i zapisz.",
+    }
+    : {
+      title: "Import a user script",
+      readFailed: "The file could not be read.",
+      codeTooLong: "Script code is too long.",
+      imported: "Script loaded — review the details and save.",
+    };
+
+  const parent = settingsWindow && !settingsWindow.isDestroyed()
+    ? settingsWindow
+    : mainWindow;
+  if (!parent || parent.isDestroyed()) {
+    return { ok: false, message: copy.readFailed, draft: null };
+  }
+
+  const picked = await dialog.showOpenDialog(parent, {
+    title: copy.title,
+    properties: ["openFile"],
+    filters: [
+      { name: appLanguage === "pl" ? "Skrypty użytkownika" : "User scripts", extensions: ["user.js", "js"] },
+      { name: appLanguage === "pl" ? "Wszystkie pliki" : "All files", extensions: ["*"] },
+    ],
+  });
+
+  if (picked.canceled || picked.filePaths.length === 0) {
+    return { ok: true, message: "", draft: null };
+  }
+
+  try {
+    const code = await fs.readFile(picked.filePaths[0], "utf8");
+    if (code.length > MAX_USERSCRIPT_CODE_LENGTH) {
+      return { ok: false, message: copy.codeTooLong, draft: null };
+    }
+
+    const header = parseUserScriptHeader(code);
+    const baseName = path.basename(picked.filePaths[0]).replace(/\.user\.js$|\.js$/i, "");
+    const draft: UserScriptDraft = {
+      id: null,
+      name: (header.name || baseName).slice(0, MAX_USERSCRIPT_NAME_LENGTH),
+      enabled: true,
+      matches: header.matches.join("\n"),
+      excludes: header.excludes.join("\n"),
+      runAt: header.runAt ?? "document-idle",
+      code,
+    };
+    return { ok: true, message: copy.imported, draft };
+  } catch {
+    return { ok: false, message: copy.readFailed, draft: null };
+  }
+};
+
 const INTERNAL_WINDOW_STYLES = `
   :root { color-scheme:light; --black:#0a0a0a; --white:#f0efe9; --accent:#9c9b95; --grey:#5c5b57; font-family:ui-monospace,"Cascadia Mono","Courier New",monospace; }
   * { box-sizing: border-box; }
@@ -2092,6 +2605,19 @@ const renderSettingsWindowHtml = (): string => {
     customLabel: "Adres wyszukiwania", customHint: "Wstaw {query} w miejscu wyszukiwanego tekstu.",
     save: "Zapisz ustawienia", blockerHeading: "Blokowanie treści", blockerDescription: "Wbudowana ochrona przed reklamami i modułami śledzącymi.",
     active: "Aktywny", unavailable: "Niedostępny", loading: "Wczytywanie ustawień…", loadFailed: "Nie udało się wczytać ustawień.",
+    searchTab: "Wyszukiwanie", userscriptsTab: "Skrypty użytkownika",
+    userscriptsHeading: "Skrypty użytkownika", userscriptsDescription: "Własne skrypty JavaScript uruchamiane na stronach zgodnych ze wzorcami adresów.",
+    addScript: "+ Dodaj skrypt", importScript: "Importuj z pliku…", noScripts: "Brak skryptów użytkownika.",
+    edit: "Edytuj", remove: "Usuń", enable: "Włącz", disable: "Wyłącz", off: "Wyłączony",
+    allSites: "Wszystkie strony http(s)/file", scriptCountSuffix: "skrypty",
+    editorTitleNew: "Nowy skrypt", editorTitleEdit: "Edytuj skrypt",
+    nameLabel: "Nazwa", matchesLabel: "Wzorce adresów (jeden na linię)",
+    matchesHint: "Np. *://example.com/* — pusta lista oznacza wszystkie strony http(s)/file.",
+    excludesLabel: "Wyjątki (jeden na linię)", runAtLabel: "Moment uruchomienia",
+    codeLabel: "Kod skryptu", enabledLabel: "Skrypt włączony",
+    saveScript: "Zapisz skrypt", cancel: "Anuluj",
+    scriptSaved: "Skrypt zapisany.", scriptRemoved: "Skrypt usunięty.",
+    removeConfirm: "Usunąć ten skrypt?", loadedCountPrefix: "Wczytane skrypty:",
   } : {
     title: "MonoBrowser — Settings", heading: "Settings", searchHeading: "Default search engine",
     searchDescription: "Choose the service used by the address bar and start page.",
@@ -2100,8 +2626,29 @@ const renderSettingsWindowHtml = (): string => {
     customLabel: "Search URL", customHint: "Place {query} where the search text should appear.",
     save: "Save settings", blockerHeading: "Content blocking", blockerDescription: "Built-in protection against ads and trackers.",
     active: "Active", unavailable: "Unavailable", loading: "Loading settings…", loadFailed: "Settings could not be loaded.",
+    searchTab: "Search", userscriptsTab: "User scripts",
+    userscriptsHeading: "User scripts", userscriptsDescription: "Custom JavaScript snippets injected into pages that match URL patterns.",
+    addScript: "+ Add script", importScript: "Import from file…", noScripts: "No user scripts yet.",
+    edit: "Edit", remove: "Remove", enable: "Enable", disable: "Disable", off: "Off",
+    allSites: "All http(s)/file pages", scriptCountSuffix: "scripts",
+    editorTitleNew: "New script", editorTitleEdit: "Edit script",
+    nameLabel: "Name", matchesLabel: "URL patterns (one per line)",
+    matchesHint: "e.g. *://example.com/* — an empty list means all http(s)/file pages.",
+    excludesLabel: "Excludes (one per line)", runAtLabel: "Run at",
+    codeLabel: "Script code", enabledLabel: "Script enabled",
+    saveScript: "Save script", cancel: "Cancel",
+    scriptSaved: "Script saved.", scriptRemoved: "Script removed.",
+    removeConfirm: "Remove this script?", loadedCountPrefix: "Loaded scripts:",
   };
   const copyJson = JSON.stringify(copy).replace(/</g, "\\u003c");
+  const scriptStub = [
+    "// ==UserScript==",
+    "// @match *://*/*",
+    "// ==/UserScript==",
+    "",
+    "",
+  ].join("\n");
+  const scriptStubLiteral = JSON.stringify(scriptStub);
   return `<!doctype html>
 <html lang="${appLanguage}"><head><meta charset="UTF-8"><meta name="viewport" content="width=device-width,initial-scale=1">
 <meta http-equiv="Content-Security-Policy" content="default-src 'none'; style-src 'unsafe-inline'; script-src 'unsafe-inline'; img-src data:">
@@ -2111,7 +2658,12 @@ const renderSettingsWindowHtml = (): string => {
   body::after { content:""; position:fixed; inset:0; pointer-events:none; opacity:.03; background:url("data:image/svg+xml,%3Csvg viewBox='0 0 180 180' xmlns='http://www.w3.org/2000/svg'%3E%3Cfilter id='n'%3E%3CfeTurbulence type='fractalNoise' baseFrequency='.95' numOctaves='3' stitchTiles='stitch'/%3E%3C/filter%3E%3Crect width='100%25' height='100%25' filter='url(%23n)'/%3E%3C/svg%3E"); }
   header { padding:19px 24px; border-bottom:3px solid var(--black); background:var(--black); color:var(--white); }
   header h1 { font-family:Impact,Haettenschweiler,"Arial Narrow Bold",sans-serif; font-size:30px; letter-spacing:.06em; text-transform:uppercase; }
+  .tabs { width:min(760px,100%); margin:0 auto; padding:16px 24px 0; display:flex; }
+  .tab { border:2px solid var(--black); border-bottom:none; border-radius:0; background:var(--white); color:var(--black); padding:10px 18px; font-size:11px; font-weight:700; letter-spacing:.08em; text-transform:uppercase; cursor:pointer; margin-right:-2px; }
+  .tab.active { background:var(--black); color:var(--white); }
+  .tab:hover:not(.active) { background:var(--accent); color:var(--black); }
   main { width:min(760px,100%); margin:0 auto; padding:24px; display:grid; gap:16px; }
+  .panel[hidden] { display:none; }
   .card { border:3px solid var(--black); border-radius:0; background:var(--white); padding:20px; box-shadow:none; }
   h2 { margin:0 0 5px; font-family:Impact,Haettenschweiler,"Arial Narrow Bold",sans-serif; font-size:22px; letter-spacing:.05em; text-transform:uppercase; } .description { margin:0 0 16px; color:var(--grey); font-size:11px; line-height:1.6; }
   .engines { display:grid; grid-template-columns:repeat(3,1fr); gap:9px; }
@@ -2130,7 +2682,7 @@ const renderSettingsWindowHtml = (): string => {
   #custom-url:focus { box-shadow:4px 4px 0 var(--accent); } #custom-url:disabled { opacity:.42; }
   .hint { color:var(--grey); font-size:10px; } code { color:var(--black); font-weight:700; }
   .actions { display:flex; align-items:center; justify-content:space-between; gap:12px; margin-top:17px; }
-  #message { min-height:18px; color:#34633e; font-size:11px; } #message.error { color:#8b2931; }
+  #message, #scripts-message { min-height:18px; color:#34633e; font-size:11px; } #message.error, #scripts-message.error { color:#8b2931; }
   #save { border:2px solid var(--black); border-radius:0; background:var(--black); color:var(--white); font-weight:700; text-transform:uppercase; letter-spacing:.12em; }
   #save:hover { background:var(--accent); color:var(--black); }
   .blocker-row { display:flex; align-items:center; justify-content:space-between; gap:16px; }
@@ -2138,25 +2690,98 @@ const renderSettingsWindowHtml = (): string => {
   .badge { display:inline-flex; align-items:center; gap:7px; padding:7px 10px; border:2px solid var(--black); border-radius:0; color:var(--white); background:var(--black); font-size:10px; text-transform:uppercase; letter-spacing:.1em; white-space:nowrap; }
   .badge::before { content:""; width:7px; height:7px; background:#7fc78e; }
   .badge.off::before { background:#c87f84; }
+  .scripts-toolbar { display:flex; align-items:center; gap:9px; flex-wrap:wrap; margin-bottom:15px; }
+  button.secondary { border:2px solid var(--black); background:var(--white); color:var(--black); }
+  button.secondary:hover { background:var(--accent); color:var(--black); }
+  .scripts-toolbar #scripts-message { margin-left:auto; }
+  .script-row { padding:12px 0; border-bottom:2px solid var(--black); display:grid; gap:7px; }
+  .script-row:last-child { border-bottom:none; padding-bottom:2px; }
+  .script-top { display:flex; align-items:center; justify-content:space-between; gap:12px; }
+  .script-name { font-size:13px; font-weight:700; overflow-wrap:anywhere; }
+  .script-patterns { color:var(--grey); font-size:10px; overflow-wrap:anywhere; }
+  .script-actions { display:flex; gap:7px; flex-wrap:wrap; }
+  .field { display:grid; gap:6px; margin-bottom:13px; }
+  .field > label { font-size:11px; font-weight:700; text-transform:uppercase; letter-spacing:.08em; }
+  .field input[type=text], .field textarea { width:100%; padding:10px; border:2px solid var(--black); border-radius:0; outline:0; background:var(--white); color:var(--black); font:11px ui-monospace,"Cascadia Mono","Courier New",monospace; }
+  .field textarea { resize:vertical; }
+  .field input:focus, .field textarea:focus { box-shadow:4px 4px 0 var(--accent); }
+  #script-code { min-height:220px; }
+  .runat-row { display:flex; gap:9px; flex-wrap:wrap; }
+  .runat { position:relative; display:block; }
+  .runat input { position:absolute; opacity:0; pointer-events:none; }
+  .runat-body { display:block; padding:8px 12px; border:2px solid var(--black); border-radius:0; cursor:pointer; font-size:11px; font-weight:700; }
+  .runat input:checked + .runat-body { background:var(--black); color:var(--white); }
+  .checkbox-row { display:flex; align-items:center; gap:9px; font-size:11px; font-weight:700; text-transform:uppercase; letter-spacing:.08em; cursor:pointer; }
+  .checkbox-row input { width:15px; height:15px; accent-color:var(--black); }
+  .editor-actions { display:flex; justify-content:flex-end; gap:9px; margin-top:16px; }
+  .editor-actions button.primary { border:2px solid var(--black); background:var(--black); color:var(--white); font-weight:700; text-transform:uppercase; letter-spacing:.1em; }
+  .editor-actions button.primary:hover { background:var(--accent); color:var(--black); }
   @media(max-width:640px) { .engines { grid-template-columns:1fr; } .engine-body { min-height:0; } .blocker-row { align-items:flex-start; flex-direction:column; } }
 </style></head><body>
 <header><h1>${copy.heading}</h1></header>
+<nav class="tabs" aria-label="${copy.heading}">
+  <button type="button" class="tab active" data-tab="search">${copy.searchTab}</button>
+  <button type="button" class="tab" data-tab="userscripts">${copy.userscriptsTab}</button>
+</nav>
 <main>
-  <form id="settings-form" class="card">
-    <h2>${copy.searchHeading}</h2><p class="description">${copy.searchDescription}</p>
-    <div class="engines">
-      <label class="engine"><input type="radio" name="engine" value="google"><span class="engine-body"><span class="engine-name"><i class="engine-mark"></i>Google</span><span class="engine-copy">${copy.googleDescription}</span></span></label>
-      <label class="engine"><input type="radio" name="engine" value="duckduckgo"><span class="engine-body"><span class="engine-name"><i class="engine-mark"></i>DuckDuckGo</span><span class="engine-copy">${copy.duckDescription}</span></span></label>
-      <label class="engine"><input type="radio" name="engine" value="custom"><span class="engine-body"><span class="engine-name"><i class="engine-mark"></i>${copy.custom}</span><span class="engine-copy">${copy.customDescription}</span></span></label>
-    </div>
-    <div class="custom-field"><label for="custom-url">${copy.customLabel}</label><input id="custom-url" type="url" maxlength="2048" spellcheck="false"><span class="hint">${copy.customHint.replace("{query}", "<code>{query}</code>")}</span></div>
-    <div class="actions"><span id="message">${copy.loading}</span><button id="save" type="submit">${copy.save}</button></div>
-  </form>
-  <section class="card blocker-row"><div class="blocker-copy"><h2>${copy.blockerHeading}</h2><p class="description">${copy.blockerDescription}</p><span id="blocker-name" class="blocker-name">uBlock Origin</span></div><span id="blocker-status" class="badge">${copy.active}</span></section>
+  <section id="panel-search" class="panel">
+    <form id="settings-form" class="card">
+      <h2>${copy.searchHeading}</h2><p class="description">${copy.searchDescription}</p>
+      <div class="engines">
+        <label class="engine"><input type="radio" name="engine" value="google"><span class="engine-body"><span class="engine-name"><i class="engine-mark"></i>Google</span><span class="engine-copy">${copy.googleDescription}</span></span></label>
+        <label class="engine"><input type="radio" name="engine" value="duckduckgo"><span class="engine-body"><span class="engine-name"><i class="engine-mark"></i>DuckDuckGo</span><span class="engine-copy">${copy.duckDescription}</span></span></label>
+        <label class="engine"><input type="radio" name="engine" value="custom"><span class="engine-body"><span class="engine-name"><i class="engine-mark"></i>${copy.custom}</span><span class="engine-copy">${copy.customDescription}</span></span></label>
+      </div>
+      <div class="custom-field"><label for="custom-url">${copy.customLabel}</label><input id="custom-url" type="url" maxlength="2048" spellcheck="false"><span class="hint">${copy.customHint.replace("{query}", "<code>{query}</code>")}</span></div>
+      <div class="actions"><span id="message">${copy.loading}</span><button id="save" type="submit">${copy.save}</button></div>
+    </form>
+    <section class="card blocker-row"><div class="blocker-copy"><h2>${copy.blockerHeading}</h2><p class="description">${copy.blockerDescription}</p><span id="blocker-name" class="blocker-name">uBlock Origin</span></div><span id="blocker-status" class="badge">${copy.active}</span></section>
+  </section>
+  <section id="panel-userscripts" class="panel" hidden>
+    <section id="scripts-list-card" class="card">
+      <div class="blocker-row">
+        <div><h2>${copy.userscriptsHeading} <span id="scripts-count" style="font-size:12px;color:var(--grey)"></span></h2>
+        <p class="description">${copy.userscriptsDescription}</p></div>
+      </div>
+      <div class="scripts-toolbar">
+        <button type="button" id="script-add" class="secondary">${copy.addScript}</button>
+        <button type="button" id="script-import" class="secondary">${copy.importScript}</button>
+        <span id="scripts-message"></span>
+      </div>
+      <div id="scripts-list"></div>
+    </section>
+    <section id="script-editor-card" class="card" hidden>
+      <h2 id="script-editor-title">${copy.editorTitleNew}</h2><p class="description">${copy.matchesHint}</p>
+      <div class="field"><label for="script-name">${copy.nameLabel}</label><input id="script-name" type="text" maxlength="200" spellcheck="false"></div>
+      <div class="field"><label for="script-matches">${copy.matchesLabel}</label><textarea id="script-matches" rows="3" spellcheck="false"></textarea><span class="hint">${copy.matchesHint}</span></div>
+      <div class="field"><label for="script-excludes">${copy.excludesLabel}</label><textarea id="script-excludes" rows="2" spellcheck="false"></textarea></div>
+      <div class="field"><label>${copy.runAtLabel}</label><div class="runat-row">
+        <label class="runat"><input type="radio" name="script-runat" value="document-start"><span class="runat-body">document-start</span></label>
+        <label class="runat"><input type="radio" name="script-runat" value="document-idle" checked><span class="runat-body">document-idle</span></label>
+      </div></div>
+      <div class="field"><label class="checkbox-row" for="script-enabled"><input id="script-enabled" type="checkbox" checked>${copy.enabledLabel}</label></div>
+      <div class="field"><label for="script-code">${copy.codeLabel}</label><textarea id="script-code" rows="12" spellcheck="false"></textarea></div>
+      <div class="editor-actions">
+        <button type="button" id="script-cancel" class="danger">${copy.cancel}</button>
+        <button type="button" id="script-save" class="primary">${copy.saveScript}</button>
+      </div>
+    </section>
+  </section>
 </main>
 <script>
 (() => {
   const copy = ${copyJson};
+  const tabs = Array.from(document.querySelectorAll('.tab'));
+  const panels = {
+    search: document.getElementById('panel-search'),
+    userscripts: document.getElementById('panel-userscripts'),
+  };
+  const activate = (name) => {
+    tabs.forEach((tab) => tab.classList.toggle('active', tab.dataset.tab === name));
+    Object.keys(panels).forEach((key) => { panels[key].hidden = key !== name; });
+  };
+  tabs.forEach((tab) => tab.addEventListener('click', () => activate(tab.dataset.tab)));
+
   const form = document.getElementById('settings-form');
   const customUrl = document.getElementById('custom-url');
   const message = document.getElementById('message');
@@ -2178,6 +2803,112 @@ const renderSettingsWindowHtml = (): string => {
     blockerStatus.classList.toggle('off', !blocker.loaded);
     if (!blocker.loaded && blocker.error) blockerStatus.title = blocker.error;
   }).catch(() => { message.textContent = copy.loadFailed; message.className = 'error'; });
+
+  const make = (tag, className, text) => { const el = document.createElement(tag); if (className) el.className = className; if (text !== undefined) el.textContent = text; return el; };
+  const action = (label, handler, danger) => { const button = make('button', danger ? 'danger' : 'secondary', label); button.type = 'button'; button.addEventListener('click', handler); return button; };
+
+  const listCard = document.getElementById('scripts-list-card');
+  const editorCard = document.getElementById('script-editor-card');
+  const listEl = document.getElementById('scripts-list');
+  const countEl = document.getElementById('scripts-count');
+  const scriptsMessage = document.getElementById('scripts-message');
+  const editorTitle = document.getElementById('script-editor-title');
+  const nameInput = document.getElementById('script-name');
+  const matchesInput = document.getElementById('script-matches');
+  const excludesInput = document.getElementById('script-excludes');
+  const enabledInput = document.getElementById('script-enabled');
+  const codeInput = document.getElementById('script-code');
+  let scripts = [];
+  let editingDraft = null;
+
+  const showScriptsMessage = (text, error) => { scriptsMessage.textContent = text; scriptsMessage.className = error ? 'error' : ''; };
+  const patternSummary = (script) => {
+    if (!script.matches.length) return copy.allSites;
+    const head = script.matches.slice(0, 2).join(', ');
+    return script.matches.length > 2 ? head + ' +' + (script.matches.length - 2) : head;
+  };
+  const toDraft = (script) => ({
+    id: script.id,
+    name: script.name,
+    enabled: script.enabled,
+    matches: script.matches.join('\\n'),
+    excludes: script.excludes.join('\\n'),
+    runAt: script.runAt,
+    code: script.code,
+  });
+  const refresh = async () => {
+    scripts = await window.browserApi.listUserScripts();
+    countEl.textContent = '(' + scripts.length + ')';
+    renderList();
+  };
+  const renderList = () => {
+    listEl.replaceChildren();
+    if (!scripts.length) { listEl.append(make('div', 'empty', copy.noScripts)); return; }
+    for (const script of scripts) {
+      const row = make('div', 'script-row');
+      const top = make('div', 'script-top');
+      const nameWrap = make('div');
+      nameWrap.append(make('span', 'script-name', script.name));
+      const badge = make('span', 'badge' + (script.enabled ? '' : ' off'), script.enabled ? copy.active : copy.off);
+      top.append(nameWrap, badge);
+      row.append(top, make('div', 'script-patterns', patternSummary(script)));
+      const actions = make('div', 'script-actions');
+      actions.append(action(copy.edit, () => openEditor(toDraft(script))));
+      actions.append(action(script.enabled ? copy.disable : copy.enable, async () => {
+        await window.browserApi.toggleUserScript(script.id, !script.enabled);
+        await refresh();
+      }));
+      actions.append(action(copy.remove, async () => {
+        if (!confirm(copy.removeConfirm)) return;
+        if (await window.browserApi.removeUserScript(script.id)) { showScriptsMessage(copy.scriptRemoved); await refresh(); }
+      }, true));
+      row.append(actions);
+      listEl.append(row);
+    }
+  };
+  const openEditor = (draft) => {
+    editingDraft = draft;
+    editorTitle.textContent = draft.id ? copy.editorTitleEdit : copy.editorTitleNew;
+    nameInput.value = draft.name;
+    matchesInput.value = draft.matches;
+    excludesInput.value = draft.excludes;
+    enabledInput.checked = draft.enabled;
+    codeInput.value = draft.code;
+    const runAt = formlessRunAt(draft.runAt);
+    editorCard.hidden = false;
+    listCard.hidden = true;
+    runAt.checked = true;
+    activate('userscripts');
+  };
+  const formlessRunAt = (value) => {
+    const input = document.querySelector('input[name=script-runat][value="' + value + '"]');
+    return input || document.querySelector('input[name=script-runat][value="document-idle"]');
+  };
+  const closeEditor = () => { editingDraft = null; editorCard.hidden = true; listCard.hidden = false; };
+  const draftFromForm = () => ({
+    id: editingDraft ? editingDraft.id : null,
+    name: nameInput.value,
+    enabled: enabledInput.checked,
+    matches: matchesInput.value,
+    excludes: excludesInput.value,
+    runAt: (document.querySelector('input[name=script-runat]:checked') || {}).value || 'document-idle',
+    code: codeInput.value,
+  });
+  document.getElementById('script-add').addEventListener('click', () => {
+    openEditor({ id: null, name: '', enabled: true, matches: '', excludes: '', runAt: 'document-idle', code: ${scriptStubLiteral} });
+  });
+  document.getElementById('script-import').addEventListener('click', async () => {
+    const result = await window.browserApi.importUserScriptFromFile();
+    if (!result.ok) { showScriptsMessage(result.message, true); return; }
+    if (result.draft) { openEditor(result.draft); showScriptsMessage(result.message); }
+  });
+  document.getElementById('script-cancel').addEventListener('click', closeEditor);
+  document.getElementById('script-save').addEventListener('click', async () => {
+    const result = await window.browserApi.saveUserScript(draftFromForm());
+    if (result.ok) { closeEditor(); showScriptsMessage(result.message); await refresh(); }
+    else showScriptsMessage(result.message, true);
+  });
+  refresh().catch(() => showScriptsMessage(copy.loadFailed, true));
 })();
 </script></body></html>`;
 };
@@ -3341,6 +4072,7 @@ const createTab = (
 
   contents.on("dom-ready", () => {
     runBackgroundProbeIfStartPage(contents);
+    void injectUserScriptsIntoContents(contents, "document-start");
   });
   contents.on("before-input-event", handleBeforeInputEvent);
   contents.on("context-menu", (_event, params) => {
@@ -3349,11 +4081,18 @@ const createTab = (
   contents.on("did-start-loading", () => updateTabFromWebContents(tab));
   contents.on("did-stop-loading", () => updateTabFromWebContents(tab));
   contents.on("page-title-updated", () => updateTabFromWebContents(tab));
-  contents.on("did-navigate", () => updateTabFromWebContents(tab));
-  contents.on("did-navigate-in-page", () => updateTabFromWebContents(tab));
+  contents.on("did-navigate", () => {
+    updateTabFromWebContents(tab);
+    executedUserScriptKeys.delete(contents);
+  });
+  contents.on("did-navigate-in-page", () => {
+    updateTabFromWebContents(tab);
+    void injectUserScriptsIntoContents(contents, "document-idle");
+  });
   contents.on("did-finish-load", async () => {
     updateTabFromWebContents(tab);
     void updateStartPageBackgroundFromContents(contents);
+    void injectUserScriptsIntoContents(contents, "document-idle");
     await appendHistory(contents.getURL(), contents.getTitle());
   });
 
@@ -3697,6 +4436,15 @@ const registerIpc = (): void => {
   });
   ipcMain.handle("settings:get-search", () => ({ ...searchSettings }));
   ipcMain.handle("settings:set-search", async (_event, value: unknown) => setSearchSettings(value));
+
+  ipcMain.handle("userscripts:list", () => userScriptEntries.map((script) => ({ ...script })));
+  ipcMain.handle("userscripts:get", (_event, id: unknown) =>
+    userScriptEntries.find((script) => script.id === id) ?? null);
+  ipcMain.handle("userscripts:save", (_event, input: unknown) => saveUserScriptInput(input));
+  ipcMain.handle("userscripts:toggle", (_event, id: unknown, enabled: unknown) => toggleUserScript(id, enabled));
+  ipcMain.handle("userscripts:remove", (_event, id: unknown) => removeUserScript(id));
+  ipcMain.handle("userscripts:import-file", () => importUserScriptFromFile());
+
   ipcMain.handle("settings:open-window", async () => {
     await openSettingsWindow();
     return true;
@@ -4017,6 +4765,7 @@ const bootstrap = async (): Promise<void> => {
   app.setName("MonoBrowser");
   historyFilePath = path.join(app.getPath("userData"), "history.json");
   bookmarksFilePath = path.join(app.getPath("userData"), "bookmarks.json");
+  userscriptsFilePath = path.join(app.getPath("userData"), "userscripts.json");
   downloadsFilePath = path.join(app.getPath("userData"), "downloads.json");
   siteOriginsFilePath = path.join(app.getPath("userData"), "site-origins.json");
   languageFilePath = path.join(app.getPath("userData"), "language.json");
@@ -4032,6 +4781,7 @@ const bootstrap = async (): Promise<void> => {
   const persistentDataLoad = Promise.all([
     loadHistory(),
     loadBookmarks(),
+    loadUserScripts(),
     loadDownloads(),
     loadSiteOrigins(),
   ]);

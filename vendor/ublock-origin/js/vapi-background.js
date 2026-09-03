@@ -41,8 +41,6 @@ if ( vAPI.canWASM === false ) {
     vAPI.canWASM = csp !== undefined && csp.indexOf("'wasm-unsafe-eval'") !== -1;
 }
 
-vAPI.supportsUserStylesheets = vAPI.webextFlavor.soup.has('user_stylesheet');
-
 /******************************************************************************/
 
 vAPI.app = {
@@ -279,10 +277,10 @@ const toTabId = function(tabId) {
 
 vAPI.Tabs = class {
     constructor() {
-        browser.webNavigation?.onCreatedNavigationTarget?.addListener(details => {
+        browser.webNavigation.onCreatedNavigationTarget.addListener(details => {
             this.onCreatedNavigationTargetHandler(details);
         });
-        browser.webNavigation?.onCommitted?.addListener(details => {
+        browser.webNavigation.onCommitted.addListener(details => {
             const { frameId, tabId } = details;
             if ( frameId === 0 && tabId > 0 && details.transitionType === 'reload' ) {
                 if ( vAPI.net && vAPI.net.hasUnprocessedRequest(tabId) ) {
@@ -342,14 +340,9 @@ vAPI.Tabs = class {
     }
 
     async insertCSS(tabId, details) {
-        if ( vAPI.supportsUserStylesheets ) {
-            details.cssOrigin = 'user';
-        }
-        try {
-            await webext.tabs.insertCSS(...arguments);
-        }
-        catch {
-        }
+        details.cssOrigin = 'user';
+        try { await webext.tabs.insertCSS(...arguments); }
+        catch { }
     }
 
     async query(queryInfo) {
@@ -363,14 +356,9 @@ vAPI.Tabs = class {
     }
 
     async removeCSS(tabId, details) {
-        if ( vAPI.supportsUserStylesheets ) {
-            details.cssOrigin = 'user';
-        }
-        try {
-            await webext.tabs.removeCSS(...arguments);
-        }
-        catch {
-        }
+        details.cssOrigin = 'user';
+        try { await webext.tabs.removeCSS(...arguments); }
+        catch { }
     }
 
     // Properties of the details object:
@@ -916,7 +904,7 @@ if ( webext.browserAction instanceof Object ) {
     };
 }
 
-browser.browserAction?.onClicked?.addListener(function(tab) {
+browser.browserAction.onClicked.addListener(function(tab) {
     vAPI.tabs.open({
         select: true,
         url: `popup-fenix.html?tabId=${tab.id}&intab=1`,

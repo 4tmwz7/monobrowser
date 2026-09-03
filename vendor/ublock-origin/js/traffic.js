@@ -381,10 +381,6 @@ function onBeforeBehindTheSceneRequest(fctxt) {
     //   that is unless advanced user mode is enabled.
 
     if (
-        // Electron reports requests from WebContentsView with tabId -1 even
-        // when their initiator is a normal page. Filter this scope so the
-        // static network engine remains effective in MonoBrowser tabs.
-        fctxt.tabId < 0 ||
         fctxt.tabOrigin.endsWith('-scheme') === false &&
         isNetworkURI(fctxt.tabOrigin) ||
         µb.userSettings.advancedUserEnabled ||

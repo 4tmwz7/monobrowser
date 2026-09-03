@@ -1,11 +1,30 @@
 # MonoBrowser
 
-MonoBrowser is a small desktop browser for Windows and Linux, built with Electron, TypeScript, and esbuild. The latest stable release is [v0.4.0](https://github.com/4tmwz7/monobrowser/releases/tag/v0.4.0).
+MonoBrowser is a small desktop browser for Windows and Linux, built with Electron, TypeScript, and esbuild. The latest stable release is [v0.4.1](https://github.com/4tmwz7/monobrowser/releases/tag/v0.4.1).
 
 ## Download
 
-- [Windows x64 installer](https://github.com/4tmwz7/monobrowser/releases/download/v0.4.0/MonoBrowser-Setup-0.4.0.exe)
-- [Linux x64 AppImage](https://github.com/4tmwz7/monobrowser/releases/download/v0.4.0/MonoBrowser-0.4.0-x86_64.AppImage)
+- [Windows x64 installer](https://github.com/4tmwz7/monobrowser/releases/download/v0.4.1/MonoBrowser-Setup-0.4.1.exe)
+- [Linux x64 AppImage](https://github.com/4tmwz7/monobrowser/releases/download/v0.4.1/MonoBrowser-0.4.1-x86_64.AppImage)
+
+## System requirements
+
+MonoBrowser is built on Electron 44 (Chromium 152) and ships 64-bit builds only.
+
+| | Minimum | Recommended |
+| --- | --- | --- |
+| Windows | Windows 10 x64 | Windows 11 x64 |
+| Linux | 64-bit distribution with a recent glibc (e.g. Ubuntu 22.04 LTS+, Debian 12+, Fedora 40+), X11 or Wayland, `libfuse2` for the AppImage | Current release of a mainstream distribution, Wayland or X11 |
+| RAM | 2 GB | 4 GB or more for heavier tab use |
+| Disk space | ~400 MB after install (~110–130 MB download) | SSD |
+| GPU | Any GPU with OpenGL 2.1+ support, or the built-in software rendering fallback | Hardware-accelerated GPU |
+
+Notes:
+
+- 32-bit Windows (ia32) and Linux ARM (armv7l) builds are not provided; Electron 44 publishes 64-bit binaries only.
+- macOS is not supported and no macOS builds are published.
+- On Wayland sessions the app runs as a native Wayland client; XWayland can be forced with `--ozone-platform=x11`.
+- If the AppImage fails to start because FUSE is missing, run it with `--appimage-extract-and-run`.
 
 ## Features
 
@@ -14,6 +33,7 @@ MonoBrowser is a small desktop browser for Windows and Linux, built with Electro
 - Back, forward, reload, and address bar navigation
 - Branded start page with an integrated web search field
 - Configurable default search engine: Google, DuckDuckGo, or a custom HTTP(S) search URL
+- User scripts with a dedicated Settings tab: create, edit, enable, disable, remove, and import `.user.js` files, with `==UserScript==` header parsing, URL pattern matching, and `GM_addStyle`/`GM_info`/`GM_setClipboard` support
 - Bundled uBlock Origin network filtering with its standard filter lists
 - Hamburger navigation menu with persistent bookmarks, History, Downloads, Site data, and language selection
 - Address-bar site information menu with HTTPS status, cookie count, tab RAM use, sandbox, content-blocking, zoom, and loading details
