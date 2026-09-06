@@ -1,61 +1,59 @@
 # THIRD-PARTY NOTICES
 
-Ten plik zawiera noty licencyjne dla komponentów firmowych (third-party)
-używanych przez MonoBrowser. Aplikacja MonoBrowser jest licencjonowana pod
-MIT (patrz `license` w `package.json`) — poniższe komponenty mają własne
-licencje, które muszą być zachowane przy redystrybucji.
+This file contains license notices for third-party components used by
+MonoBrowser. MonoBrowser itself is licensed under the MIT license (see the
+`license` field in `package.json`).
 
-## Komponenty wbudowane w aplikację
+## Bundled dependencies
 
 ### @ghostery/adblocker-electron, @ghostery/adblocker, @ghostery/adblocker-electron-preload
 
-- Wersja: 2.18.2
-- Prawa autorskie: Copyright (c) 2017-present Ghostery GmbH. All rights reserved.
-- Licencja: Mozilla Public License 2.0 (MPL-2.0)
-- Źródło: https://github.com/ghostery/adblocker
-- Tekst licencji: poniżej (pełny tekst MPL-2.0) oraz https://mozilla.org/MPL/2.0/
+- Version: 2.18.2
+- Copyright: Copyright (c) 2017-present Ghostery GmbH. All rights reserved.
+- License: Mozilla Public License, Version 2.0 (MPL-2.0)
+- Source: https://github.com/ghostery/adblocker
 
-Silnik blokowania treści w MonoBrowser używa tych pakietów **w formie
-niezmienionej, jako zależności npm**. Zgodnie z MPL-2.0 modyfikacja plików
-źródłowych tych bibliotek wymagałaby udostępnienia zmodyfikowanych plików na
-warunkach MPL-2.0; reszta kodu MonoBrowser pozostaje pod MIT.
+MonoBrowser uses these packages **unmodified, as npm dependencies**. Under
+MPL-2.0, modifying the library's own source files would require publishing
+those modified files under the MPL-2.0; the rest of the MonoBrowser code
+remains under MIT.
 
-### tldts-experimental (razem z tldts-core)
+### tldts-experimental (with tldts-core)
 
-- Prawa autorskie: Copyright (c) 2017 Thomas Parisot, 2018 Rémi Berson
-- Licencja: MIT
-- Źródło: https://github.com/ooxxide/tldts
+- Copyright: Copyright (c) 2017 Thomas Parisot, 2018 Rémi Berson
+- License: MIT
+- Source: https://github.com/ooxxide/tldts
 
 ### electron-updater
 
-- Prawa autorskie: Copyright (c) 2015 Loopline Systems
-- Licencja: MIT
-- Źródło: https://github.com/electron-userland/electron-builder
+- Copyright: Copyright (c) 2015 Loopline Systems
+- License: MIT
+- Source: https://github.com/electron-userland/electron-builder
 
-### Electron (środowisko uruchomieniowe)
+### Electron (runtime)
 
-- Licencja: MIT
-- Źródło: https://github.com/electron/electron
+- License: MIT
+- Source: https://github.com/electron/electron
 
-## Listy filtrów (pobierane w czasie działania aplikacji)
+## Filter lists (fetched at runtime)
 
-MonoBrowser pobiera i stosuje publiczne listy filtrów adblock. Licencje list
-określają ich autorzy (dotyczą treści list, nie kodu aplikacji):
+MonoBrowser downloads and applies public filter lists. Each list keeps the
+license chosen by its authors (these licenses cover the list content, not the
+application code):
 
 - EasyList, EasyPrivacy, EasyList Cookie — CC BY-SA 3.0 —
-  https://easylist.to/ (mirror dystrybucyjny: repozytorium ghostery/adblocker)
+  https://easylist.to/
 - EasyList Polish — CC BY-SA 3.0 —
-  https://easylist-downloads.adblockplus.org/easylistpolish.txt
-- Filtry uBlock Origin (uAssets: filters, badware, privacy, quick-fixes,
-  unbreak, annoyances) — licencja wskazana w repozytorium źródłowym
+  https://easylist.to/easylistpolish/easylistpolish.txt
+- uBlock Origin filters (badware, privacy, quick-fixes, unbreak, annoyances) —
   https://github.com/uBlockOrigin/uAssets
 - Peter Lowe's server and tracker blocklist —
   https://pgl.yoyo.org/adservers/
 
-Pełne adresy list wykorzystywanych przez aplikację są zdefiniowane w
-`src/main/main.ts` (stała `ADBLOCK_LISTS`).
+The exact list URLs used by the app are defined in `src/main/main.ts`
+(`ADBLOCK_LISTS`).
 
-## Pełny tekst licencji MIT (tldts-experimental, electron-updater)
+## Full text of the MIT license (tldts-experimental, electron-updater)
 
 ```
 Permission is hereby granted, free of charge, to any person obtaining a copy
@@ -77,7 +75,7 @@ OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
 SOFTWARE.
 ```
 
-## Pełny tekst licencji MPL-2.0 (komponenty Ghostery)
+## Full text of the MPL-2.0 license (Ghostery components)
 
 ```
 Mozilla Public License Version 2.0
