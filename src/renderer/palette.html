@@ -1,0 +1,108 @@
+<!doctype html>
+<html lang="pl">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <meta http-equiv="Content-Security-Policy" content="default-src 'none'; script-src 'self'; style-src 'unsafe-inline'" />
+    <title>MonoBrowser Palette</title>
+    <style>
+      :root {
+        color-scheme: light;
+        --black: #0a0a0a;
+        --white: #f0efe9;
+        --accent: #9c9b95;
+        --grey: #5c5b57;
+        font-family: ui-monospace, "Cascadia Mono", "Courier New", monospace;
+      }
+      * { box-sizing: border-box; margin: 0; padding: 0; }
+      html, body { width: 100%; height: 100%; overflow: hidden; background: transparent; }
+      #palette {
+        width: 100%;
+        height: fit-content;
+        display: flex;
+        flex-direction: column;
+        border: 3px solid var(--black);
+        background: var(--white);
+        box-shadow: 5px 5px 0 var(--accent);
+      }
+      #palette-input {
+        width: 100%;
+        height: 40px;
+        flex: 0 0 40px;
+        padding: 0 10px;
+        border: 0;
+        border-bottom: 2px solid var(--black);
+        border-radius: 0;
+        outline: 0;
+        background: var(--white);
+        color: var(--black);
+        font: 13px inherit;
+      }
+      #palette-input:focus { box-shadow: inset 3px 0 0 var(--black); }
+      #palette-list {
+        list-style: none;
+        margin: 0;
+        padding: 3px;
+        display: grid;
+        gap: 1px;
+        max-height: none;
+      }
+      .palette-row {
+        min-height: 30px;
+        display: flex;
+        align-items: center;
+        gap: 8px;
+        padding: 0 8px;
+        border: 0;
+        background: var(--white);
+        color: var(--black);
+        font: 11px inherit;
+        cursor: pointer;
+        text-align: left;
+        width: 100%;
+      }
+      .palette-row:hover, .palette-row.selected { background: var(--black); color: var(--white); }
+      .palette-row .kind {
+        flex: 0 0 auto;
+        width: 13px;
+        height: 13px;
+        display: inline-flex;
+        align-items: center;
+        justify-content: center;
+      }
+      .palette-row .kind svg { width: 11px; height: 11px; fill: currentColor; }
+      .palette-row .label { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+      .palette-row .hint { flex: 0 0 auto; color: var(--grey); font-size: 9px; white-space: nowrap; }
+      .palette-row:hover .hint, .palette-row.selected .hint { color: #b5b4ae; }
+      .palette-empty {
+        min-height: 30px;
+        display: flex;
+        align-items: center;
+        padding: 0 8px;
+        color: var(--grey);
+        font-size: 10px;
+      }
+      #palette-footer {
+        flex: 0 0 auto;
+        display: flex;
+        justify-content: space-between;
+        gap: 8px;
+        padding: 4px 8px;
+        border-top: 2px solid var(--black);
+        color: var(--grey);
+        font-size: 9px;
+      }
+    </style>
+  </head>
+  <body>
+    <div id="palette" role="dialog" aria-label="Paleta komend">
+      <input id="palette-input" type="text" placeholder="Wpisz komendę…" autocomplete="off" spellcheck="false" />
+      <ul id="palette-list" aria-live="polite"></ul>
+      <div id="palette-footer">
+        <span id="palette-hint-arrows">↑↓ Wybór · Enter Uruchom · Esc Zamknij</span>
+        <span id="palette-count"></span>
+      </div>
+    </div>
+    <script src="./palette.js"></script>
+  </body>
+</html>

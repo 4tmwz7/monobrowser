@@ -12,6 +12,8 @@ await mkdir(destinationDir, { recursive: true });
 await Promise.all([
   "index.html",
   "find.html",
+  "palette.html",
+  "notes.html",
   "download-progress.html",
 ].map((fileName) => copyFile(
   path.join(root, "src", "renderer", fileName),

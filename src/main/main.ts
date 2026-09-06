@@ -1,8 +1,9 @@
 import { app, BrowserWindow, clipboard, dialog, ipcMain, session, Menu, shell, WebContentsView, MenuItemConstructorOptions } from "electron";
-import type { DownloadItem, Extension, WebContents } from "electron";
+import type { DownloadItem, WebContents } from "electron";
 import fsSync from "node:fs";
 import fs from "node:fs/promises";
 import path from "node:path";
+import { ElectronBlocker, fullLists } from "@ghostery/adblocker-electron";
 import { autoUpdater } from "electron-updater";
 
 type TabState = {
@@ -14,10 +15,14 @@ type TabState = {
   canGoForward: boolean;
   isPinned: boolean;
   isMuted: boolean;
+  isSleeping: boolean;
 };
 
 type TabRecord = TabState & {
-  view: WebContentsView;
+  view: WebContentsView | null;
+  lastActiveAt: number;
+  adblockPaused: boolean;
+  blockedCount: number;
 };
 
 type HistoryEntry = {
@@ -91,10 +96,12 @@ type SearchSettings = {
   customUrl: string;
 };
 
-type UBlockStatus = {
-  loaded: boolean;
-  name: string;
-  version: string;
+type AdblockerStatus = {
+  enabled: boolean;
+  ready: boolean;
+  blockedTotal: number;
+  activeTabBlocked: number;
+  activeTabPaused: boolean;
   error: string | null;
 };
 
@@ -163,6 +170,10 @@ const ALLOWED_SITE_DATA_TYPES = new Set<SiteDataType>([
   "serviceWorkers",
 ]);
 const CLEAR_HISTORY_URL = "monobrowser://clear-history";
+const TAB_SLEEP_AFTER_MS = 10 * 60 * 1000;
+const TAB_SLEEP_SWEEP_INTERVAL_MS = 30_000;
+const NOTES_WIDTH = 340;
+const PALETTE_MAX_ROWS = 10;
 const SPLASH_ONLY_MODE =
   process.argv.includes("--splash-only") ||
   process.env.MONOBROWSER_SPLASH_ONLY === "1";
@@ -179,6 +190,14 @@ let siteInfoPopupWindow: BrowserWindow | null = null;
 let contextPopupWindow: BrowserWindow | null = null;
 let findView: WebContentsView | null = null;
 let findVisible = false;
+let findBarLastQuery = "";
+let paletteView: WebContentsView | null = null;
+let paletteVisible = false;
+let paletteViewHeight = 240;
+let notesView: WebContentsView | null = null;
+let notesVisible = false;
+let notesFilePath = "";
+let notesContent = "";
 let historyFilePath = "";
 let bookmarksFilePath = "";
 let userscriptsFilePath = "";
@@ -197,8 +216,14 @@ let downloadRecords: DownloadRecord[] = [];
 let siteOriginRecords: SiteOriginRecord[] = [];
 let appLanguage: AppLanguage = "pl";
 let searchSettings: SearchSettings = { ...DEFAULT_SEARCH_SETTINGS };
-let ublockExtension: Extension | null = null;
-let ublockLoadError: string | null = null;
+let adblockBlocker: ElectronBlocker | null = null;
+let adblockEnabled = true;
+let adblockReady = false;
+let adblockError: string | null = null;
+let adblockSessionBlocks = 0;
+let adblockSettingsFilePath = "";
+let adblockEngineCachePath = "";
+let adblockRefreshTimer: NodeJS.Timeout | null = null;
 let bebasNeueFontDataUrl: string | null = null;
 let splashWindow: BrowserWindow | null = null;
 
@@ -496,7 +521,7 @@ const applyStartPageBackgroundColor = (): void => {
   }
 
   for (const tab of tabs.values()) {
-    if (isDefaultStartPageUrl(tab.url)) {
+    if (isDefaultStartPageUrl(tab.url) && tab.view) {
       applyStartPageBackgroundToView(tab.view);
     }
   }
@@ -985,6 +1010,7 @@ const getTabSnapshot = (tab: TabRecord): TabState => ({
   canGoForward: tab.canGoForward,
   isPinned: tab.isPinned,
   isMuted: tab.isMuted,
+  isSleeping: tab.isSleeping,
 });
 
 const getOrderedTabRecords = (): TabRecord[] => [
@@ -1064,6 +1090,9 @@ const broadcastTabsState = (): void => {
     }
     if (findView && !findView.webContents.isDestroyed()) {
       findView.webContents.send("tabs:state", getTabsStatePayload());
+    }
+    if (paletteView && !paletteView.webContents.isDestroyed()) {
+      paletteView.webContents.send("tabs:state", getTabsStatePayload());
     }
   });
 };
@@ -1184,7 +1213,7 @@ const saveSearchSettings = async (): Promise<void> => {
 const refreshStartPages = async (): Promise<void> => {
   const reloads: Promise<void>[] = [];
   for (const tab of tabs.values()) {
-    if (tab.url !== START_PAGE_URL || tab.view.webContents.isDestroyed()) {
+    if (tab.url !== START_PAGE_URL || !tab.view || tab.view.webContents.isDestroyed()) {
       continue;
     }
     reloads.push(tab.view.webContents.loadURL(getStartPageDataUrl()).then(() => undefined));
@@ -1214,48 +1243,228 @@ const setSearchSettings = async (value: unknown): Promise<SearchSettingsResult> 
   };
 };
 
-const getBundledUBlockPath = (): string | null => {
-  const candidates = [
-    path.join(process.resourcesPath, "extensions", "ublock-origin"),
-    path.join(app.getAppPath(), "vendor", "ublock-origin"),
-    path.join(__dirname, "..", "..", "vendor", "ublock-origin"),
-  ];
+// ── Native content blocking (main-process engine, uBlock/EasyList syntax) ───
+// Electron 44 cannot run blocking extensions (MV2 removed, MV3 declarativeNet-
+// Request not wired), but session.webRequest in the main process supports
+// synchronous blocking handlers — so the blocker lives here.
+const ADBLOCK_REFRESH_INTERVAL_MS = 4 * 24 * 60 * 60 * 1000; // refresh lists every 4 days
+const ADBLOCK_RETRY_MS = 10 * 60 * 1000;
+const ADBLOCK_INJECT_CHANNEL = "@ghostery/adblocker/inject-cosmetic-filters";
+const ADBLOCK_MUTATION_CHANNEL = "@ghostery/adblocker/is-mutation-observer-enabled";
+const ADBLOCKER_PRELOAD_PATH = require.resolve("@ghostery/adblocker-electron-preload");
+const ADBLOCK_LISTS: readonly string[] = [
+  ...fullLists,
+  "https://easylist-downloads.adblockplus.org/easylistpolish.txt",
+];
 
-  for (const candidate of candidates) {
-    if (fsSync.existsSync(path.join(candidate, "manifest.json"))) {
-      return candidate;
+const isInternalPageUrl = (rawUrl: string): boolean => {
+  if (!rawUrl) return true;
+  if (rawUrl === START_PAGE_URL) return true;
+  try {
+    const parsed = new URL(rawUrl);
+    const protocol = parsed.protocol;
+    return protocol === "monobrowser:" || protocol === "file:" || protocol === "data:" || protocol === "about:" || protocol === "devtools:";
+  } catch {
+    return true;
+  }
+};
+
+const resolveTabByWebContentsId = (webContentsId: number | undefined): TabRecord | null => {
+  if (!webContentsId) return null;
+  for (const tab of tabs.values()) {
+    if (tab.view && !tab.view.webContents.isDestroyed() && tab.view.webContents.id === webContentsId) {
+      return tab;
     }
   }
-
   return null;
 };
 
-const loadBundledUBlock = async (): Promise<void> => {
-  const extensionPath = getBundledUBlockPath();
-  if (!extensionPath) {
-    ublockLoadError = appLanguage === "pl"
-      ? "Nie znaleziono plików rozszerzenia."
-      : "Extension files were not found.";
-    return;
-  }
-
+const loadAdblockSettings = async (): Promise<void> => {
   try {
-    ublockExtension = await session.defaultSession.extensions.loadExtension(extensionPath);
-    ublockLoadError = null;
-    console.info(`Loaded ${ublockExtension.name} ${ublockExtension.version}`);
-  } catch (error) {
-    ublockExtension = null;
-    ublockLoadError = error instanceof Error ? error.message : String(error);
-    console.error("Failed to load uBlock Origin:", error);
+    const raw = await fs.readFile(adblockSettingsFilePath, "utf8");
+    const parsed = JSON.parse(raw) as { enabled?: unknown };
+    adblockEnabled = typeof parsed?.enabled === "boolean" ? parsed.enabled : true;
+  } catch {
+    adblockEnabled = true;
   }
 };
 
-const getUBlockStatus = (): UBlockStatus => ({
-  loaded: ublockExtension !== null,
-  name: ublockExtension?.name ?? "uBlock Origin",
-  version: ublockExtension?.version ?? "1.72.2",
-  error: ublockLoadError,
-});
+const saveAdblockSettings = async (): Promise<void> => {
+  await writeJsonAtomically(adblockSettingsFilePath, { enabled: adblockEnabled });
+};
+
+const setAdblockEnabled = async (enabled: boolean): Promise<void> => {
+  adblockEnabled = enabled;
+  await saveAdblockSettings();
+};
+
+const getAdblockerStatus = (): AdblockerStatus => {
+  const activeTab = getActiveTab();
+  return {
+    enabled: adblockEnabled,
+    ready: adblockReady,
+    blockedTotal: adblockSessionBlocks,
+    error: adblockError,
+    activeTabBlocked: activeTab?.blockedCount ?? 0,
+    activeTabPaused: activeTab?.adblockPaused ?? false,
+  };
+};
+
+const buildAdblockerEngine = async (): Promise<ElectronBlocker | null> => {
+  try {
+    console.info("Content blocking: fetching filter lists…");
+    const engine = await ElectronBlocker.fromLists(fetch, [...ADBLOCK_LISTS]);
+    adblockError = null;
+    console.info("Content blocking: engine ready.");
+    return engine;
+  } catch (error) {
+    adblockError = error instanceof Error ? error.message : String(error);
+    console.error("Content blocking: failed to build engine:", error);
+    return null;
+  }
+};
+
+const ensureAdblockerEngine = async (): Promise<void> => {
+  if (adblockReady) {
+    return;
+  }
+
+  // Fast path: cached serialized engine from a previous run.
+  try {
+    const cached = await fs.readFile(adblockEngineCachePath);
+    adblockBlocker = ElectronBlocker.deserialize(cached);
+    adblockReady = true;
+    adblockError = null;
+    console.info("Content blocking: engine loaded from cache.");
+    return;
+  } catch {
+    // No cache yet — fall through to a network build.
+  }
+
+  const engine = await buildAdblockerEngine();
+  if (!engine) {
+    // Try again later; blocking stays inactive until an engine is available.
+    setTimeout(() => { void ensureAdblockerEngine(); }, ADBLOCK_RETRY_MS);
+    return;
+  }
+
+  adblockBlocker = engine;
+  adblockReady = true;
+  try {
+    await fs.writeFile(adblockEngineCachePath, Buffer.from(engine.serialize()));
+  } catch (error) {
+    console.error("Content blocking: failed to cache engine:", error);
+  }
+};
+
+const swapAdblockerEngine = async (): Promise<void> => {
+  const engine = await buildAdblockerEngine();
+  if (!engine) {
+    setTimeout(() => { void swapAdblockerEngine(); }, ADBLOCK_RETRY_MS);
+    return;
+  }
+  adblockBlocker = engine;
+  adblockReady = true;
+  try {
+    await fs.writeFile(adblockEngineCachePath, Buffer.from(engine.serialize()));
+  } catch (error) {
+    console.error("Content blocking: failed to cache engine:", error);
+  }
+};
+
+const scheduleAdblockRefresh = (): void => {
+  if (adblockRefreshTimer) {
+    clearInterval(adblockRefreshTimer);
+  }
+  adblockRefreshTimer = setInterval(() => {
+    fsSync.stat(adblockEngineCachePath, (error, stats) => {
+      if (error) {
+        void ensureAdblockerEngine();
+        return;
+      }
+      if (Date.now() - stats.mtimeMs > ADBLOCK_REFRESH_INTERVAL_MS) {
+        void swapAdblockerEngine();
+      }
+    });
+  }, 60 * 60 * 1000);
+};
+
+const initAdblocker = (): void => {
+  session.defaultSession.registerPreloadScript({
+    type: "frame",
+    filePath: ADBLOCKER_PRELOAD_PATH,
+  });
+
+  // Electron's webRequest API allows a single listener per event, so these
+  // wrappers own the slot and forward to the engine only when appropriate.
+  session.defaultSession.webRequest.onBeforeRequest({ urls: ["<all_urls>"] }, (details, callback) => {
+    if (!adblockEnabled || !adblockReady || !adblockBlocker) {
+      callback({});
+      return;
+    }
+    const tab = resolveTabByWebContentsId(details.webContentsId);
+    if (tab?.adblockPaused) {
+      callback({});
+      return;
+    }
+    adblockBlocker.onBeforeRequest(details, callback);
+  });
+
+  session.defaultSession.webRequest.onHeadersReceived({ urls: ["<all_urls>"] }, (details, callback) => {
+    if (!adblockEnabled || !adblockReady || !adblockBlocker) {
+      callback({});
+      return;
+    }
+    const tab = resolveTabByWebContentsId(details.webContentsId);
+    if (tab?.adblockPaused) {
+      callback({});
+      return;
+    }
+    adblockBlocker.onHeadersReceived(details, callback);
+  });
+
+  session.defaultSession.webRequest.onErrorOccurred((details) => {
+    if (!adblockEnabled || details.error !== "net::ERR_BLOCKED_BY_CLIENT") {
+      return;
+    }
+    adblockSessionBlocks += 1;
+    const tab = resolveTabByWebContentsId(details.webContentsId);
+    if (tab) {
+      tab.blockedCount += 1;
+    }
+  });
+
+  ipcMain.handle(ADBLOCK_INJECT_CHANNEL, (event, url: unknown, msg: unknown) => {
+    if (!adblockEnabled || !adblockReady || !adblockBlocker || typeof url !== "string" || isInternalPageUrl(url)) {
+      return;
+    }
+    const tab = resolveTabByWebContentsId(event.sender.id);
+    if (tab?.adblockPaused) {
+      return;
+    }
+    return adblockBlocker.onInjectCosmeticFilters(
+      event,
+      url,
+      msg as Parameters<ElectronBlocker["onInjectCosmeticFilters"]>[2],
+    );
+  });
+
+  ipcMain.handle(ADBLOCK_MUTATION_CHANNEL, () => Boolean(adblockEnabled && adblockReady && adblockBlocker));
+
+  void ensureAdblockerEngine();
+  scheduleAdblockRefresh();
+};
+
+const toggleActiveTabAdblockPause = (): void => {
+  const tab = getActiveTab();
+  if (!tab) {
+    return;
+  }
+  tab.adblockPaused = !tab.adblockPaused;
+  if (!tab.adblockPaused) {
+    tab.blockedCount = 0;
+  }
+};
 
 const localeForLanguage = (): string => appLanguage === "pl" ? "pl-PL" : "en-US";
 
@@ -1305,14 +1514,27 @@ const attachDownloadProgressView = (): void => {
   if (!mainWindow || mainWindow.isDestroyed() || !downloadProgressView || downloadProgressView.webContents.isDestroyed()) {
     return;
   }
-  attachViewOnTop(downloadProgressView);
   positionDownloadProgressView();
+  attachViewOnTop(downloadProgressView);
+  downloadProgressView.setVisible(true);
   downloadProgressVisible = true;
 };
 
 const hideDownloadProgressView = (): void => {
-  if (downloadProgressView) detachView(downloadProgressView);
   downloadProgressVisible = false;
+  const view = downloadProgressView;
+  if (view) {
+    detachView(view);
+    // A re-attached WebContentsView can stay composited-hidden (Electron bug
+    // family around removeChildView + addChildView), so destroy on hide and
+    // let the next broadcast recreate it.
+    if (!view.webContents.isDestroyed()) {
+      view.webContents.close();
+    }
+    if (downloadProgressView === view) {
+      downloadProgressView = null;
+    }
+  }
 };
 
 const createDownloadProgressView = async (): Promise<WebContentsView | null> => {
@@ -2603,7 +2825,9 @@ const renderSettingsWindowHtml = (): string => {
     googleDescription: "Szybkie wyniki wyszukiwania Google.", duckDescription: "Wyszukiwanie z naciskiem na prywatność.",
     custom: "Własna", customDescription: "Użyj dowolnego adresu wyszukiwania HTTP(S).",
     customLabel: "Adres wyszukiwania", customHint: "Wstaw {query} w miejscu wyszukiwanego tekstu.",
-    save: "Zapisz ustawienia", blockerHeading: "Blokowanie treści", blockerDescription: "Wbudowana ochrona przed reklamami i modułami śledzącymi.",
+    save: "Zapisz ustawienia", blockerHeading: "Blokowanie treści", blockerDescription: "Wbudowana ochrona przed reklamami i modułami śledzącymi (EasyList, EasyPrivacy, EasyList Polish, annoyances).",
+    blockerEngine: "Ghostery adblocker — uBlock/EasyList", blockerOn: "Włączone", blockerOff: "Wyłączone", blockerLoading: "Ładowanie list…",
+    blockerError: "Blokowanie niedostępne", blockedTotalLabel: "Zablokowane w tej sesji:", blockedValueSuffix: "żądań",
     active: "Aktywny", unavailable: "Niedostępny", loading: "Wczytywanie ustawień…", loadFailed: "Nie udało się wczytać ustawień.",
     searchTab: "Wyszukiwanie", userscriptsTab: "Skrypty użytkownika",
     userscriptsHeading: "Skrypty użytkownika", userscriptsDescription: "Własne skrypty JavaScript uruchamiane na stronach zgodnych ze wzorcami adresów.",
@@ -2624,7 +2848,9 @@ const renderSettingsWindowHtml = (): string => {
     googleDescription: "Fast results powered by Google Search.", duckDescription: "Search with a focus on privacy.",
     custom: "Custom", customDescription: "Use any HTTP(S) search URL.",
     customLabel: "Search URL", customHint: "Place {query} where the search text should appear.",
-    save: "Save settings", blockerHeading: "Content blocking", blockerDescription: "Built-in protection against ads and trackers.",
+    save: "Save settings", blockerHeading: "Content blocking", blockerDescription: "Built-in protection against ads and trackers (EasyList, EasyPrivacy, EasyList Polish, annoyances).",
+    blockerEngine: "Ghostery adblocker — uBlock/EasyList", blockerOn: "On", blockerOff: "Off", blockerLoading: "Loading lists…",
+    blockerError: "Blocking unavailable", blockedTotalLabel: "Blocked this session:", blockedValueSuffix: "requests",
     active: "Active", unavailable: "Unavailable", loading: "Loading settings…", loadFailed: "Settings could not be loaded.",
     searchTab: "Search", userscriptsTab: "User scripts",
     userscriptsHeading: "User scripts", userscriptsDescription: "Custom JavaScript snippets injected into pages that match URL patterns.",
@@ -2735,7 +2961,7 @@ const renderSettingsWindowHtml = (): string => {
       <div class="custom-field"><label for="custom-url">${copy.customLabel}</label><input id="custom-url" type="url" maxlength="2048" spellcheck="false"><span class="hint">${copy.customHint.replace("{query}", "<code>{query}</code>")}</span></div>
       <div class="actions"><span id="message">${copy.loading}</span><button id="save" type="submit">${copy.save}</button></div>
     </form>
-    <section class="card blocker-row"><div class="blocker-copy"><h2>${copy.blockerHeading}</h2><p class="description">${copy.blockerDescription}</p><span id="blocker-name" class="blocker-name">uBlock Origin</span></div><span id="blocker-status" class="badge">${copy.active}</span></section>
+    <section class="card blocker-row"><div class="blocker-copy"><h2>${copy.blockerHeading}</h2><p class="description">${copy.blockerDescription}</p><span id="blocker-name" class="blocker-name">${copy.blockerEngine}</span><span id="blocker-total" class="description" style="margin:0"></span></div><button type="button" id="blocker-toggle" class="badge" style="cursor:pointer;border:2px solid var(--black);font:inherit">${copy.blockerOn}</button></section>
   </section>
   <section id="panel-userscripts" class="panel" hidden>
     <section id="scripts-list-card" class="card">
@@ -2785,8 +3011,8 @@ const renderSettingsWindowHtml = (): string => {
   const form = document.getElementById('settings-form');
   const customUrl = document.getElementById('custom-url');
   const message = document.getElementById('message');
-  const blockerName = document.getElementById('blocker-name');
-  const blockerStatus = document.getElementById('blocker-status');
+  const blockerToggle = document.getElementById('blocker-toggle');
+  const blockerTotal = document.getElementById('blocker-total');
   const selectedEngine = () => form.querySelector('input[name=engine]:checked')?.value || 'google';
   const syncCustomState = () => { customUrl.disabled = selectedEngine() !== 'custom'; };
   form.querySelectorAll('input[name=engine]').forEach(input => input.addEventListener('change', syncCustomState));
@@ -2795,13 +3021,25 @@ const renderSettingsWindowHtml = (): string => {
     const result = await window.browserApi.setSearchSettings({ engine:selectedEngine(), customUrl:customUrl.value });
     message.textContent = result.message; message.className = result.ok ? '' : 'error';
   });
-  Promise.all([window.browserApi.getSearchSettings(), window.browserApi.getUBlockStatus()]).then(([settings, blocker]) => {
+  blockerToggle.addEventListener('click', async () => {
+    blockerToggle.disabled = true;
+    try { renderBlocker(await window.browserApi.toggleAdblock()); }
+    finally { blockerToggle.disabled = false; }
+  });
+  const renderBlocker = (blocker) => {
+    blockerToggle.textContent = blocker.enabled ? copy.blockerOn : copy.blockerOff;
+    blockerToggle.classList.toggle('off', !blocker.enabled);
+    blockerToggle.title = blocker.enabled ? copy.blockerOff : copy.blockerOn;
+    if (!blocker.enabled) { blockerTotal.textContent = ''; return; }
+    if (blocker.error && !blocker.ready) { blockerTotal.textContent = copy.blockerError; return; }
+    blockerTotal.textContent = blocker.ready
+      ? copy.blockedTotalLabel + ' ' + blocker.blockedTotal + ' ' + copy.blockedValueSuffix
+      : copy.blockerLoading;
+  };
+  Promise.all([window.browserApi.getSearchSettings(), window.browserApi.getAdblockStatus()]).then(([settings, blocker]) => {
     const option = form.querySelector('input[value="' + settings.engine + '"]'); if (option) option.checked = true;
     customUrl.value = settings.customUrl; syncCustomState(); message.textContent = '';
-    blockerName.textContent = blocker.name + ' ' + blocker.version;
-    blockerStatus.textContent = blocker.loaded ? copy.active : copy.unavailable;
-    blockerStatus.classList.toggle('off', !blocker.loaded);
-    if (!blocker.loaded && blocker.error) blockerStatus.title = blocker.error;
+    renderBlocker(blocker);
   }).catch(() => { message.textContent = copy.loadFailed; message.className = 'error'; });
 
   const make = (tag, className, text) => { const el = document.createElement(tag); if (className) el.className = className; if (text !== undefined) el.textContent = text; return el; };
@@ -2940,6 +3178,12 @@ const refreshLocalizedWindows = async (): Promise<void> => {
   }
   if (findView && !findView.webContents.isDestroyed()) {
     findView.webContents.send("language:changed", appLanguage);
+  }
+  if (paletteView && !paletteView.webContents.isDestroyed()) {
+    paletteView.webContents.send("language:changed", appLanguage);
+  }
+  if (notesView && !notesView.webContents.isDestroyed()) {
+    notesView.webContents.send("language:changed", appLanguage);
   }
   broadcastDownloadProgress();
   if (historyWindow && !historyWindow.isDestroyed()) {
@@ -3299,10 +3543,12 @@ const openNavigationMenu = async (anchor: unknown): Promise<boolean> => {
     title: "Menu", settings: "Ustawienia", devTools: "Narzędzia deweloperskie", bookmarks: "Zakładki", addBookmark: "Dodaj bieżącą stronę", removeCurrentBookmark: "Usuń bieżącą zakładkę",
     noBookmarks: "Brak zapisanych zakładek", clearBookmarks: "Wyczyść wszystkie zakładki", history: "Historia", downloads: "Pobieranie",
     siteData: "Dane witryn", language: "Język", polish: "Polski", english: "Angielski", remove: "Usuń",
+    notes: "Notatki", adblock: "Blokowanie treści", on: "Włączone", off: "Wyłączone",
   } : {
     title: "Menu", settings: "Settings", devTools: "Developer tools", bookmarks: "Bookmarks", addBookmark: "Bookmark current page", removeCurrentBookmark: "Remove current bookmark",
     noBookmarks: "No saved bookmarks", clearBookmarks: "Clear all bookmarks", history: "History", downloads: "Downloads",
     siteData: "Site data", language: "Language", polish: "Polish", english: "English", remove: "Remove",
+    notes: "Notes", adblock: "Content blocking", on: "On", off: "Off",
   };
   const activeUrl = getBookmarkableUrl(getActiveTab()?.url ?? "");
   const currentBookmark = activeUrl ? findBookmarkByUrl(activeUrl) : undefined;
@@ -3327,6 +3573,8 @@ const openNavigationMenu = async (anchor: unknown): Promise<boolean> => {
   <a class="menu-item" href="monobrowser-menu://history">${copy.history}</a>
   <a class="menu-item" href="monobrowser-menu://downloads">${copy.downloads}</a>
   <a class="menu-item" href="monobrowser-menu://site-data">${copy.siteData}</a>
+  <a class="menu-item" href="monobrowser-menu://notes">${copy.notes}</a>
+  <a class="menu-item" href="monobrowser-menu://adblock-toggle">${copy.adblock}<span class="shortcut">${adblockEnabled ? copy.on : copy.off}</span></a>
   <details><summary>${copy.language}</summary><div class="submenu">
     <a class="menu-item${appLanguage === "pl" ? " selected" : ""}" href="monobrowser-menu://language?value=pl">${copy.polish}</a>
     <a class="menu-item${appLanguage === "en" ? " selected" : ""}" href="monobrowser-menu://language?value=en">${copy.english}</a>
@@ -3352,6 +3600,8 @@ const openNavigationMenu = async (anchor: unknown): Promise<boolean> => {
     if (action === "history") return openHistoryWindow();
     if (action === "downloads") return openDownloadsWindow();
     if (action === "site-data") return openSiteDataWindow();
+    if (action === "notes") { toggleNotesView(); return; }
+    if (action === "adblock-toggle") { await setAdblockEnabled(!adblockEnabled); return; }
     if (action === "bookmark-toggle") return void await toggleActiveBookmark();
     if (action === "bookmarks-clear") return clearBookmarks();
     if (action === "language") {
@@ -3376,7 +3626,7 @@ const formatMemorySize = (kilobytes: number): string => {
 const openSiteInfoMenu = async (anchor: unknown): Promise<boolean> => {
   const position = getMenuAnchor(anchor);
   const tab = getActiveTab();
-  if (!mainWindow || mainWindow.isDestroyed() || !position || !tab || tab.view.webContents.isDestroyed()) {
+  if (!mainWindow || mainWindow.isDestroyed() || !position || !tab || !tab.view || tab.view.webContents.isDestroyed()) {
     return false;
   }
 
@@ -3412,15 +3662,29 @@ const openSiteInfoMenu = async (anchor: unknown): Promise<boolean> => {
     unknown: "Bezpieczeństwo połączenia nieznane", reputation: "HTTPS chroni połączenie, ale MonoBrowser nie skanuje reputacji ani treści witryny.", host: "Witryna",
     cookies: "Pliki cookie", memory: "RAM karty", blocker: "Blokowanie treści", active: "Aktywne", inactive: "Nieaktywne", sandbox: "Sandbox", enabled: "Aktywny",
     zoom: "Powiększenie", state: "Stan", loading: "Ładowanie", ready: "Gotowa", siteData: "Otwórz dane witryn", version: "Wersja",
+    blockerLoading: "Ładowanie list…", blockerOff: "Wyłączone", blockerPaused: "Wstrzymane na karcie",
+    blockedOnTab: "Zablokowane na tej karcie", pauseAction: "Wstrzymaj blokowanie na tej karcie", resumeAction: "Wznów blokowanie na tej karcie",
+    toggleAction: "Przełącz blokowanie treści",
   } : {
     title: "Page information", internal: "Internal MonoBrowser page", secure: "Secure HTTPS connection", insecure: "Unsecured HTTP connection",
     unknown: "Connection security unknown", reputation: "HTTPS protects the connection, but MonoBrowser does not scan the site's reputation or content.", host: "Site",
     cookies: "Cookies", memory: "Tab RAM", blocker: "Content blocking", active: "Active", inactive: "Inactive", sandbox: "Sandbox", enabled: "Active",
     zoom: "Zoom", state: "State", loading: "Loading", ready: "Ready", siteData: "Open site data", version: "Version",
+    blockerLoading: "Loading lists…", blockerOff: "Disabled", blockerPaused: "Paused for this tab",
+    blockedOnTab: "Blocked on this tab", pauseAction: "Pause blocking on this tab", resumeAction: "Resume blocking on this tab",
+    toggleAction: "Toggle content blocking",
   };
   const securityLabel = isInternal ? copy.internal : isHttps ? copy.secure : isHttp ? copy.insecure : copy.unknown;
   const securityClass = isInternal ? "internal" : isHttps ? "secure" : isHttp ? "insecure" : "internal";
   const hostLabel = parsedUrl?.hostname || (isInternal ? "MonoBrowser / new-tab" : url || "—");
+  const blockerStateLabel = !adblockEnabled
+    ? copy.blockerOff
+    : !adblockReady
+      ? copy.blockerLoading
+      : tab.adblockPaused
+        ? copy.blockerPaused
+        : copy.active;
+  const blockerActionLabel = tab.adblockPaused ? copy.resumeAction : copy.pauseAction;
   const html = `<!doctype html><html lang="${appLanguage}"><head><meta charset="UTF-8"><meta name="viewport" content="width=device-width,initial-scale=1">
 <meta http-equiv="Content-Security-Policy" content="default-src 'none'; style-src 'unsafe-inline'"><title>${copy.title}</title><style>${POPUP_MENU_STYLES}</style></head><body>
 <section class="popup site-popup"><h1 class="popup-title">${copy.title}</h1><div class="info-body">
@@ -3429,17 +3693,22 @@ const openSiteInfoMenu = async (anchor: unknown): Promise<boolean> => {
   <div class="info-grid">
     <div class="info-row"><span>${copy.cookies}</span><strong>${cookieCount}</strong></div>
     <div class="info-row"><span>${copy.memory}</span><strong>${formatMemorySize(memoryKilobytes)}</strong></div>
-    <div class="info-row"><span>${copy.blocker}</span><strong>${ublockExtension ? copy.active : copy.inactive}</strong></div>
+    <div class="info-row"><span>${copy.blocker}</span><strong>${escapeHtml(blockerStateLabel)}</strong></div>
+    ${isInternal ? "" : `<div class="info-row"><span>${copy.blockedOnTab}</span><strong>${tab.blockedCount}</strong></div>`}
     <div class="info-row"><span>${copy.sandbox}</span><strong>${copy.enabled}</strong></div>
     <div class="info-row"><span>${copy.zoom}</span><strong>${Math.round(contents.getZoomFactor() * 100)}%</strong></div>
     <div class="info-row"><span>${copy.state}</span><strong>${contents.isLoading() ? copy.loading : copy.ready}</strong></div>
     <div class="info-row"><span>${copy.version}</span><strong>${app.getVersion()}</strong></div>
   </div>
+  ${isInternal ? "" : `<a class="info-action" href="monobrowser-menu://adblock-tab-pause">${escapeHtml(blockerActionLabel)}</a>`}
+  <a class="info-action" href="monobrowser-menu://adblock-toggle">${escapeHtml(copy.toggleAction)}</a>
   <a class="info-action" href="monobrowser-menu://site-data">${copy.siteData}</a>
 </div></section></body></html>`;
 
-  return openStyledPopup("site-info", position, 410, isInternal ? 430 : 470, html, async (actionUrl) => {
+  return openStyledPopup("site-info", position, 410, isInternal ? 430 : 545, html, async (actionUrl) => {
     if (actionUrl.hostname === "site-data") await openSiteDataWindow();
+    if (actionUrl.hostname === "adblock-toggle") await setAdblockEnabled(!adblockEnabled);
+    if (actionUrl.hostname === "adblock-tab-pause") toggleActiveTabAdblockPause();
   });
 };
 
@@ -3447,7 +3716,7 @@ const openPageContextMenu = async (
   tab: TabRecord,
   params: Electron.ContextMenuParams,
 ): Promise<boolean> => {
-  if (!mainWindow || mainWindow.isDestroyed() || tab.view.webContents.isDestroyed()) return false;
+  if (!mainWindow || mainWindow.isDestroyed() || !tab.view || tab.view.webContents.isDestroyed()) return false;
 
   const copy = appLanguage === "pl" ? {
     title: "Menu strony", link: "Link", image: "Obraz", selection: "Zaznaczenie", editing: "Edycja", page: "Strona", navigation: "Nawigacja",
@@ -3640,9 +3909,10 @@ const openTabContextMenu = async (tabId: number, anchor: unknown): Promise<boole
         }
         break;
       case "tab-toggle-mute":
-        if (currentTab && !currentTab.view.webContents.isDestroyed()) {
+        if (currentTab) {
           currentTab.isMuted = !currentTab.isMuted;
-          currentTab.view.webContents.setAudioMuted(currentTab.isMuted);
+          const muteContents = getTabContents(currentTab);
+          muteContents?.setAudioMuted(currentTab.isMuted);
           broadcastTabsState();
         }
         break;
@@ -3713,9 +3983,10 @@ const focusAddressBar = (): void => {
 
 const clearActiveFindHighlights = async (): Promise<boolean> => {
   const tab = getActiveTab();
-  if (!tab) return false;
+  const contents = getTabContents(tab);
+  if (!contents) return false;
   try {
-    await tab.view.webContents.executeJavaScript(`(() => {
+    await contents.executeJavaScript(`(() => {
       CSS.highlights?.delete('monobrowser-find-all');
       CSS.highlights?.delete('monobrowser-find-active');
       document.getElementById('monobrowser-find-style')?.remove();
@@ -3744,9 +4015,34 @@ const positionFindView = (): void => {
 
 const hideFindWindow = async (): Promise<void> => {
   findVisible = false;
-  if (findView) detachView(findView);
+  const view = findView;  if (view) {
+    detachView(view);
+  }
   await clearActiveFindHighlights();
-  getActiveTab()?.view.webContents.focus();
+  focusActiveTabView();
+  if (view && !view.webContents.isDestroyed()) {
+    // Stash the query so a recreated find bar can restore it, then destroy:
+    // a re-attached WebContentsView can stay composited-hidden (Electron bug
+    // family around removeChildView + addChildView), so overlays are never
+    // re-attached — they are recreated on the next show.
+    try {
+      const query = await view.webContents.executeJavaScript(
+        `document.getElementById('find-input')?.value ?? ""`,
+        true,
+      );
+      if (typeof query === "string") {
+        findBarLastQuery = query;
+      }
+    } catch {
+      // View may already be gone.
+    }
+    if (!view.webContents.isDestroyed()) {
+      view.webContents.close();
+    }
+    if (findView === view) {
+      findView = null;
+    }
+  }
 };
 
 const focusFindBar = (): void => {
@@ -3771,21 +4067,365 @@ const focusFindBar = (): void => {
         }
         handleBeforeInputEvent(event, input);
       });
-      await findView.webContents.loadFile(path.join(__dirname, "../renderer/find.html"));
+      findVisible = true;
+      try {
+        await findView.webContents.loadFile(path.join(__dirname, "../renderer/find.html"));
+      } catch (error) {
+        findVisible = false;
+        console.error("Failed to load find view:", error);
+        return;
+      }
       findView.webContents.on("will-navigate", (event) => event.preventDefault());
     }
-    if (!findView || findView.webContents.isDestroyed()) return;
-    findVisible = true;
+    if (!findView || findView.webContents.isDestroyed() || !findVisible) {
+      return;
+    }
     positionFindView();
     attachViewOnTop(findView);
     findView.webContents.focus();
     await findView.webContents.executeJavaScript(`(() => {
       const input = document.getElementById('find-input');
+      if (input && ${JSON.stringify(findBarLastQuery)}) input.value = ${JSON.stringify(findBarLastQuery)};
       input?.focus();
       input?.select();
       if (input?.value) input.dispatchEvent(new Event('input', { bubbles: true }));
     })()`);
   })();
+};
+
+// ── Command palette (Ctrl+K) ────────────────────────────────────────────────
+type PaletteItem = {
+  id: string;
+  kind: "command" | "tab";
+  label: string;
+  hint?: string;
+  keywords?: string;
+  tabId?: number;
+};
+
+const positionPaletteView = (): void => {
+  if (!mainWindow || mainWindow.isDestroyed() || !paletteView || paletteView.webContents.isDestroyed()) return;
+  const [contentWidth, contentHeight] = mainWindow.getContentSize();
+  const margin = 16;
+  const width = Math.min(520, Math.max(300, contentWidth - margin * 2));
+  const maxHeight = Math.max(120, contentHeight - viewportTop - margin * 2);
+  const height = Math.max(96, Math.min(paletteViewHeight, maxHeight));
+  paletteView.setBounds({
+    x: Math.max(0, Math.round((contentWidth - width) / 2)),
+    y: viewportTop + margin,
+    width,
+    height,
+  });
+};
+
+const hidePalette = (): void => {
+  paletteVisible = false;
+  const view = paletteView;
+  if (view) {
+    detachView(view);
+    // A re-attached WebContentsView can stay composited-hidden (Electron bug
+    // family around removeChildView + addChildView), so overlays are never
+    // re-attached — they are destroyed here and recreated on the next show.
+    if (!view.webContents.isDestroyed()) {
+      view.webContents.close();
+    }
+    if (paletteView === view) {
+      paletteView = null;
+    }
+  }
+  focusActiveTabView();
+};
+
+const focusPalette = (): void => {
+  void (async () => {
+    if (!mainWindow || mainWindow.isDestroyed()) return;
+    if (!paletteView || paletteView.webContents.isDestroyed()) {
+      paletteView = new WebContentsView({
+        webPreferences: {
+          preload: path.join(__dirname, "preload.js"),
+          contextIsolation: true,
+          nodeIntegration: false,
+          sandbox: true,
+        },
+      });
+      paletteView.setBackgroundColor("#f0efe9");
+      paletteView.webContents.setWindowOpenHandler(() => ({ action: "deny" }));
+      paletteView.webContents.on("before-input-event", (event, input) => {
+        if (input.type !== "keyDown" && input.type !== "rawKeyDown") return;
+        if ((input.key || "").toLowerCase() === "escape") {
+          event.preventDefault();
+          hidePalette();
+          return;
+        }
+        // Ctrl+K toggles through handleBeforeInputEvent as well; global
+        // shortcuts (Ctrl+T/W/F/R, …) keep working while the palette has focus.
+        handleBeforeInputEvent(event, input);
+      });
+      // Claim visibility synchronously so a quickly repeated Ctrl+K closes
+      // instead of reopening after the async load completes.
+      paletteVisible = true;
+      try {
+        await paletteView.webContents.loadFile(path.join(__dirname, "../renderer/palette.html"));
+      } catch (error) {
+        paletteVisible = false;
+        console.error("Failed to load palette view:", error);
+        return;
+      }
+      paletteView.webContents.on("will-navigate", (event) => event.preventDefault());
+    }
+    if (!paletteView || paletteView.webContents.isDestroyed() || !paletteVisible) {
+      return;
+    }
+    positionPaletteView();
+    attachViewOnTop(paletteView);
+    paletteView.webContents.focus();
+    await paletteView.webContents.executeJavaScript(`(() => {
+      const input = document.getElementById('palette-input');
+      input?.focus();
+      input?.select();
+    })()`).catch(() => undefined);
+  })();
+};
+
+const togglePalette = (): void => {
+  if (paletteVisible) {
+    hidePalette();
+    return;
+  }
+  focusPalette();
+};
+
+const buildPaletteItems = (): PaletteItem[] => {
+  const pl = appLanguage === "pl";
+  const items: PaletteItem[] = [
+    { id: "new-tab", kind: "command", label: pl ? "Nowa karta" : "New tab", hint: "Ctrl+T", keywords: "nowa karta new tab open otworz" },
+    { id: "close-tab", kind: "command", label: pl ? "Zamknij kartę" : "Close tab", hint: "Ctrl+W", keywords: "zamknij karte close tab" },
+    { id: "reload", kind: "command", label: pl ? "Przeładuj stronę" : "Reload page", hint: "Ctrl+R", keywords: "przeladuj reload odswiez refresh" },
+    { id: "back", kind: "command", label: pl ? "Wstecz" : "Back", hint: "Alt+←", keywords: "wstecz back historia" },
+    { id: "forward", kind: "command", label: pl ? "Dalej" : "Forward", hint: "Alt+→", keywords: "dalej forward" },
+    { id: "clear-history", kind: "command", label: pl ? "Wyczyść historię przeglądania" : "Clear browsing history", keywords: "wyczysc historie clear history" },
+    { id: "language-pl", kind: "command", label: pl ? "Zmień język: Polski" : "Change language: Polish", hint: appLanguage === "pl" ? "✓" : "", keywords: "jezyk language polski polish pl" },
+    { id: "language-en", kind: "command", label: pl ? "Zmień język: Angielski" : "Change language: English", hint: appLanguage === "en" ? "✓" : "", keywords: "jezyk language angielski english en" },
+    { id: "engine-google", kind: "command", label: pl ? "Wyszukiwarka: Google" : "Search engine: Google", hint: searchSettings.engine === "google" ? "✓" : "", keywords: "wyszukiwarka search engine google" },
+    { id: "engine-duckduckgo", kind: "command", label: pl ? "Wyszukiwarka: DuckDuckGo" : "Search engine: DuckDuckGo", hint: searchSettings.engine === "duckduckgo" ? "✓" : "", keywords: "wyszukiwarka search engine duckduckgo ddg" },
+    { id: "open-history", kind: "command", label: pl ? "Otwórz: Historia" : "Open: History", keywords: "otworz historia open history" },
+    { id: "open-downloads", kind: "command", label: pl ? "Otwórz: Pobieranie" : "Open: Downloads", keywords: "otworz pobieranie open downloads" },
+    { id: "open-site-data", kind: "command", label: pl ? "Otwórz: Dane witryn" : "Open: Site data", keywords: "otworz dane witryn open site data cookies" },
+    { id: "open-settings", kind: "command", label: pl ? "Otwórz: Ustawienia" : "Open: Settings", keywords: "otworz ustawienia open settings preferences" },
+    { id: "toggle-notes", kind: "command", label: pl ? "Przełącz notatki" : "Toggle notes", keywords: "notatki notes notatnik" },
+    { id: "sleep-other-tabs", kind: "command", label: pl ? "Uśpij pozostałe karty" : "Sleep other tabs", keywords: "uspij karty sleep tabs pamiec memory" },
+    {
+      id: "toggle-content-blocking",
+      kind: "command",
+      label: adblockEnabled
+        ? (pl ? "Wyłącz blokowanie treści" : "Disable content blocking")
+        : (pl ? "Włącz blokowanie treści" : "Enable content blocking"),
+      hint: adblockEnabled ? (pl ? "włączony" : "enabled") : (pl ? "wyłączony" : "disabled"),
+      keywords: "reklamy adblock blokowanie tresci content blocking ads tracker ghostery easylist",
+    },
+    {
+      id: "toggle-content-blocking-tab",
+      kind: "command",
+      label: getActiveTab()?.adblockPaused
+        ? (pl ? "Wznów blokowanie na tej karcie" : "Resume blocking on this tab")
+        : (pl ? "Wstrzymaj blokowanie na tej karcie" : "Pause blocking on this tab"),
+      keywords: "wstrzymaj wznow pauza karta pause resume blocking tab",
+    },
+  ];
+
+  for (const tab of getOrderedTabRecords()) {
+    items.push({
+      id: `tab:${tab.id}`,
+      kind: "tab",
+      label: tab.title || tab.url,
+      hint: tab.url,
+      keywords: "tab karta " + tab.url,
+      tabId: tab.id,
+    });
+  }
+
+  return items;
+};
+
+const executePaletteCommand = async (id: string): Promise<void> => {
+  if (id.startsWith("tab:")) {
+    const tabId = Number.parseInt(id.slice(4), 10);
+    if (Number.isInteger(tabId)) setActiveTab(tabId);
+    return;
+  }
+
+  switch (id) {
+    case "new-tab": openNewTab(); break;
+    case "close-tab": closeCurrentTab(); break;
+    case "reload": reloadActiveTabView(); break;
+    case "back": {
+      const contents = getTabContents(getActiveTab());
+      if (contents?.navigationHistory.canGoBack()) contents.navigationHistory.goBack();
+      break;
+    }
+    case "forward": {
+      const contents = getTabContents(getActiveTab());
+      if (contents?.navigationHistory.canGoForward()) contents.navigationHistory.goForward();
+      break;
+    }
+    case "clear-history": await clearHistory(); break;
+    case "language-pl": await setApplicationLanguage("pl"); break;
+    case "language-en": await setApplicationLanguage("en"); break;
+    case "engine-google":
+      await setSearchSettings({ engine: "google", customUrl: searchSettings.customUrl });
+      break;
+    case "engine-duckduckgo":
+      await setSearchSettings({ engine: "duckduckgo", customUrl: searchSettings.customUrl });
+      break;
+    case "open-history": await openHistoryWindow(); break;
+    case "open-downloads": await openDownloadsWindow(); break;
+    case "open-site-data": await openSiteDataWindow(); break;
+    case "open-settings": await openSettingsWindow(); break;
+    case "toggle-notes": toggleNotesView(); break;
+    case "sleep-other-tabs": sleepOtherTabs(); break;
+    case "toggle-content-blocking":
+      await setAdblockEnabled(!adblockEnabled);
+      break;
+    case "toggle-content-blocking-tab":
+      toggleActiveTabAdblockPause();
+      break;
+    default: break;
+  }
+};
+
+// ── Side notes overlay ──────────────────────────────────────────────────────
+const positionNotesView = (): void => {
+  if (!mainWindow || mainWindow.isDestroyed() || !notesView || notesView.webContents.isDestroyed()) return;
+  const [contentWidth, contentHeight] = mainWindow.getContentSize();
+  const width = Math.min(NOTES_WIDTH, Math.max(240, contentWidth - 40));
+  const height = Math.max(120, contentHeight - viewportTop);
+  notesView.setBounds({
+    x: Math.max(0, contentWidth - width),
+    y: viewportTop,
+    width,
+    height,
+  });
+};
+
+const saveNotesContent = async (value: unknown): Promise<boolean> => {
+  if (typeof value !== "string" || value.length > 2_000_000) {
+    return false;
+  }
+
+  notesContent = value;
+  if (!notesFilePath) {
+    return true;
+  }
+
+  try {
+    await fs.mkdir(path.dirname(notesFilePath), { recursive: true });
+    await fs.writeFile(notesFilePath, notesContent, "utf8");
+    return true;
+  } catch (error) {
+    console.error("Failed to save notes:", error);
+    return false;
+  }
+};
+
+const loadNotesContent = async (): Promise<void> => {
+  if (!notesFilePath) {
+    return;
+  }
+
+  try {
+    notesContent = await fs.readFile(notesFilePath, "utf8");
+  } catch {
+    notesContent = "";
+  }
+};
+
+const hideNotesView = (): void => {
+  notesVisible = false;
+  const view = notesView;
+  if (view) {
+    detachView(view);
+  }
+  focusActiveTabView();
+  if (view && !view.webContents.isDestroyed()) {
+    // Flush the editor content before destroying the view so nothing typed
+    // inside the debounce window is lost.
+    void view.webContents
+      .executeJavaScript(`document.getElementById('notes-editor')?.value ?? ""`, true)
+      .then(async (value) => {
+        if (typeof value === "string") {
+          await saveNotesContent(value);
+        }
+      })
+      .catch(() => undefined)
+      .finally(() => {
+        // Overlays are never re-attached after detaching (WebContentsView can
+        // stay composited-hidden), so destroy and recreate on the next show.
+        if (!view.webContents.isDestroyed()) {
+          view.webContents.close();
+        }
+        if (notesView === view) {
+          notesView = null;
+        }
+      });
+  }
+};
+
+const showNotesView = (): void => {
+  void (async () => {
+    if (!mainWindow || mainWindow.isDestroyed()) return;
+    if (!notesView || notesView.webContents.isDestroyed()) {
+      notesView = new WebContentsView({
+        webPreferences: {
+          preload: path.join(__dirname, "preload.js"),
+          contextIsolation: true,
+          nodeIntegration: false,
+          sandbox: true,
+        },
+      });
+      notesView.setBackgroundColor("#f0efe9");
+      notesView.webContents.setWindowOpenHandler(() => ({ action: "deny" }));
+      notesView.webContents.on("before-input-event", (event, input) => {
+        if (input.type !== "keyDown" && input.type !== "rawKeyDown") return;
+        if ((input.key || "").toLowerCase() === "escape") {
+          event.preventDefault();
+          hideNotesView();
+          return;
+        }
+        // Keep global shortcuts (Ctrl+K/T/W/F/R, F5, Alt+arrows, …) working
+        // while the notes editor has keyboard focus.
+        handleBeforeInputEvent(event, input);
+      });
+      // Claim visibility synchronously so a quickly repeated toggle closes
+      // instead of reopening after the async load completes.
+      notesVisible = true;
+      try {
+        await notesView.webContents.loadFile(path.join(__dirname, "../renderer/notes.html"));
+      } catch (error) {
+        notesVisible = false;
+        console.error("Failed to load notes view:", error);
+        return;
+      }
+      notesView.webContents.on("will-navigate", (event) => event.preventDefault());
+    }
+    if (!notesView || notesView.webContents.isDestroyed() || !notesVisible) {
+      notesVisible = false;
+      return;
+    }
+    positionNotesView();
+    attachViewOnTop(notesView);
+    notesView.webContents.focus();
+    void notesView.webContents.executeJavaScript(`(() => {
+      document.getElementById('notes-editor')?.focus();
+    })()`).catch(() => undefined);
+  })();
+};
+
+const toggleNotesView = (): void => {
+  if (notesVisible) {
+    hideNotesView();
+    return;
+  }
+  showNotesView();
 };
 
 const cycleActiveTab = (direction: 1 | -1): void => {
@@ -3809,8 +4449,8 @@ const reopenLastClosedTab = (): void => {
 
 const toggleActiveTabDevTools = (): void => {
   const tab = getActiveTab();
-  if (!tab || tab.view.webContents.isDestroyed()) return;
-  const contents = tab.view.webContents;
+  const contents = getTabContents(tab);
+  if (!contents) return;
   if (contents.isDevToolsOpened()) {
     contents.closeDevTools();
     contents.focus();
@@ -3819,20 +4459,23 @@ const toggleActiveTabDevTools = (): void => {
   contents.openDevTools({
     mode: "detach",
     activate: true,
-    title: appLanguage === "pl" ? `Narzędzia deweloperskie — ${tab.title}` : `Developer Tools — ${tab.title}`,
+    title: appLanguage === "pl" ? `Narzędzia deweloperskie — ${tab!.title}` : `Developer Tools — ${tab!.title}`,
   });
 };
 
 const changeActiveTabZoom = (change: "in" | "out" | "reset"): void => {
-  const tab = getActiveTab();
-  if (!tab) return;
-  const contents = tab.view.webContents;
+  const contents = getTabContents(getActiveTab());
+  if (!contents) return;
   if (change === "reset") {
     contents.setZoomFactor(1);
     return;
   }
   const delta = change === "in" ? 0.1 : -0.1;
   contents.setZoomFactor(Math.max(0.5, Math.min(3, Math.round((contents.getZoomFactor() + delta) * 10) / 10)));
+};
+
+const reloadActiveTabView = (): void => {
+  getTabContents(getActiveTab())?.reload();
 };
 
 const handleBeforeInputEvent = (
@@ -3844,11 +4487,10 @@ const handleBeforeInputEvent = (
   const key = (input.key || "").toLowerCase();
   const code = (input.code || "").toLowerCase();
   const commandPressed = Boolean(input.control || input.meta);
-  const tab = getActiveTab();
 
   if (!commandPressed && !input.alt && (key === "f5" || key === "f11" || key === "f12")) {
     event.preventDefault();
-    if (key === "f5") tab?.view.webContents.reload();
+    if (key === "f5") reloadActiveTabView();
     if (key === "f11" && mainWindow) mainWindow.setFullScreen(!mainWindow.isFullScreen());
     if (key === "f12") toggleActiveTabDevTools();
     return;
@@ -3856,9 +4498,10 @@ const handleBeforeInputEvent = (
 
   if (!commandPressed && input.alt && (key === "arrowleft" || key === "arrowright")) {
     event.preventDefault();
-    if (!tab) return;
-    if (key === "arrowleft" && tab.view.webContents.navigationHistory.canGoBack()) tab.view.webContents.navigationHistory.goBack();
-    if (key === "arrowright" && tab.view.webContents.navigationHistory.canGoForward()) tab.view.webContents.navigationHistory.goForward();
+    const contents = getTabContents(getActiveTab());
+    if (!contents) return;
+    if (key === "arrowleft" && contents.navigationHistory.canGoBack()) contents.navigationHistory.goBack();
+    if (key === "arrowright" && contents.navigationHistory.canGoForward()) contents.navigationHistory.goForward();
     return;
   }
 
@@ -3886,7 +4529,16 @@ const handleBeforeInputEvent = (
   }
   if (key === "r" || code === "keyr") {
     event.preventDefault();
-    tab?.view.webContents.reload();
+    reloadActiveTabView();
+    return;
+  }
+  if (key === "k" || code === "keyk") {
+    event.preventDefault();
+    if (paletteVisible) {
+      hidePalette();
+    } else {
+      focusPalette();
+    }
     return;
   }
   if (key === "l" || code === "keyl") {
@@ -3935,7 +4587,7 @@ const applyActiveViewBounds = (): void => {
   }
 
   const activeTab = tabs.get(activeTabId);
-  if (!activeTab) {
+  if (!activeTab || !activeTab.view) {
     return;
   }
 
@@ -3950,10 +4602,19 @@ const applyActiveViewBounds = (): void => {
   });
 };
 
-const updateTabFromWebContents = (tab: TabRecord): void => {
-  const contents = tab.view.webContents;
+const getTabContents = (tab: TabRecord | null | undefined): WebContents | null => {
+  const contents = tab?.view?.webContents;
+  return contents && !contents.isDestroyed() ? contents : null;
+};
 
-  if (contents.isDestroyed() || !tabs.has(tab.id)) {
+const focusActiveTabView = (): void => {
+  getTabContents(getActiveTab())?.focus();
+};
+
+const updateTabFromWebContents = (tab: TabRecord): void => {
+  const contents = getTabContents(tab);
+
+  if (!contents || !tabs.has(tab.id)) {
     return;
   }
 
@@ -3993,9 +4654,19 @@ const setActiveTab = (id: number): boolean => {
     return false;
   }
 
+  if (tab.isSleeping) {
+    wakeTab(tab);
+  }
+
+  if (!tab.view) {
+    return false;
+  }
+
   const previousActiveTab = activeTabId === null ? null : tabs.get(activeTabId);
   if (previousActiveTab && previousActiveTab.id !== id) {
-    detachView(previousActiveTab.view);
+    if (previousActiveTab.view) {
+      detachView(previousActiveTab.view);
+    }
   }
   attachViewOnTop(tab.view);
   if (downloadProgressVisible) {
@@ -4004,7 +4675,14 @@ const setActiveTab = (id: number): boolean => {
   if (findVisible && findView && !findView.webContents.isDestroyed()) {
     attachViewOnTop(findView);
   }
+  if (paletteVisible && paletteView && !paletteView.webContents.isDestroyed()) {
+    attachViewOnTop(paletteView);
+  }
+  if (notesVisible && notesView && !notesView.webContents.isDestroyed()) {
+    attachViewOnTop(notesView);
+  }
   activeTabId = id;
+  tab.lastActiveAt = Date.now();
   promoteTabInMruOrder(id);
   applyActiveViewBounds();
   updateTabFromWebContents(tab);
@@ -4024,10 +4702,14 @@ const closeTab = (id: number): boolean => {
     recentlyClosedTabUrls.unshift(tabToClose.url);
     recentlyClosedTabUrls.splice(20);
   }
-  detachView(tabToClose.view);
+  if (tabToClose.view) {
+    detachView(tabToClose.view);
+  }
   tabs.delete(id);
   removeTabFromMruOrder(id);
-  tabToClose.view.webContents.close();
+  if (tabToClose.view && !tabToClose.view.webContents.isDestroyed()) {
+    tabToClose.view.webContents.close();
+  }
 
   if (tabs.size === 0) {
     activeTabId = null;
@@ -4044,30 +4726,7 @@ const closeTab = (id: number): boolean => {
   return true;
 };
 
-const createTab = (
-  initialUrl: string = DEFAULT_URL,
-  makeActive: boolean = true,
-): number => {
-  const id = nextTabId++;
-  const normalizedInitialUrl = normalizeInputToUrl(initialUrl);
-  const view = createTabView();
-
-  if (isDefaultStartPageUrl(normalizedInitialUrl)) {
-    applyStartPageBackgroundToView(view);
-  }
-
-  const tab: TabRecord = {
-    id,
-    title: appLanguage === "pl" ? "Nowa karta" : "New Tab",
-    url: normalizedInitialUrl,
-    isLoading: false,
-    canGoBack: false,
-    canGoForward: false,
-    isPinned: false,
-    isMuted: false,
-    view,
-  };
-
+const wireTabEvents = (tab: TabRecord, view: WebContentsView): void => {
   const contents = view.webContents;
 
   contents.on("dom-ready", () => {
@@ -4095,6 +4754,42 @@ const createTab = (
     void injectUserScriptsIntoContents(contents, "document-idle");
     await appendHistory(contents.getURL(), contents.getTitle());
   });
+  contents.on("destroyed", () => {
+    if (tab.view === view) {
+      tab.view = null;
+    }
+  });
+};
+
+const createTab = (
+  initialUrl: string = DEFAULT_URL,
+  makeActive: boolean = true,
+): number => {
+  const id = nextTabId++;
+  const normalizedInitialUrl = normalizeInputToUrl(initialUrl);
+  const view = createTabView();
+
+  if (isDefaultStartPageUrl(normalizedInitialUrl)) {
+    applyStartPageBackgroundToView(view);
+  }
+
+  const tab: TabRecord = {
+    id,
+    title: appLanguage === "pl" ? "Nowa karta" : "New Tab",
+    url: normalizedInitialUrl,
+    isLoading: false,
+    canGoBack: false,
+    canGoForward: false,
+    isPinned: false,
+    isMuted: false,
+    isSleeping: false,
+    lastActiveAt: Date.now(),
+    adblockPaused: false,
+    blockedCount: 0,
+    view,
+  };
+
+  wireTabEvents(tab, view);
 
   tabs.set(id, tab);
   appendTabToMruOrder(id);
@@ -4105,9 +4800,112 @@ const createTab = (
     broadcastTabsState();
   }
 
-  contents.loadURL(resolveUrlForLoading(normalizedInitialUrl)).catch(() => undefined);
+  view.webContents.loadURL(resolveUrlForLoading(normalizedInitialUrl)).catch(() => undefined);
 
   return id;
+};
+
+// ── Sleeping tabs ───────────────────────────────────────────────────────────
+// Electron has no webContents.discard() (open upstream issue #38278), so a
+// sleeping tab is fully destroyed and recreated from its URL on wake-up.
+// In-page JS/form state is intentionally lost.
+const canTabSleep = (tab: TabRecord): boolean => {
+  if (tab.isSleeping || tab.id === activeTabId || tab.isPinned) {
+    return false;
+  }
+
+  const contents = getTabContents(tab);
+  if (!contents) {
+    return false;
+  }
+
+  if (contents.isCurrentlyAudible() || contents.isLoading() || contents.isDevToolsOpened()) {
+    return false;
+  }
+
+  return true;
+};
+
+const sleepTab = (tab: TabRecord): boolean => {
+  if (!canTabSleep(tab) || !tab.view) {
+    return false;
+  }
+
+  const contents = tab.view.webContents;
+  const currentUrl = contents.getURL();
+  // Preserve the real URL of data: start pages as the internal scheme so that
+  // wakeTab can regenerate a fresh, localized start page.
+  if (currentUrl && !currentUrl.startsWith("data:")) {
+    tab.url = currentUrl;
+  }
+
+  detachView(tab.view);
+  contents.close();
+  tab.view = null;
+  tab.isSleeping = true;
+  tab.isLoading = false;
+  tab.canGoBack = false;
+  tab.canGoForward = false;
+  broadcastTabsState();
+  return true;
+};
+
+const wakeTab = (tab: TabRecord): WebContentsView | null => {
+  if (!tab.isSleeping) {
+    return tab.view;
+  }
+
+  const view = createTabView();
+  if (isDefaultStartPageUrl(tab.url)) {
+    applyStartPageBackgroundToView(view);
+  }
+  if (tab.isMuted) {
+    view.webContents.setAudioMuted(true);
+  }
+  wireTabEvents(tab, view);
+  tab.view = view;
+  tab.isSleeping = false;
+  tab.lastActiveAt = Date.now();
+  tab.isLoading = true;
+  broadcastTabsState();
+  view.webContents.loadURL(resolveUrlForLoading(tab.url)).catch(() => undefined);
+
+  if (tab.id === activeTabId && mainWindow && !mainWindow.isDestroyed()) {
+    attachViewOnTop(view);
+    applyActiveViewBounds();
+  }
+
+  return view;
+};
+
+const sleepOtherTabs = (): number => {
+  let sleptCount = 0;
+  for (const tab of [...tabs.values()]) {
+    if (sleepTab(tab)) {
+      sleptCount += 1;
+    }
+  }
+  return sleptCount;
+};
+
+const sleepIdleTabs = (): void => {
+  const now = Date.now();
+  for (const tab of [...tabs.values()]) {
+    if (!canTabSleep(tab) || now - tab.lastActiveAt < TAB_SLEEP_AFTER_MS) {
+      continue;
+    }
+    sleepTab(tab);
+  }
+};
+
+const startTabSleepTimer = (): void => {
+  setInterval(() => {
+    try {
+      sleepIdleTabs();
+    } catch (error) {
+      console.error("Tab sleep sweep failed:", error);
+    }
+  }, TAB_SLEEP_SWEEP_INTERVAL_MS);
 };
 
 const openNewTab = (initialUrl?: string): number => {
@@ -4236,7 +5034,9 @@ const registerIpc = (): void => {
       return { matches: ranges.length, activeMatchOrdinal: current + 1 };
     })()`;
     try {
-      const result = await tab.view.webContents.executeJavaScript(script, true) as { matches?: unknown; activeMatchOrdinal?: unknown };
+      const contents = getTabContents(tab);
+      if (!contents) return null;
+      const result = await contents.executeJavaScript(script, true) as { matches?: unknown; activeMatchOrdinal?: unknown };
       return {
         requestId,
         matches: typeof result?.matches === "number" ? result.matches : 0,
@@ -4266,10 +5066,19 @@ const registerIpc = (): void => {
       return false;
     }
 
+    if (!tab.view) {
+      wakeTab(tab);
+    }
+
+    const contents = getTabContents(tab);
+    if (!contents) {
+      return false;
+    }
+
     try {
       const normalizedUrl = normalizeInputToUrl(input);
       tab.url = normalizedUrl;
-      await tab.view.webContents.loadURL(resolveUrlForLoading(normalizedUrl));
+      await contents.loadURL(resolveUrlForLoading(normalizedUrl));
     } catch (err: any) {
       // Ignorujemy ERR_ABORTED, ponieważ występuje naturalnie podczas szybkiej nawigacji lub przekierowań na stronach
       if (err?.code !== "ERR_ABORTED") {
@@ -4282,13 +5091,13 @@ const registerIpc = (): void => {
   });
 
   ipcMain.handle("nav:back", async () => {
-    const tab = getActiveTab();
-    if (!tab) {
+    const contents = getTabContents(getActiveTab());
+    if (!contents) {
       return false;
     }
 
-    if (tab.view.webContents.canGoBack()) {
-      tab.view.webContents.goBack();
+    if (contents.navigationHistory.canGoBack()) {
+      contents.navigationHistory.goBack();
       return true;
     }
 
@@ -4296,13 +5105,13 @@ const registerIpc = (): void => {
   });
 
   ipcMain.handle("nav:forward", async () => {
-    const tab = getActiveTab();
-    if (!tab) {
+    const contents = getTabContents(getActiveTab());
+    if (!contents) {
       return false;
     }
 
-    if (tab.view.webContents.canGoForward()) {
-      tab.view.webContents.goForward();
+    if (contents.navigationHistory.canGoForward()) {
+      contents.navigationHistory.goForward();
       return true;
     }
 
@@ -4310,22 +5119,17 @@ const registerIpc = (): void => {
   });
 
   ipcMain.handle("nav:reload", async () => {
-    const tab = getActiveTab();
-    if (!tab) {
+    const contents = getTabContents(getActiveTab());
+    if (!contents) {
       return false;
     }
 
-    tab.view.webContents.reload();
+    contents.reload();
     return true;
   });
 
   ipcMain.on("nav:reload-shortcut", () => {
-    const tab = getActiveTab();
-    if (!tab) {
-      return;
-    }
-
-    tab.view.webContents.reload();
+    reloadActiveTabView();
   });
 
   ipcMain.handle("history:get", () => {
@@ -4449,9 +5253,59 @@ const registerIpc = (): void => {
     await openSettingsWindow();
     return true;
   });
-  ipcMain.handle("ublock:get-status", () => getUBlockStatus());
+  ipcMain.handle("adblock:status", () => getAdblockerStatus());
+  ipcMain.handle("adblock:toggle", async () => {
+    await setAdblockEnabled(!adblockEnabled);
+    return getAdblockerStatus();
+  });
+  ipcMain.handle("adblock:toggle-tab-pause", () => {
+    toggleActiveTabAdblockPause();
+    return getAdblockerStatus();
+  });
   ipcMain.handle("navigation-menu:open", (_event, anchor: unknown) => openNavigationMenu(anchor));
   ipcMain.handle("site-info-menu:open", async (_event, anchor: unknown) => openSiteInfoMenu(anchor));
+
+  ipcMain.handle("palette:show", () => {
+    focusPalette();
+    return true;
+  });
+  ipcMain.handle("palette:hide", () => {
+    hidePalette();
+    return true;
+  });
+  ipcMain.on("palette:toggle-shortcut", () => {
+    togglePalette();
+  });
+  ipcMain.handle("palette:get-items", () => buildPaletteItems());
+  ipcMain.handle("palette:execute", async (_event, id: unknown) => {
+    if (typeof id !== "string" || !id || id.length > 200) {
+      return false;
+    }
+    await executePaletteCommand(id);
+    return true;
+  });
+  ipcMain.on("palette:report-height", (_event, height: unknown) => {
+    if (typeof height !== "number" || !Number.isFinite(height)) {
+      return;
+    }
+    paletteViewHeight = Math.max(96, Math.min(760, Math.ceil(height)));
+    positionPaletteView();
+  });
+
+  ipcMain.handle("notes:show", () => {
+    showNotesView();
+    return true;
+  });
+  ipcMain.handle("notes:hide", () => {
+    hideNotesView();
+    return true;
+  });
+  ipcMain.handle("notes:toggle", () => {
+    toggleNotesView();
+    return true;
+  });
+  ipcMain.handle("notes:get", () => notesContent);
+  ipcMain.handle("notes:save", async (_event, value: unknown) => saveNotesContent(value));
 
   ipcMain.handle("layout:set-viewport-top", (_event, top: number) => {
     if (typeof top !== "number" || Number.isNaN(top)) {
@@ -4606,6 +5460,8 @@ const createMainWindow = async (
     applyActiveViewBounds();
     positionDownloadProgressView();
     positionFindView();
+    positionPaletteView();
+    positionNotesView();
   });
   mainWindow.on("minimize", hideDownloadProgressView);
   mainWindow.on("restore", broadcastDownloadProgress);
@@ -4618,7 +5474,7 @@ const createMainWindow = async (
       downloadProgressView.webContents.close();
     }
     for (const tab of tabs.values()) {
-      if (!tab.view.webContents.isDestroyed()) tab.view.webContents.close();
+      if (tab.view && !tab.view.webContents.isDestroyed()) tab.view.webContents.close();
     }
     tabs.clear();
     tabMruOrder.splice(0);
@@ -4628,6 +5484,12 @@ const createMainWindow = async (
     if (findView && !findView.webContents.isDestroyed()) findView.webContents.close();
     findView = null;
     findVisible = false;
+    if (paletteView && !paletteView.webContents.isDestroyed()) paletteView.webContents.close();
+    paletteView = null;
+    paletteVisible = false;
+    if (notesView && !notesView.webContents.isDestroyed()) notesView.webContents.close();
+    notesView = null;
+    notesVisible = false;
     mainWindow = null;
   });
 
@@ -4717,15 +5579,12 @@ const setupApplicationMenu = (): void => {
           label: copy.reload,
           accelerator: "CmdOrCtrl+R",
           click: () => {
-            const tab = getActiveTab();
-            if (tab) {
-              tab.view.webContents.reload();
-            }
+            reloadActiveTabView();
           },
         },
         {
           label: copy.forceReload,
-          click: () => getActiveTab()?.view.webContents.reloadIgnoringCache(),
+          click: () => getTabContents(getActiveTab())?.reloadIgnoringCache(),
         },
         {
           label: copy.devTools,
@@ -4770,12 +5629,15 @@ const bootstrap = async (): Promise<void> => {
   siteOriginsFilePath = path.join(app.getPath("userData"), "site-origins.json");
   languageFilePath = path.join(app.getPath("userData"), "language.json");
   searchSettingsFilePath = path.join(app.getPath("userData"), "search-settings.json");
+  adblockSettingsFilePath = path.join(app.getPath("userData"), "adblock-settings.json");
+  adblockEngineCachePath = path.join(app.getPath("userData"), "adblock-engine.bin");
+  notesFilePath = path.join(app.getPath("userData"), "notes.md");
   startPageBackgroundFilePath = path.join(
     app.getPath("userData"),
     START_PAGE_BACKGROUND_FILE,
   );
 
-  await Promise.all([loadStartPageBackgroundColor(), loadLanguage(), loadSearchSettings()]);
+  await Promise.all([loadStartPageBackgroundColor(), loadLanguage(), loadSearchSettings(), loadAdblockSettings()]);
   applyStartPageBackgroundColor();
 
   const persistentDataLoad = Promise.all([
@@ -4784,6 +5646,7 @@ const bootstrap = async (): Promise<void> => {
     loadUserScripts(),
     loadDownloads(),
     loadSiteOrigins(),
+    loadNotesContent(),
   ]);
 
   await createSplashWindow();
@@ -4797,7 +5660,8 @@ const bootstrap = async (): Promise<void> => {
   registerIpc();
   await persistentDataLoad;
   registerDownloadHandling();
-  await loadBundledUBlock();
+  initAdblocker();
+  startTabSleepTimer();
 
   updateSplashProgress(28, "Preparing interface...");
   setupApplicationMenu();

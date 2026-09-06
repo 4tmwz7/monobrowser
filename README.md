@@ -1,11 +1,11 @@
 # MonoBrowser
 
-MonoBrowser is a small desktop browser for Windows and Linux, built with Electron, TypeScript, and esbuild. The latest stable release is [v0.4.1](https://github.com/4tmwz7/monobrowser/releases/tag/v0.4.1).
+MonoBrowser is a small desktop browser for Windows and Linux, built with Electron, TypeScript, and esbuild. The latest stable release is [v0.5.0](https://github.com/4tmwz7/monobrowser/releases/tag/v0.5.0).
 
 ## Download
 
-- [Windows x64 installer](https://github.com/4tmwz7/monobrowser/releases/download/v0.4.1/MonoBrowser-Setup-0.4.1.exe)
-- [Linux x64 AppImage](https://github.com/4tmwz7/monobrowser/releases/download/v0.4.1/MonoBrowser-0.4.1-x86_64.AppImage)
+- [Windows x64 installer](https://github.com/4tmwz7/monobrowser/releases/download/v0.5.0/MonoBrowser-Setup-0.5.0.exe)
+- [Linux x64 AppImage](https://github.com/4tmwz7/monobrowser/releases/download/v0.5.0/MonoBrowser-0.5.0-x86_64.AppImage)
 
 ## System requirements
 
@@ -34,7 +34,10 @@ Notes:
 - Branded start page with an integrated web search field
 - Configurable default search engine: Google, DuckDuckGo, or a custom HTTP(S) search URL
 - User scripts with a dedicated Settings tab: create, edit, enable, disable, remove, and import `.user.js` files, with `==UserScript==` header parsing, URL pattern matching, and `GM_addStyle`/`GM_info`/`GM_setClipboard` support
-- Bundled uBlock Origin network filtering with its standard filter lists
+- Native content blocking in the main process (Ghostery adblocker engine, uBlock/EasyList syntax) with EasyList, EasyPrivacy, EasyList Polish, and annoyance lists, locally cached filter refresh, global on/off toggle, per-tab pause, and blocked-request counters
+- Command palette (`Ctrl+K`) with instant search over commands, settings, and open tabs
+- Sleeping tabs: background tabs unload after 10 minutes of inactivity (moon badge) and wake on activation; pinned, audible, or DevTools-open tabs stay awake
+- Side notes overlay with autosave to a local Markdown file and a live Markdown preview
 - Hamburger navigation menu with persistent bookmarks, History, Downloads, Site data, and language selection
 - Address-bar site information menu with HTTPS status, cookie count, tab RAM use, sandbox, content-blocking, zoom, and loading details
 - Responsive, multi-column page context menu for link, image, selection, editing, page, developer, and navigation actions
@@ -58,6 +61,7 @@ Notes:
 - `Ctrl+W` - close current tab
 - `Ctrl+R` or `F5` - reload current tab
 - `Ctrl+L` - focus and select the address bar
+- `Ctrl+K` - open the command palette
 - `Ctrl+D` - add or remove the current bookmark
 - `Ctrl+F` - find text on the current page
 - `F12` or `Ctrl+Shift+I` - toggle DevTools for the current page
@@ -132,7 +136,7 @@ chmod +x MonoBrowser-<version>-x86_64.AppImage
 - The native menu bar is hidden by default.
 - The app uses a sandboxed renderer with `contextIsolation` enabled and `nodeIntegration` disabled.
 - New tabs open the local MonoBrowser start page; Google is the default search engine.
-- The bundled uBlock Origin files retain their upstream GPLv3 license in `vendor/ublock-origin/LICENSE.txt`.
+- Content blocking runs natively in the main process via `@ghostery/adblocker-electron` (MPL-2.0); dependency and filter-list license notes live in `THIRD-PARTY-NOTICES.md`.
 
 ## License
 

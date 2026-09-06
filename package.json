@@ -1,6 +1,6 @@
 {
   "name": "monobrowser",
-  "version": "0.4.1",
+  "version": "0.5.0",
   "productName": "MonoBrowser",
   "description": "Electron Browser MVP",
   "main": "dist/main/main.js",
@@ -10,7 +10,7 @@
     "clean": "rimraf dist",
     "gen:icon": "node scripts/generate-icon.mjs",
     "build:main": "tsc -p tsconfig.main.json",
-    "build:renderer": "esbuild src/renderer/app.ts src/renderer/find.ts --bundle --platform=browser --format=iife --outdir=dist/renderer",
+    "build:renderer": "esbuild src/renderer/app.ts src/renderer/find.ts src/renderer/palette.ts src/renderer/notes.ts --bundle --platform=browser --format=iife --outdir=dist/renderer",
     "copy:html": "node scripts/copy-renderer-html.mjs",
     "build": "npm run clean && npm run gen:icon && npm run build:main && npm run build:renderer && npm run copy:html",
     "dev": "npm run build && electron .",
@@ -60,20 +60,17 @@
     "files": [
       "dist/**/*",
       "assets/**/*",
+      "THIRD-PARTY-NOTICES.md",
       "package.json"
     ],
-    "extraResources": [
-      {
-        "from": "vendor/ublock-origin",
-        "to": "extensions/ublock-origin"
-      }
-    ],
+    "extraResources": [],
     "directories": {
       "buildResources": "assets",
       "output": "release"
     }
   },
   "dependencies": {
+    "@ghostery/adblocker-electron": "^2.18.2",
     "electron-updater": "^6.8.9"
   },
   "devDependencies": {

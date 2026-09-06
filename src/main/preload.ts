@@ -9,6 +9,7 @@ type TabState = {
   canGoForward: boolean;
   isPinned: boolean;
   isMuted: boolean;
+  isSleeping: boolean;
 };
 
 type TabsStatePayload = {
@@ -44,8 +45,14 @@ type AppLanguage = "pl" | "en";
 type SearchEngine = "google" | "duckduckgo" | "custom";
 type SearchSettings = { engine: SearchEngine; customUrl: string };
 type SearchSettingsResult = { ok: boolean; message: string; settings: SearchSettings };
-type UBlockStatus = { loaded: boolean; name: string; version: string; error: string | null };
-type FindResult = { requestId: number; activeMatchOrdinal: number; matches: number; finalUpdate: boolean };
+type AdblockerStatus = {
+  enabled: boolean;
+  ready: boolean;
+  blockedTotal: number;
+  activeTabBlocked: number;
+  activeTabPaused: boolean;
+  error: string | null;
+};type FindResult = { requestId: number; activeMatchOrdinal: number; matches: number; finalUpdate: boolean };
 type UserScriptRunAt = "document-start" | "document-idle";
 type UserScript = {
   id: string;
@@ -69,6 +76,14 @@ type UserScriptDraft = {
 };
 type UserScriptResult = { ok: boolean; message: string; script?: UserScript };
 type UserScriptImportResult = { ok: boolean; message: string; draft: UserScriptDraft | null };
+type PaletteItem = {
+  id: string;
+  kind: "command" | "tab";
+  label: string;
+  hint?: string;
+  keywords?: string;
+  tabId?: number;
+};
 
 const browserApi = {
   createTab: (initialUrl?: string): Promise<number> =>
@@ -116,7 +131,10 @@ const browserApi = {
   setSearchSettings: (settings: SearchSettings): Promise<SearchSettingsResult> =>
     ipcRenderer.invoke("settings:set-search", settings),
   openSettingsWindow: (): Promise<boolean> => ipcRenderer.invoke("settings:open-window"),
-  getUBlockStatus: (): Promise<UBlockStatus> => ipcRenderer.invoke("ublock:get-status"),
+  getAdblockStatus: (): Promise<AdblockerStatus> => ipcRenderer.invoke("adblock:status"),
+  toggleAdblock: (): Promise<AdblockerStatus> => ipcRenderer.invoke("adblock:toggle"),
+  toggleAdblockTabPause: (): Promise<AdblockerStatus> =>
+    ipcRenderer.invoke("adblock:toggle-tab-pause"),
   listUserScripts: (): Promise<UserScript[]> => ipcRenderer.invoke("userscripts:list"),
   saveUserScript: (draft: UserScriptDraft): Promise<UserScriptResult> =>
     ipcRenderer.invoke("userscripts:save", draft),
@@ -131,6 +149,23 @@ const browserApi = {
     ipcRenderer.invoke("site-info-menu:open", anchor),
   setViewportTop: (top: number): Promise<boolean> =>
     ipcRenderer.invoke("layout:set-viewport-top", top),
+  showPaletteWindow: (): Promise<boolean> => ipcRenderer.invoke("palette:show"),
+  hidePaletteWindow: (): Promise<boolean> => ipcRenderer.invoke("palette:hide"),
+  getPaletteItems: (): Promise<PaletteItem[]> =>
+    ipcRenderer.invoke("palette:get-items"),
+  executePaletteCommand: (id: string): Promise<boolean> =>
+    ipcRenderer.invoke("palette:execute", id),
+  reportPaletteHeight: (height: number): void =>
+    ipcRenderer.send("palette:report-height", height),
+  triggerPaletteShortcut: (): void => {
+    ipcRenderer.send("palette:toggle-shortcut");
+  },
+  showNotesWindow: (): Promise<boolean> => ipcRenderer.invoke("notes:show"),
+  hideNotesWindow: (): Promise<boolean> => ipcRenderer.invoke("notes:hide"),
+  toggleNotesWindow: (): Promise<boolean> => ipcRenderer.invoke("notes:toggle"),
+  getNotes: (): Promise<string> => ipcRenderer.invoke("notes:get"),
+  saveNotes: (value: string): Promise<boolean> =>
+    ipcRenderer.invoke("notes:save", value),
   onTabsState: (
     callback: (payload: TabsStatePayload) => void,
   ): (() => void) => {

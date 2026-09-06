@@ -7,6 +7,7 @@ type TabState = {
   canGoForward: boolean;
   isPinned: boolean;
   isMuted: boolean;
+  isSleeping: boolean;
 };
 
 type TabsStatePayload = {
@@ -18,7 +19,14 @@ type AppLanguage = "pl" | "en";
 type SearchEngine = "google" | "duckduckgo" | "custom";
 type SearchSettings = { engine: SearchEngine; customUrl: string };
 type SearchSettingsResult = { ok: boolean; message: string; settings: SearchSettings };
-type UBlockStatus = { loaded: boolean; name: string; version: string; error: string | null };
+type AdblockerStatus = {
+  enabled: boolean;
+  ready: boolean;
+  blockedTotal: number;
+  activeTabBlocked: number;
+  activeTabPaused: boolean;
+  error: string | null;
+};
 type BrowserApi = {
   createTab: (initialUrl?: string) => Promise<number>;
   closeTab: (tabId: number) => Promise<boolean>;
@@ -40,7 +48,9 @@ type BrowserApi = {
   getSearchSettings: () => Promise<SearchSettings>;
   setSearchSettings: (settings: SearchSettings) => Promise<SearchSettingsResult>;
   openSettingsWindow: () => Promise<boolean>;
-  getUBlockStatus: () => Promise<UBlockStatus>;
+  getAdblockStatus: () => Promise<AdblockerStatus>;
+  toggleAdblock: () => Promise<AdblockerStatus>;
+  toggleAdblockTabPause: () => Promise<AdblockerStatus>;
   onLanguageChanged: (callback: (language: AppLanguage) => void) => () => void;
   onFocusAddress: (callback: () => void) => () => void;
   setViewportTop: (top: number) => Promise<boolean>;
@@ -48,6 +58,7 @@ type BrowserApi = {
   triggerNewTabShortcut: (initialUrl?: string) => void;
   triggerCloseTabShortcut: () => void;
   triggerReloadShortcut: () => void;
+  triggerPaletteShortcut: () => void;
 };
 
 declare global {
@@ -64,12 +75,16 @@ const translations = {
     back: "Wstecz", forward: "Dalej", reload: "Odśwież", menu: "Menu",
     siteInfo: "Informacje o stronie", addressPlaceholder: "Szukaj lub wpisz adres", go: "Przejdź", history: "Historia",
     downloads: "Pobieranie", siteData: "Dane witryn", language: "Język",
+    sleeping: "Karta uśpiona — kliknij, aby wybudzić",
+    palette: "Paleta komend (Ctrl+K)",
   },
   en: {
     tabs: "Tabs", newTab: "New tab", closeTab: "Close tab (Ctrl+W)",
     back: "Back", forward: "Forward", reload: "Reload", menu: "Menu",
     siteInfo: "Page information", addressPlaceholder: "Search or enter address", go: "Go", history: "History",
     downloads: "Downloads", siteData: "Site data", language: "Language",
+    sleeping: "Tab sleeping — click to wake it up",
+    palette: "Command palette (Ctrl+K)",
   },
 } as const;
 
@@ -144,9 +159,11 @@ const renderTabs = (): void => {
   state.tabs.forEach((tab) => {
     const isActive = tab.id === state.activeTabId;
     const button = document.createElement("button");
-    button.className = `tab-btn${isActive ? " active" : ""}${tab.isLoading ? " loading" : ""}${tab.isPinned ? " pinned" : ""}${tab.isMuted ? " muted" : ""}`;
+    button.className = `tab-btn${isActive ? " active" : ""}${tab.isLoading ? " loading" : ""}${tab.isPinned ? " pinned" : ""}${tab.isMuted ? " muted" : ""}${tab.isSleeping ? " sleeping" : ""}`;
     button.type = "button";
-    button.title = tab.title || tab.url;
+    button.title = tab.isSleeping
+      ? `${tab.title || tab.url} — ${copy.sleeping}`
+      : (tab.title || tab.url);
 
     // Loading spinner
     const spinner = document.createElement("span");
@@ -154,6 +171,9 @@ const renderTabs = (): void => {
 
     const status = document.createElement("span");
     status.className = "tab-status";
+    if (tab.isSleeping) {
+      status.innerHTML += `<svg viewBox="0 0 24 24" aria-hidden="true"><path d="M21 12.79A9 9 0 1 1 11.21 3 7 7 0 0 0 21 12.79Z"/></svg>`;
+    }
     if (tab.isPinned) {
       status.innerHTML += `<svg viewBox="0 0 16 16" aria-hidden="true"><path d="M5 2.5h6l-1 3 2 2v1H8.75v4.75L8 14l-.75-.75V8.5H4v-1l2-2-1-3Z"/></svg>`;
     }
@@ -239,6 +259,12 @@ const handleKeyboardShortcut = async (event: KeyboardEvent): Promise<void> => {
   if (key === "f") {
     event.preventDefault();
     await window.browserApi.showFindWindow();
+    return;
+  }
+
+  if (key === "k") {
+    event.preventDefault();
+    window.browserApi.triggerPaletteShortcut();
     return;
   }
 
