@@ -105,6 +105,34 @@ type AdblockerStatus = {
   error: string | null;
 };
 
+type StatsDay = {
+  seconds: number;
+  visits: number;
+  blocked: number;
+  downloads: number;
+  searches: number;
+};
+
+type StatsData = {
+  firstUsedAt: string;
+  totals: {
+    visits: number;
+    blocked: number;
+    downloads: number;
+    searches: number;
+    seconds: number;
+  };
+  days: Record<string, StatsDay>;
+  domains: Record<string, number>;
+};
+
+const createEmptyStatsData = (): StatsData => ({
+  firstUsedAt: new Date().toISOString(),
+  totals: { visits: 0, blocked: 0, downloads: 0, searches: 0, seconds: 0 },
+  days: {},
+  domains: {},
+});
+
 type SearchSettingsResult = {
   ok: boolean;
   message: string;
@@ -156,6 +184,8 @@ const DEFAULT_SEARCH_SETTINGS: SearchSettings = {
 const MAX_HISTORY_ITEMS = 500;
 const MAX_BOOKMARK_ITEMS = 250;
 const MAX_DOWNLOAD_ITEMS = 500;
+const MAX_STATS_DOMAINS = 512;
+const MAX_STATS_DAYS = 90;
 const MAX_USERSCRIPT_ITEMS = 100;
 const MAX_USERSCRIPT_CODE_LENGTH = 500_000;
 const MAX_USERSCRIPT_NAME_LENGTH = 200;
@@ -184,6 +214,7 @@ let downloadsWindow: BrowserWindow | null = null;
 let downloadProgressView: WebContentsView | null = null;
 let downloadProgressVisible = false;
 let siteDataWindow: BrowserWindow | null = null;
+let statsWindow: BrowserWindow | null = null;
 let settingsWindow: BrowserWindow | null = null;
 let navigationPopupWindow: BrowserWindow | null = null;
 let siteInfoPopupWindow: BrowserWindow | null = null;
@@ -216,6 +247,10 @@ let downloadRecords: DownloadRecord[] = [];
 let siteOriginRecords: SiteOriginRecord[] = [];
 let appLanguage: AppLanguage = "pl";
 let searchSettings: SearchSettings = { ...DEFAULT_SEARCH_SETTINGS };
+let statsFilePath = "";
+let statsData: StatsData = createEmptyStatsData();
+let statsDirty = false;
+let statsTimer: NodeJS.Timeout | null = null;
 let adblockBlocker: ElectronBlocker | null = null;
 let adblockEnabled = true;
 let adblockReady = false;
@@ -976,6 +1011,25 @@ const normalizeInputToUrl = (input: string): string => {
   return buildSearchUrl(trimmed);
 };
 
+const isSearchQueryInput = (raw: string): boolean => {
+  const trimmed = raw.trim();
+  if (!trimmed || trimmed === START_PAGE_URL || /^about:blank(?:[?#].*)?$/i.test(trimmed)) {
+    return false;
+  }
+  if (/^https?:\/\//i.test(trimmed)) {
+    return false;
+  }
+  const host = trimmed.split("/")[0];
+  if (!/\s/.test(trimmed) && (
+    /^localhost(?::\d+)?$/i.test(host) ||
+    /^(?:\d{1,3}\.){3}\d{1,3}(?::\d+)?$/.test(host) ||
+    /^(?:[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?\.)+[a-z]{2,63}(?::\d+)?$/i.test(host)
+  )) {
+    return false;
+  }
+  return true;
+};
+
 const openUrlInNewTab = (url: string): void => {
   const trimmed = url.trim();
 
@@ -1428,6 +1482,7 @@ const initAdblocker = (): void => {
       return;
     }
     adblockSessionBlocks += 1;
+    recordBlockedRequest();
     const tab = resolveTabByWebContentsId(details.webContentsId);
     if (tab) {
       tab.blockedCount += 1;
@@ -1467,6 +1522,383 @@ const toggleActiveTabAdblockPause = (): void => {
 };
 
 const localeForLanguage = (): string => appLanguage === "pl" ? "pl-PL" : "en-US";
+
+// ── Usage statistics ────────────────────────────────────────────────────────
+const getStatsDayKey = (): string => {
+  const now = new Date();
+  const pad = (value: number): string => String(value).padStart(2, "0");
+  return `${now.getFullYear()}-${pad(now.getMonth() + 1)}-${pad(now.getDate())}`;
+};
+
+const ensureStatsDay = (): StatsDay => {
+  const key = getStatsDayKey();
+  const day = statsData.days[key] ?? { seconds: 0, visits: 0, blocked: 0, downloads: 0, searches: 0 };
+  statsData.days[key] = day;
+  return day;
+};
+
+const loadStats = async (): Promise<void> => {
+  try {
+    const raw = await fs.readFile(statsFilePath, "utf8");
+    const parsed = JSON.parse(raw) as Partial<StatsData> | null;
+    const empty = createEmptyStatsData();
+    if (parsed && typeof parsed === "object") {
+      statsData = {
+        firstUsedAt: typeof parsed.firstUsedAt === "string" ? parsed.firstUsedAt : empty.firstUsedAt,
+        totals: {
+          visits: Number(parsed.totals?.visits) || 0,
+          blocked: Number(parsed.totals?.blocked) || 0,
+          downloads: Number(parsed.totals?.downloads) || 0,
+          searches: Number(parsed.totals?.searches) || 0,
+          seconds: Number(parsed.totals?.seconds) || 0,
+        },
+        days: parsed.days && typeof parsed.days === "object" ? { ...parsed.days } : {},
+        domains: parsed.domains && typeof parsed.domains === "object" ? { ...parsed.domains } : {},
+      };
+    }
+  } catch {
+    // First launch or unreadable file — start fresh (firstUsedAt set at boot).
+    statsData = createEmptyStatsData();
+  }
+};
+
+const saveStats = async (): Promise<void> => {
+  const dayKeys = Object.keys(statsData.days);
+  if (dayKeys.length > MAX_STATS_DAYS) {
+    dayKeys.sort();
+    for (const key of dayKeys.slice(0, dayKeys.length - MAX_STATS_DAYS)) {
+      delete statsData.days[key];
+    }
+  }
+  const domainKeys = Object.keys(statsData.domains);
+  if (domainKeys.length > MAX_STATS_DOMAINS) {
+    domainKeys.sort((a, b) => (statsData.domains[a] ?? 0) - (statsData.domains[b] ?? 0));
+    for (const key of domainKeys.slice(0, domainKeys.length - MAX_STATS_DOMAINS)) {
+      delete statsData.domains[key];
+    }
+  }
+  await writeJsonAtomically(statsFilePath, statsData);
+  statsDirty = false;
+};
+
+const recordVisit = (rawUrl: string): void => {
+  if (!rawUrl) {
+    return;
+  }
+  let parsed: URL;
+  try {
+    parsed = new URL(rawUrl);
+  } catch {
+    return;
+  }
+  if (parsed.protocol !== "http:" && parsed.protocol !== "https:" && parsed.protocol !== "file:") {
+    return;
+  }
+  statsData.totals.visits += 1;
+  ensureStatsDay().visits += 1;
+  if (parsed.protocol !== "file:" && parsed.hostname) {
+    const hostname = parsed.hostname.toLowerCase();
+    statsData.domains[hostname] = (statsData.domains[hostname] ?? 0) + 1;
+  }
+  statsDirty = true;
+};
+
+const recordBlockedRequest = (): void => {
+  statsData.totals.blocked += 1;
+  ensureStatsDay().blocked += 1;
+  statsDirty = true;
+};
+
+const recordDownloadCompleted = (): void => {
+  statsData.totals.downloads += 1;
+  ensureStatsDay().downloads += 1;
+  statsDirty = true;
+};
+
+const recordSearch = (): void => {
+  statsData.totals.searches += 1;
+  ensureStatsDay().searches += 1;
+  statsDirty = true;
+};
+
+const startStatsTimer = (): void => {
+  if (statsTimer) {
+    clearInterval(statsTimer);
+  }
+  let ticksSinceSave = 0;
+  statsTimer = setInterval(() => {
+    const active = Boolean(
+      mainWindow
+      && !mainWindow.isDestroyed()
+      && !mainWindow.isMinimized()
+      && mainWindow.isFocused()
+      && tabs.size > 0,
+    );
+    if (active) {
+      statsData.totals.seconds += 1;
+      ensureStatsDay().seconds += 1;
+      statsDirty = true;
+    }
+    ticksSinceSave = (ticksSinceSave + 1) % 60;
+    if (ticksSinceSave === 0 && statsDirty) {
+      void saveStats();
+    }
+  }, 1000);
+};
+
+const formatUsageDuration = (totalSeconds: number): string => {
+  const days = Math.floor(totalSeconds / 86400);
+  const hours = Math.floor((totalSeconds % 86400) / 3600);
+  const minutes = Math.floor((totalSeconds % 3600) / 60);
+  const seconds = Math.floor(totalSeconds % 60);
+  const pl = appLanguage === "pl";
+  const parts: string[] = [];
+  if (days > 0) {
+    parts.push(pl ? (days === 1 ? "1 dzień" : `${days} dni`) : `${days}d`);
+  }
+  if (hours > 0) {
+    parts.push(pl ? `${hours} godz.` : `${hours}h`);
+  }
+  if (minutes > 0) {
+    parts.push(pl ? `${minutes} min` : `${minutes}m`);
+  }
+  if (parts.length === 0) {
+    parts.push(pl ? `${seconds} s` : `${seconds}s`);
+  }
+  return parts.join(" ");
+};
+
+const formatStatsDate = (isoDate: string): string => {
+  const parsed = new Date(isoDate);
+  if (Number.isNaN(parsed.getTime())) {
+    return isoDate;
+  }
+  return parsed.toLocaleDateString(localeForLanguage(), { day: "numeric", month: "long", year: "numeric" });
+};
+
+const renderStatsWindowHtml = (): string => {
+  const copy = appLanguage === "pl" ? {
+    documentTitle: "MonoBrowser — Statystyki",
+    heading: "Statystyki użycia",
+    pages: "Odwiedzone strony",
+    time: "Czas używania",
+    downloads: "Pobrane pliki",
+    blocked: "Zablokowane żądania",
+    searches: "Wyszukiwania",
+    topSites: "Najczęściej odwiedzane",
+    noData: "Brak danych.",
+    today: "dziś",
+    since: "Korzystasz z MonoBrowser od",
+  } : {
+    documentTitle: "MonoBrowser — Statistics",
+    heading: "Usage statistics",
+    pages: "Pages visited",
+    time: "Time spent",
+    downloads: "Files downloaded",
+    blocked: "Blocked requests",
+    searches: "Searches",
+    topSites: "Most visited",
+    noData: "No data yet.",
+    today: "today",
+    since: "Using MonoBrowser since",
+  };
+  const todayKey = getStatsDayKey();
+  const today: StatsDay = statsData.days[todayKey]
+    ?? { seconds: 0, visits: 0, blocked: 0, downloads: 0, searches: 0 };
+  const timeToday = formatUsageDuration(today.seconds);
+  const timeTotal = formatUsageDuration(statsData.totals.seconds);
+  const topDomains = Object.entries(statsData.domains)
+    .sort((a, b) => b[1] - a[1])
+    .slice(0, 5);
+  const todayCount = (value: number): string => `${copy.today}: ${value}`;
+  const timeTodayLabel = `${copy.today}: ${timeToday}`;
+  const topRows = topDomains.length > 0
+    ? topDomains.map(([hostname, count]) =>
+      `<div class="stats-row"><span class="stats-label">${escapeHtml(hostname)}</span><strong>${count}</strong></div>`).join("")
+    : `<div class="stats-empty">${copy.noData}</div>`;
+
+  return `<!doctype html>
+<html lang="${appLanguage}">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>${copy.documentTitle}</title>
+    <style>
+      :root {
+        color-scheme: light;
+        --black: #0a0a0a;
+        --white: #f0efe9;
+        --accent: #9c9b95;
+        --grey: #5c5b57;
+        font-family: ui-monospace, "Cascadia Mono", "Courier New", monospace;
+      }
+
+      html,
+      body {
+        width: 100%;
+        height: 100%;
+      }
+
+      body {
+        margin: 0;
+        background: var(--white);
+        color: var(--black);
+        display: flex;
+        flex-direction: column;
+        overflow: hidden;
+      }
+
+      body::after {
+        content: "";
+        position: fixed;
+        inset: 0;
+        pointer-events: none;
+        opacity: .03;
+        background: url("data:image/svg+xml,%3Csvg viewBox='0 0 180 180' xmlns='http://www.w3.org/2000/svg'%3E%3Cfilter id='n'%3E%3CfeTurbulence type='fractalNoise' baseFrequency='.95' numOctaves='3' stitchTiles='stitch'/%3E%3C/filter%3E%3Crect width='100%25' height='100%25' filter='url(%23n)'/%3E%3C/svg%3E");
+      }
+
+      header {
+        padding: 15px 18px;
+        border-bottom: 3px solid var(--black);
+        background: var(--black);
+        color: var(--white);
+        font-size: 14px;
+        font-weight: 600;
+        display: flex;
+        align-items: center;
+        justify-content: space-between;
+        gap: 12px;
+        flex: 0 0 auto;
+      }
+
+      header > span {
+        color: var(--white);
+        font-size: 13px;
+        font-weight: 700;
+        letter-spacing: .12em;
+        text-transform: uppercase;
+      }
+
+      main {
+        flex: 1 1 auto;
+        overflow: auto;
+        padding: 18px;
+        display: flex;
+        flex-direction: column;
+        gap: 18px;
+      }
+
+      h2 {
+        margin: 0;
+        font-size: 11px;
+        font-weight: 700;
+        letter-spacing: .14em;
+        text-transform: uppercase;
+        color: var(--grey);
+      }
+
+      .card {
+        border: 2px solid var(--black);
+        background: var(--white);
+        padding: 12px;
+        display: flex;
+        flex-direction: column;
+        gap: 2px;
+      }
+
+      .stats-row {
+        display: flex;
+        align-items: baseline;
+        justify-content: space-between;
+        gap: 12px;
+        padding: 9px 4px;
+        border-bottom: 1px solid var(--accent);
+        font-size: 12px;
+      }
+
+      .stats-row:last-child {
+        border-bottom: 0;
+      }
+
+      .stats-row strong {
+        font-size: 13px;
+      }
+
+      .stats-today {
+        margin-left: auto;
+        color: var(--grey);
+        font-size: 10px;
+      }
+
+      .stats-empty {
+        padding: 10px 4px;
+        color: var(--grey);
+        font-size: 11px;
+      }
+
+      footer {
+        flex: 0 0 auto;
+        padding: 12px 18px;
+        border-top: 2px solid var(--black);
+        color: var(--grey);
+        font-size: 10px;
+      }
+    </style>
+  </head>
+  <body>
+    <header><span>${copy.heading}</span></header>
+    <main>
+      <div class="card">
+        <div class="stats-row"><span class="stats-label">${copy.pages}</span><span class="stats-today">${escapeHtml(today.visits > 0 ? todayCount(today.visits) : "")}</span><strong>${statsData.totals.visits}</strong></div>
+        <div class="stats-row"><span class="stats-label">${copy.time}</span><span class="stats-today">${escapeHtml(today.seconds > 0 ? timeTodayLabel : "")}</span><strong>${escapeHtml(timeTotal)}</strong></div>
+        <div class="stats-row"><span class="stats-label">${copy.downloads}</span><span class="stats-today">${escapeHtml(today.downloads > 0 ? todayCount(today.downloads) : "")}</span><strong>${statsData.totals.downloads}</strong></div>
+        <div class="stats-row"><span class="stats-label">${copy.blocked}</span><span class="stats-today">${escapeHtml(today.blocked > 0 ? todayCount(today.blocked) : "")}</span><strong>${statsData.totals.blocked}</strong></div>
+        <div class="stats-row"><span class="stats-label">${copy.searches}</span><span class="stats-today">${escapeHtml(today.searches > 0 ? todayCount(today.searches) : "")}</span><strong>${statsData.totals.searches}</strong></div>
+      </div>
+      <h2>${copy.topSites}</h2>
+      <div class="card">${topRows}</div>
+    </main>
+    <footer>${escapeHtml(copy.since)} ${escapeHtml(formatStatsDate(statsData.firstUsedAt))}</footer>
+  </body>
+</html>`;
+};
+
+const loadStatsWindowContent = async (): Promise<void> => {
+  if (!statsWindow || statsWindow.isDestroyed()) {
+    return;
+  }
+  await statsWindow.loadURL(`data:text/html;charset=utf-8,${encodeURIComponent(renderStatsWindowHtml())}`);
+};
+
+const openStatsWindow = async (): Promise<void> => {
+  if (statsWindow && !statsWindow.isDestroyed()) {
+    await loadStatsWindowContent();
+    statsWindow.focus();
+    return;
+  }
+
+  statsWindow = new BrowserWindow({
+    width: 720,
+    height: 560,
+    minWidth: 520,
+    minHeight: 420,
+    title: appLanguage === "pl" ? "MonoBrowser — Statystyki" : "MonoBrowser — Statistics",
+    autoHideMenuBar: true,
+    icon: path.join(app.getAppPath(), "assets", "icon.png"),
+    webPreferences: {
+      contextIsolation: true,
+      nodeIntegration: false,
+      sandbox: true,
+    },
+  });
+  configureInternalWindow(statsWindow);
+  statsWindow.on("closed", () => {
+    statsWindow = null;
+  });
+
+  await loadStatsWindowContent();
+};
+
 
 const saveDownloads = async (): Promise<void> => {
   downloadRecords = downloadRecords.slice(0, MAX_DOWNLOAD_ITEMS);
@@ -1693,6 +2125,9 @@ const registerDownloadHandling = (): void => {
         record.totalBytes = item.getTotalBytes();
         record.finishedAt = new Date().toISOString();
         record.status = state;
+        if (state === "completed") {
+          recordDownloadCompleted();
+        }
         if (state === "interrupted") {
           record.error = "Pobieranie zostało przerwane przez błąd sieci lub zapisu.";
         } else if (state === "cancelled") {
@@ -3195,6 +3630,9 @@ const refreshLocalizedWindows = async (): Promise<void> => {
   if (siteDataWindow && !siteDataWindow.isDestroyed()) {
     await siteDataWindow.loadURL(`data:text/html;charset=utf-8,${encodeURIComponent(renderSiteDataWindowHtml())}`);
   }
+  if (statsWindow && !statsWindow.isDestroyed()) {
+    await loadStatsWindowContent();
+  }
   if (settingsWindow && !settingsWindow.isDestroyed()) {
     await loadSettingsWindowContent();
   }
@@ -3525,7 +3963,15 @@ const openStyledPopup = async (
     if (contextPopupWindow === popup) contextPopupWindow = null;
   });
 
-  await popup.loadURL(`data:text/html;charset=utf-8,${encodeURIComponent(html)}`);
+  try {
+    await popup.loadURL(`data:text/html;charset=utf-8,${encodeURIComponent(html)}`);
+  } catch (error) {
+    // The height-report navigation (monobrowser-menu://resize) can abort the
+    // pending data: URL load; the popup itself is fine in that case.
+    if ((error as NodeJS.ErrnoException)?.code !== "ERR_ABORTED") {
+      throw error;
+    }
+  }
   if (!popup.isDestroyed()) {
     popup.show();
     popup.focus();
@@ -3543,12 +3989,12 @@ const openNavigationMenu = async (anchor: unknown): Promise<boolean> => {
     title: "Menu", settings: "Ustawienia", devTools: "Narzędzia deweloperskie", bookmarks: "Zakładki", addBookmark: "Dodaj bieżącą stronę", removeCurrentBookmark: "Usuń bieżącą zakładkę",
     noBookmarks: "Brak zapisanych zakładek", clearBookmarks: "Wyczyść wszystkie zakładki", history: "Historia", downloads: "Pobieranie",
     siteData: "Dane witryn", language: "Język", polish: "Polski", english: "Angielski", remove: "Usuń",
-    notes: "Notatki", adblock: "Blokowanie treści", on: "Włączone", off: "Wyłączone",
+    notes: "Notatki", stats: "Statystyki", adblock: "Blokowanie treści", on: "Włączone", off: "Wyłączone",
   } : {
     title: "Menu", settings: "Settings", devTools: "Developer tools", bookmarks: "Bookmarks", addBookmark: "Bookmark current page", removeCurrentBookmark: "Remove current bookmark",
     noBookmarks: "No saved bookmarks", clearBookmarks: "Clear all bookmarks", history: "History", downloads: "Downloads",
     siteData: "Site data", language: "Language", polish: "Polish", english: "English", remove: "Remove",
-    notes: "Notes", adblock: "Content blocking", on: "On", off: "Off",
+    notes: "Notes", stats: "Statistics", adblock: "Content blocking", on: "On", off: "Off",
   };
   const activeUrl = getBookmarkableUrl(getActiveTab()?.url ?? "");
   const currentBookmark = activeUrl ? findBookmarkByUrl(activeUrl) : undefined;
@@ -3573,6 +4019,7 @@ const openNavigationMenu = async (anchor: unknown): Promise<boolean> => {
   <a class="menu-item" href="monobrowser-menu://history">${copy.history}</a>
   <a class="menu-item" href="monobrowser-menu://downloads">${copy.downloads}</a>
   <a class="menu-item" href="monobrowser-menu://site-data">${copy.siteData}</a>
+  <a class="menu-item" href="monobrowser-menu://stats">${copy.stats}</a>
   <a class="menu-item" href="monobrowser-menu://notes">${copy.notes}</a>
   <a class="menu-item" href="monobrowser-menu://adblock-toggle">${copy.adblock}<span class="shortcut">${adblockEnabled ? copy.on : copy.off}</span></a>
   <details><summary>${copy.language}</summary><div class="submenu">
@@ -3590,16 +4037,20 @@ const openNavigationMenu = async (anchor: unknown): Promise<boolean> => {
     location.href = 'monobrowser-menu://resize?height=' + height;
   };
   document.querySelectorAll('details').forEach(details => details.addEventListener('toggle', () => requestAnimationFrame(reportHeight)));
+  // Report on load, after the initial data: URL has settled — a resize
+  // navigation fired during loadURL would abort it with ERR_ABORTED.
+  window.addEventListener('load', () => setTimeout(() => requestAnimationFrame(reportHeight), 30));
 })();
 </script></body></html>`;
 
-  return openStyledPopup("navigation", position, 340, 390, html, async (actionUrl) => {
+  return openStyledPopup("navigation", position, 340, 520, html, async (actionUrl) => {
     const action = actionUrl.hostname;
     if (action === "settings") return openSettingsWindow();
     if (action === "dev-tools") return toggleActiveTabDevTools();
     if (action === "history") return openHistoryWindow();
     if (action === "downloads") return openDownloadsWindow();
     if (action === "site-data") return openSiteDataWindow();
+    if (action === "stats") return openStatsWindow();
     if (action === "notes") { toggleNotesView(); return; }
     if (action === "adblock-toggle") { await setAdblockEnabled(!adblockEnabled); return; }
     if (action === "bookmark-toggle") return void await toggleActiveBookmark();
@@ -4211,6 +4662,7 @@ const buildPaletteItems = (): PaletteItem[] => {
     { id: "open-history", kind: "command", label: pl ? "Otwórz: Historia" : "Open: History", keywords: "otworz historia open history" },
     { id: "open-downloads", kind: "command", label: pl ? "Otwórz: Pobieranie" : "Open: Downloads", keywords: "otworz pobieranie open downloads" },
     { id: "open-site-data", kind: "command", label: pl ? "Otwórz: Dane witryn" : "Open: Site data", keywords: "otworz dane witryn open site data cookies" },
+    { id: "open-stats", kind: "command", label: pl ? "Otwórz: Statystyki" : "Open: Statistics", keywords: "otworz statystyki stats usage time pobrane zablokowane" },
     { id: "open-settings", kind: "command", label: pl ? "Otwórz: Ustawienia" : "Open: Settings", keywords: "otworz ustawienia open settings preferences" },
     { id: "toggle-notes", kind: "command", label: pl ? "Przełącz notatki" : "Toggle notes", keywords: "notatki notes notatnik" },
     { id: "sleep-other-tabs", kind: "command", label: pl ? "Uśpij pozostałe karty" : "Sleep other tabs", keywords: "uspij karty sleep tabs pamiec memory" },
@@ -4280,6 +4732,7 @@ const executePaletteCommand = async (id: string): Promise<void> => {
     case "open-history": await openHistoryWindow(); break;
     case "open-downloads": await openDownloadsWindow(); break;
     case "open-site-data": await openSiteDataWindow(); break;
+    case "open-stats": await openStatsWindow(); break;
     case "open-settings": await openSettingsWindow(); break;
     case "toggle-notes": toggleNotesView(); break;
     case "sleep-other-tabs": sleepOtherTabs(); break;
@@ -4742,6 +5195,7 @@ const wireTabEvents = (tab: TabRecord, view: WebContentsView): void => {
   contents.on("page-title-updated", () => updateTabFromWebContents(tab));
   contents.on("did-navigate", () => {
     updateTabFromWebContents(tab);
+    recordVisit(contents.getURL());
     executedUserScriptKeys.delete(contents);
   });
   contents.on("did-navigate-in-page", () => {
@@ -5077,6 +5531,9 @@ const registerIpc = (): void => {
 
     try {
       const normalizedUrl = normalizeInputToUrl(input);
+      if (isSearchQueryInput(input)) {
+        recordSearch();
+      }
       tab.url = normalizedUrl;
       await contents.loadURL(resolveUrlForLoading(normalizedUrl));
     } catch (err: any) {
@@ -5148,6 +5605,11 @@ const registerIpc = (): void => {
 
   ipcMain.handle("site-data:open-window", async () => {
     await openSiteDataWindow();
+    return true;
+  });
+
+  ipcMain.handle("stats:open-window", async () => {
+    await openStatsWindow();
     return true;
   });
 
@@ -5632,6 +6094,7 @@ const bootstrap = async (): Promise<void> => {
   adblockSettingsFilePath = path.join(app.getPath("userData"), "adblock-settings.json");
   adblockEngineCachePath = path.join(app.getPath("userData"), "adblock-engine.bin");
   notesFilePath = path.join(app.getPath("userData"), "notes.md");
+  statsFilePath = path.join(app.getPath("userData"), "stats.json");
   startPageBackgroundFilePath = path.join(
     app.getPath("userData"),
     START_PAGE_BACKGROUND_FILE,
@@ -5647,6 +6110,7 @@ const bootstrap = async (): Promise<void> => {
     loadDownloads(),
     loadSiteOrigins(),
     loadNotesContent(),
+    loadStats(),
   ]);
 
   await createSplashWindow();
@@ -5661,6 +6125,7 @@ const bootstrap = async (): Promise<void> => {
   await persistentDataLoad;
   registerDownloadHandling();
   initAdblocker();
+  startStatsTimer();
   startTabSleepTimer();
 
   updateSplashProgress(28, "Preparing interface...");
@@ -5689,6 +6154,12 @@ app
     console.error("Failed to bootstrap app:", error);
     app.quit();
   });
+
+app.on("before-quit", () => {
+  if (statsDirty) {
+    void saveStats();
+  }
+});
 
 app.on("window-all-closed", () => {
   if (process.platform !== "darwin") {

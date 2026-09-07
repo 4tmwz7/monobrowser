@@ -131,6 +131,7 @@ const browserApi = {
   setSearchSettings: (settings: SearchSettings): Promise<SearchSettingsResult> =>
     ipcRenderer.invoke("settings:set-search", settings),
   openSettingsWindow: (): Promise<boolean> => ipcRenderer.invoke("settings:open-window"),
+  openStatsWindow: (): Promise<boolean> => ipcRenderer.invoke("stats:open-window"),
   getAdblockStatus: (): Promise<AdblockerStatus> => ipcRenderer.invoke("adblock:status"),
   toggleAdblock: (): Promise<AdblockerStatus> => ipcRenderer.invoke("adblock:toggle"),
   toggleAdblockTabPause: (): Promise<AdblockerStatus> =>

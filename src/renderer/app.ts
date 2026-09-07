@@ -48,6 +48,7 @@ type BrowserApi = {
   getSearchSettings: () => Promise<SearchSettings>;
   setSearchSettings: (settings: SearchSettings) => Promise<SearchSettingsResult>;
   openSettingsWindow: () => Promise<boolean>;
+  openStatsWindow: () => Promise<boolean>;
   getAdblockStatus: () => Promise<AdblockerStatus>;
   toggleAdblock: () => Promise<AdblockerStatus>;
   toggleAdblockTabPause: () => Promise<AdblockerStatus>;

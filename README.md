@@ -1,11 +1,11 @@
 # MonoBrowser
 
-MonoBrowser is a small desktop browser for Windows and Linux, built with Electron, TypeScript, and esbuild. The latest stable release is [v0.5.0](https://github.com/4tmwz7/monobrowser/releases/tag/v0.5.0).
+MonoBrowser is a small desktop browser for Windows and Linux, built with Electron, TypeScript, and esbuild. The latest stable release is [v0.5.1](https://github.com/4tmwz7/monobrowser/releases/tag/v0.5.1).
 
 ## Download
 
-- [Windows x64 installer](https://github.com/4tmwz7/monobrowser/releases/download/v0.5.0/MonoBrowser-Setup-0.5.0.exe)
-- [Linux x64 AppImage](https://github.com/4tmwz7/monobrowser/releases/download/v0.5.0/MonoBrowser-0.5.0-x86_64.AppImage)
+- [Windows x64 installer](https://github.com/4tmwz7/monobrowser/releases/download/v0.5.1/MonoBrowser-Setup-0.5.1.exe)
+- [Linux x64 AppImage](https://github.com/4tmwz7/monobrowser/releases/download/v0.5.1/MonoBrowser-0.5.1-x86_64.AppImage)
 
 ## System requirements
 
