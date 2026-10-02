@@ -26,6 +26,13 @@ Notes:
 - On Wayland sessions the app runs as a native Wayland client; XWayland can be forced with `--ozone-platform=x11`.
 - If the AppImage fails to start because FUSE is missing, run it with `--appimage-extract-and-run`.
 
+## Security notes
+
+- Windows installers are not code-signed, so SmartScreen may show a warning on first run.
+- The Linux AppImage is not signed; verify downloads against the checksums in `latest-linux.yml`.
+- Camera, microphone, location, notifications, and clipboard-read requests from sites are blocked unless you allow them in a prompt; the choice lasts until the app is closed.
+- Only one MonoBrowser instance runs at a time; launching it again focuses the existing window.
+
 ## Keyboard shortcuts
 
 - `Ctrl+T` - open new tab

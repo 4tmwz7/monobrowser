@@ -8,6 +8,7 @@ type TabState = {
   isPinned: boolean;
   isMuted: boolean;
   isSleeping: boolean;
+  favicon: string | null;
 };
 
 type TabsStatePayload = {
@@ -182,6 +183,16 @@ const renderTabs = (): void => {
       status.innerHTML += `<svg viewBox="0 0 16 16" aria-hidden="true"><path d="M2 6h2l3-2.5v9L4 10H2V6Zm7.2-.8 1.3 1.3 1.3-1.3 1 1-1.3 1.3 1.3 1.3-1 1-1.3-1.3L9.2 9l-1-1 1.3-1.3-1.3-1.3 1-1Z"/></svg>`;
     }
 
+    let favicon: HTMLImageElement | null = null;
+    if (tab.favicon) {
+      favicon = document.createElement("img");
+      favicon.className = "tab-favicon";
+      favicon.alt = "";
+      favicon.draggable = false;
+      favicon.src = tab.favicon;
+      favicon.addEventListener("error", () => favicon?.remove());
+    }
+
     const title = document.createElement("span");
     title.className = "tab-title";
     title.textContent = !tab.title || tab.title === "New Tab" || tab.title === "Nowa karta"
@@ -211,7 +222,7 @@ const renderTabs = (): void => {
       });
     });
 
-    button.append(spinner, status, title, close);
+    button.append(spinner, ...(favicon ? [favicon] : []), status, title, close);
     tabsContainer.append(button);
   });
 };

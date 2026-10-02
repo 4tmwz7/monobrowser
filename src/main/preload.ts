@@ -10,6 +10,7 @@ type TabState = {
   isPinned: boolean;
   isMuted: boolean;
   isSleeping: boolean;
+  favicon: string | null;
 };
 
 type TabsStatePayload = {

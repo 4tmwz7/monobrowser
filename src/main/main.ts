@@ -1,10 +1,11 @@
 import { app, BrowserWindow, clipboard, dialog, ipcMain, session, Menu, shell, WebContentsView, MenuItemConstructorOptions } from "electron";
-import type { DownloadItem, WebContents } from "electron";
+import type { DownloadItem, IpcMainEvent, IpcMainInvokeEvent, WebContents } from "electron";
 import fsSync from "node:fs";
 import fs from "node:fs/promises";
 import path from "node:path";
 import { ElectronBlocker, fullLists } from "@ghostery/adblocker-electron";
 import { autoUpdater } from "electron-updater";
+import { getErrorCode, isAboutBlankUrl, isHttpUrl, looksLikeHost } from "./url-utils.js";
 
 type TabState = {
   id: number;
@@ -16,6 +17,7 @@ type TabState = {
   isPinned: boolean;
   isMuted: boolean;
   isSleeping: boolean;
+  favicon: string | null;
 };
 
 type TabRecord = TabState & {
@@ -23,6 +25,7 @@ type TabRecord = TabState & {
   lastActiveAt: number;
   adblockPaused: boolean;
   blockedCount: number;
+  faviconOrigin?: string | null;
 };
 
 type HistoryEntry = {
@@ -985,26 +988,11 @@ const normalizeInputToUrl = (input: string): string => {
     return DEFAULT_URL;
   }
 
-  if (trimmed === START_PAGE_URL) {
-    return START_PAGE_URL;
-  }
-
-  if (/^about:blank(?:[?#].*)?$/i.test(trimmed)) {
+  if (trimmed === START_PAGE_URL || isAboutBlankUrl(trimmed) || isHttpUrl(trimmed)) {
     return trimmed;
   }
 
-  const hasProtocol = /^https?:\/\//i.test(trimmed);
-  if (hasProtocol) {
-    return trimmed;
-  }
-
-  const host = trimmed.split("/")[0];
-  const looksLikeHost = !/\s/.test(trimmed) && (
-    /^localhost(?::\d+)?$/i.test(host) ||
-    /^(?:\d{1,3}\.){3}\d{1,3}(?::\d+)?$/.test(host) ||
-    /^(?:[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?\.)+[a-z]{2,63}(?::\d+)?$/i.test(host)
-  );
-  if (looksLikeHost) {
+  if (looksLikeHost(trimmed)) {
     return `https://${trimmed}`;
   }
 
@@ -1013,21 +1001,17 @@ const normalizeInputToUrl = (input: string): string => {
 
 const isSearchQueryInput = (raw: string): boolean => {
   const trimmed = raw.trim();
-  if (!trimmed || trimmed === START_PAGE_URL || /^about:blank(?:[?#].*)?$/i.test(trimmed)) {
+  if (!trimmed || trimmed === START_PAGE_URL || isAboutBlankUrl(trimmed) || isHttpUrl(trimmed)) {
     return false;
   }
-  if (/^https?:\/\//i.test(trimmed)) {
-    return false;
+  return !looksLikeHost(trimmed);
+};
+
+const logNavigationError = (error: unknown): void => {
+  // ERR_ABORTED pojawia się naturalnie przy szybkiej nawigacji i przekierowaniach.
+  if (getErrorCode(error) !== "ERR_ABORTED") {
+    console.error("Navigation failed:", error);
   }
-  const host = trimmed.split("/")[0];
-  if (!/\s/.test(trimmed) && (
-    /^localhost(?::\d+)?$/i.test(host) ||
-    /^(?:\d{1,3}\.){3}\d{1,3}(?::\d+)?$/.test(host) ||
-    /^(?:[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?\.)+[a-z]{2,63}(?::\d+)?$/i.test(host)
-  )) {
-    return false;
-  }
-  return true;
 };
 
 const openUrlInNewTab = (url: string): void => {
@@ -1038,7 +1022,7 @@ const openUrlInNewTab = (url: string): void => {
     return;
   }
 
-  if (/^https?:\/\//i.test(trimmed) || /^about:blank(?:[?#].*)?$/i.test(trimmed)) {
+  if (isHttpUrl(trimmed) || isAboutBlankUrl(trimmed)) {
     openNewTab(trimmed);
   }
 };
@@ -1065,6 +1049,7 @@ const getTabSnapshot = (tab: TabRecord): TabState => ({
   isPinned: tab.isPinned,
   isMuted: tab.isMuted,
   isSleeping: tab.isSleeping,
+  favicon: tab.favicon,
 });
 
 const getOrderedTabRecords = (): TabRecord[] => [
@@ -5179,6 +5164,62 @@ const closeTab = (id: number): boolean => {
   return true;
 };
 
+const FAVICON_MAX_BYTES = 256 * 1024;
+const FAVICON_CACHE_LIMIT = 300;
+const faviconCache = new Map<string, string | null>();
+
+const fetchFaviconDataUrl = async (contents: WebContents, faviconUrl: string): Promise<string | null> => {
+  if (faviconUrl.startsWith("data:image/")) {
+    return faviconUrl.length <= FAVICON_MAX_BYTES * 2 ? faviconUrl : null;
+  }
+  if (!isHttpUrl(faviconUrl)) {
+    return null;
+  }
+  if (faviconCache.has(faviconUrl)) {
+    return faviconCache.get(faviconUrl) ?? null;
+  }
+
+  let result: string | null = null;
+  try {
+    const response = await contents.session.fetch(faviconUrl, { signal: AbortSignal.timeout(8000) });
+    const type = (response.headers.get("content-type") ?? "").split(";")[0].trim().toLowerCase();
+    const isImage = type.startsWith("image/") || (type === "" && /\.(?:ico|png|svg|gif|jpe?g|webp)(?:[?#]|$)/i.test(faviconUrl));
+    if (response.ok && isImage) {
+      const buffer = Buffer.from(await response.arrayBuffer());
+      if (buffer.length > 0 && buffer.length <= FAVICON_MAX_BYTES) {
+        const mime = type.startsWith("image/") ? type : (faviconUrl.toLowerCase().includes(".ico") ? "image/x-icon" : "image/png");
+        result = `data:${mime};base64,${buffer.toString("base64")}`;
+      }
+    }
+  } catch {
+    result = null;
+  }
+
+  if (faviconCache.size >= FAVICON_CACHE_LIMIT) {
+    const oldest = faviconCache.keys().next().value as string | undefined;
+    if (oldest) faviconCache.delete(oldest);
+  }
+  faviconCache.set(faviconUrl, result);
+  return result;
+};
+
+const loadTabFavicon = async (tab: TabRecord, contents: WebContents, candidates: string[]): Promise<void> => {
+  const pageUrl = contents.getURL();
+  for (const candidate of candidates.slice(0, 4)) {
+    const dataUrl = await fetchFaviconDataUrl(contents, candidate);
+    // Strona mogła się zmienić w trakcie pobierania.
+    if (contents.isDestroyed() || contents.getURL() !== pageUrl) {
+      return;
+    }
+    if (dataUrl) {
+      tab.favicon = dataUrl;
+      tab.faviconOrigin = getPermissionOrigin(pageUrl);
+      broadcastTabsState();
+      return;
+    }
+  }
+};
+
 const wireTabEvents = (tab: TabRecord, view: WebContentsView): void => {
   const contents = view.webContents;
 
@@ -5193,7 +5234,14 @@ const wireTabEvents = (tab: TabRecord, view: WebContentsView): void => {
   contents.on("did-start-loading", () => updateTabFromWebContents(tab));
   contents.on("did-stop-loading", () => updateTabFromWebContents(tab));
   contents.on("page-title-updated", () => updateTabFromWebContents(tab));
+  contents.on("page-favicon-updated", (_event, favicons) => {
+    void loadTabFavicon(tab, contents, favicons);
+  });
   contents.on("did-navigate", () => {
+    if (tab.favicon && getPermissionOrigin(contents.getURL()) !== tab.faviconOrigin) {
+      tab.favicon = null;
+      tab.faviconOrigin = null;
+    }
     updateTabFromWebContents(tab);
     recordVisit(contents.getURL());
     executedUserScriptKeys.delete(contents);
@@ -5237,6 +5285,7 @@ const createTab = (
     isPinned: false,
     isMuted: false,
     isSleeping: false,
+    favicon: null,
     lastActiveAt: Date.now(),
     adblockPaused: false,
     blockedCount: 0,
@@ -5254,7 +5303,7 @@ const createTab = (
     broadcastTabsState();
   }
 
-  view.webContents.loadURL(resolveUrlForLoading(normalizedInitialUrl)).catch(() => undefined);
+  view.webContents.loadURL(resolveUrlForLoading(normalizedInitialUrl)).catch(logNavigationError);
 
   return id;
 };
@@ -5322,7 +5371,7 @@ const wakeTab = (tab: TabRecord): WebContentsView | null => {
   tab.lastActiveAt = Date.now();
   tab.isLoading = true;
   broadcastTabsState();
-  view.webContents.loadURL(resolveUrlForLoading(tab.url)).catch(() => undefined);
+  view.webContents.loadURL(resolveUrlForLoading(tab.url)).catch(logNavigationError);
 
   if (tab.id === activeTabId && mainWindow && !mainWindow.isDestroyed()) {
     attachViewOnTop(view);
@@ -5387,39 +5436,162 @@ const getActiveTab = (): TabRecord | null => {
   return tabs.get(activeTabId) ?? null;
 };
 
+const AUTO_ALLOWED_PERMISSIONS = new Set([
+  "fullscreen",
+  "clipboard-sanitized-write",
+  "pointerLock",
+  "keyboardLock",
+]);
+
+const PROMPTED_PERMISSIONS: Record<string, { pl: string; en: string }> = {
+  media: { pl: "używać kamery lub mikrofonu", en: "use your camera or microphone" },
+  geolocation: { pl: "poznać Twoją lokalizację", en: "know your location" },
+  notifications: { pl: "wyświetlać powiadomienia", en: "show notifications" },
+  "clipboard-read": { pl: "odczytywać schowek", en: "read your clipboard" },
+  "idle-detection": { pl: "wykrywać bezczynność", en: "detect when you are idle" },
+};
+
+const permissionDecisions = new Map<string, boolean>();
+const pendingPermissionPrompts = new Map<string, Promise<boolean>>();
+
+const promptForPermission = (origin: string, permission: string): Promise<boolean> => {
+  const key = `${origin}|${permission}`;
+  const known = permissionDecisions.get(key);
+  if (known !== undefined) {
+    return Promise.resolve(known);
+  }
+
+  const pending = pendingPermissionPrompts.get(key);
+  if (pending) {
+    return pending;
+  }
+
+  const label = PROMPTED_PERMISSIONS[permission];
+  const parent = mainWindow && !mainWindow.isDestroyed() ? mainWindow : undefined;
+  const pl = appLanguage === "pl";
+  const options = {
+    type: "question" as const,
+    buttons: pl ? ["Zezwól", "Zablokuj"] : ["Allow", "Block"],
+    defaultId: 1,
+    cancelId: 1,
+    title: pl ? "Uprawnienia witryny" : "Site permission",
+    message: pl
+      ? `${origin} chce ${label[appLanguage]}.`
+      : `${origin} wants to ${label[appLanguage]}.`,
+    detail: pl ? "Decyzja obowiązuje do zamknięcia aplikacji." : "Your choice lasts until the app is closed.",
+  };
+
+  const prompt = (parent ? dialog.showMessageBox(parent, options) : dialog.showMessageBox(options))
+    .then(({ response }) => {
+      const allowed = response === 0;
+      permissionDecisions.set(key, allowed);
+      return allowed;
+    })
+    .catch(() => false)
+    .finally(() => pendingPermissionPrompts.delete(key));
+  pendingPermissionPrompts.set(key, prompt);
+  return prompt;
+};
+
+const getPermissionOrigin = (url: string): string | null => {
+  try {
+    const parsed = new URL(url);
+    return parsed.protocol === "https:" || parsed.protocol === "http:" ? parsed.origin : null;
+  } catch {
+    return null;
+  }
+};
+
+const setupPermissionHandlers = (): void => {
+  const defaultSession = session.defaultSession;
+
+  defaultSession.setPermissionRequestHandler((webContents, permission, callback, details) => {
+    if (AUTO_ALLOWED_PERMISSIONS.has(permission)) {
+      callback(true);
+      return;
+    }
+    const origin = getPermissionOrigin(details.requestingUrl || webContents.getURL());
+    if (!origin || !(permission in PROMPTED_PERMISSIONS) || !resolveTabByWebContentsId(webContents.id)) {
+      callback(false);
+      return;
+    }
+    void promptForPermission(origin, permission).then(callback);
+  });
+
+  defaultSession.setPermissionCheckHandler((_webContents, permission, requestingOrigin) => {
+    if (AUTO_ALLOWED_PERMISSIONS.has(permission)) {
+      return true;
+    }
+    return permissionDecisions.get(`${requestingOrigin}|${permission}`) === true;
+  });
+};
+
+// Kanały IPC są dostępne wyłącznie dla własnych okien aplikacji (file:/data:), nigdy dla kart z internetu.
+const isTrustedIpcSender = (event: IpcMainEvent | IpcMainInvokeEvent): boolean => {
+  if (resolveTabByWebContentsId(event.sender.id)) {
+    return false;
+  }
+  const frameUrl = event.senderFrame?.url ?? "";
+  return frameUrl.startsWith("file:") || frameUrl.startsWith("data:");
+};
+
+const handleTrusted = (
+  channel: string,
+  listener: (event: IpcMainInvokeEvent, ...args: any[]) => unknown,
+): void => {
+  ipcMain.handle(channel, (event, ...args) => {
+    if (!isTrustedIpcSender(event)) {
+      console.warn(`Rejected IPC call on "${channel}" from untrusted sender`);
+      return undefined;
+    }
+    return listener(event, ...args);
+  });
+};
+
+const onTrusted = (
+  channel: string,
+  listener: (event: IpcMainEvent, ...args: any[]) => void,
+): void => {
+  ipcMain.on(channel, (event, ...args) => {
+    if (isTrustedIpcSender(event)) {
+      listener(event, ...args);
+    }
+  });
+};
+
 const registerIpc = (): void => {
-  ipcMain.handle("tabs:create", (_event, initialUrl?: string) => {
+  handleTrusted("tabs:create", (_event, initialUrl?: string) => {
     return openNewTab(initialUrl);
   });
 
-  ipcMain.on("tabs:create-shortcut", (_event, initialUrl?: string) => {
+  onTrusted("tabs:create-shortcut", (_event, initialUrl?: string) => {
     openNewTab(initialUrl);
   });
 
-  ipcMain.handle("tabs:close", (_event, tabId: number) => {
+  handleTrusted("tabs:close", (_event, tabId: number) => {
     return closeTab(tabId);
   });
 
-  ipcMain.on("tabs:close-shortcut", () => {
+  onTrusted("tabs:close-shortcut", () => {
     closeCurrentTab();
   });
 
-  ipcMain.handle("tabs:switch", (_event, tabId: number) => {
+  handleTrusted("tabs:switch", (_event, tabId: number) => {
     const switched = setActiveTab(tabId);
     broadcastTabsState();
     return switched;
   });
 
-  ipcMain.handle("tabs:get-state", () => {
+  handleTrusted("tabs:get-state", () => {
     return getTabsStatePayload();
   });
 
-  ipcMain.handle("tabs:open-context-menu", (_event, tabId: unknown, anchor: unknown) => {
+  handleTrusted("tabs:open-context-menu", (_event, tabId: unknown, anchor: unknown) => {
     if (typeof tabId !== "number" || !Number.isInteger(tabId)) return false;
     return openTabContextMenu(tabId, anchor);
   });
 
-  ipcMain.handle("find:start", async (_event, query: unknown, options: unknown) => {
+  handleTrusted("find:start", async (_event, query: unknown, options: unknown) => {
     const tab = getActiveTab();
     if (!tab || typeof query !== "string" || query.length === 0 || query.length > 1000) return null;
     const raw = typeof options === "object" && options !== null
@@ -5502,19 +5674,19 @@ const registerIpc = (): void => {
     }
   });
 
-  ipcMain.handle("find:stop", async () => clearActiveFindHighlights());
+  handleTrusted("find:stop", async () => clearActiveFindHighlights());
 
-  ipcMain.handle("find:show-window", () => {
+  handleTrusted("find:show-window", () => {
     focusFindBar();
     return true;
   });
 
-  ipcMain.handle("find:hide-window", async () => {
+  handleTrusted("find:hide-window", async () => {
     await hideFindWindow();
     return true;
   });
 
-  ipcMain.handle("nav:go", async (_event, input: string) => {
+  handleTrusted("nav:go", async (_event, input: string) => {
     const tab = getActiveTab();
     if (!tab) {
       return false;
@@ -5536,9 +5708,9 @@ const registerIpc = (): void => {
       }
       tab.url = normalizedUrl;
       await contents.loadURL(resolveUrlForLoading(normalizedUrl));
-    } catch (err: any) {
+    } catch (err: unknown) {
       // Ignorujemy ERR_ABORTED, ponieważ występuje naturalnie podczas szybkiej nawigacji lub przekierowań na stronach
-      if (err?.code !== "ERR_ABORTED") {
+      if (getErrorCode(err) !== "ERR_ABORTED") {
         console.error("Navigation failed:", err);
       }
     }
@@ -5547,7 +5719,7 @@ const registerIpc = (): void => {
     return true;
   });
 
-  ipcMain.handle("nav:back", async () => {
+  handleTrusted("nav:back", async () => {
     const contents = getTabContents(getActiveTab());
     if (!contents) {
       return false;
@@ -5561,7 +5733,7 @@ const registerIpc = (): void => {
     return false;
   });
 
-  ipcMain.handle("nav:forward", async () => {
+  handleTrusted("nav:forward", async () => {
     const contents = getTabContents(getActiveTab());
     if (!contents) {
       return false;
@@ -5575,7 +5747,7 @@ const registerIpc = (): void => {
     return false;
   });
 
-  ipcMain.handle("nav:reload", async () => {
+  handleTrusted("nav:reload", async () => {
     const contents = getTabContents(getActiveTab());
     if (!contents) {
       return false;
@@ -5585,39 +5757,39 @@ const registerIpc = (): void => {
     return true;
   });
 
-  ipcMain.on("nav:reload-shortcut", () => {
+  onTrusted("nav:reload-shortcut", () => {
     reloadActiveTabView();
   });
 
-  ipcMain.handle("history:get", () => {
+  handleTrusted("history:get", () => {
     return historyEntries;
   });
 
-  ipcMain.handle("history:open-window", async () => {
+  handleTrusted("history:open-window", async () => {
     await openHistoryWindow();
     return true;
   });
 
-  ipcMain.handle("downloads:open-window", async () => {
+  handleTrusted("downloads:open-window", async () => {
     await openDownloadsWindow();
     return true;
   });
 
-  ipcMain.handle("site-data:open-window", async () => {
+  handleTrusted("site-data:open-window", async () => {
     await openSiteDataWindow();
     return true;
   });
 
-  ipcMain.handle("stats:open-window", async () => {
+  handleTrusted("stats:open-window", async () => {
     await openStatsWindow();
     return true;
   });
 
-  ipcMain.handle("downloads:get", () => {
+  handleTrusted("downloads:get", () => {
     return getDownloadStatePayload().downloads;
   });
 
-  ipcMain.handle("downloads:cancel", (_event, id: unknown) => {
+  handleTrusted("downloads:cancel", (_event, id: unknown) => {
     if (typeof id !== "string" || !id || id.length > 200) {
       return false;
     }
@@ -5629,14 +5801,14 @@ const registerIpc = (): void => {
     return true;
   });
 
-  ipcMain.handle("downloads:clear-history", async () => {
+  handleTrusted("downloads:clear-history", async () => {
     downloadRecords = downloadRecords.filter((record) => activeDownloads.has(record.id));
     await saveDownloads();
     broadcastDownloads();
     return true;
   });
 
-  ipcMain.handle("downloads:open-file", async (_event, id: unknown) => {
+  handleTrusted("downloads:open-file", async (_event, id: unknown) => {
     if (typeof id !== "string" || !id || id.length > 200) {
       return false;
     }
@@ -5655,7 +5827,7 @@ const registerIpc = (): void => {
     }
   });
 
-  ipcMain.handle("downloads:show-in-folder", async (_event, id: unknown) => {
+  handleTrusted("downloads:show-in-folder", async (_event, id: unknown) => {
     if (typeof id !== "string" || !id || id.length > 200) {
       return false;
     }
@@ -5675,14 +5847,14 @@ const registerIpc = (): void => {
     }
   });
 
-  ipcMain.handle("site-data:list", async () => listSiteData());
-  ipcMain.handle("site-data:clear", async (_event, origin: unknown, dataTypes: unknown) => {
+  handleTrusted("site-data:list", async () => listSiteData());
+  handleTrusted("site-data:clear", async (_event, origin: unknown, dataTypes: unknown) => {
     return clearSiteData(origin, dataTypes);
   });
-  ipcMain.handle("site-data:clear-global", async (_event, dataTypes: unknown) => {
+  handleTrusted("site-data:clear-global", async (_event, dataTypes: unknown) => {
     return clearGlobalSiteData(dataTypes);
   });
-  ipcMain.handle("site-data:clear-history", async () => {
+  handleTrusted("site-data:clear-history", async () => {
     try {
       await clearHistory();
       return { ok: true, message: appLanguage === "pl" ? "Historia przeglądania została wyczyszczona." : "Browsing history was cleared." } satisfies ClearResult;
@@ -5692,61 +5864,61 @@ const registerIpc = (): void => {
     }
   });
 
-  ipcMain.handle("language:get", () => appLanguage);
-  ipcMain.handle("language:set", async (_event, value: unknown) => {
+  handleTrusted("language:get", () => appLanguage);
+  handleTrusted("language:set", async (_event, value: unknown) => {
     const language = normalizeLanguage(value);
     if (!language) {
       return false;
     }
     return setApplicationLanguage(language);
   });
-  ipcMain.handle("settings:get-search", () => ({ ...searchSettings }));
-  ipcMain.handle("settings:set-search", async (_event, value: unknown) => setSearchSettings(value));
+  handleTrusted("settings:get-search", () => ({ ...searchSettings }));
+  handleTrusted("settings:set-search", async (_event, value: unknown) => setSearchSettings(value));
 
-  ipcMain.handle("userscripts:list", () => userScriptEntries.map((script) => ({ ...script })));
-  ipcMain.handle("userscripts:get", (_event, id: unknown) =>
+  handleTrusted("userscripts:list", () => userScriptEntries.map((script) => ({ ...script })));
+  handleTrusted("userscripts:get", (_event, id: unknown) =>
     userScriptEntries.find((script) => script.id === id) ?? null);
-  ipcMain.handle("userscripts:save", (_event, input: unknown) => saveUserScriptInput(input));
-  ipcMain.handle("userscripts:toggle", (_event, id: unknown, enabled: unknown) => toggleUserScript(id, enabled));
-  ipcMain.handle("userscripts:remove", (_event, id: unknown) => removeUserScript(id));
-  ipcMain.handle("userscripts:import-file", () => importUserScriptFromFile());
+  handleTrusted("userscripts:save", (_event, input: unknown) => saveUserScriptInput(input));
+  handleTrusted("userscripts:toggle", (_event, id: unknown, enabled: unknown) => toggleUserScript(id, enabled));
+  handleTrusted("userscripts:remove", (_event, id: unknown) => removeUserScript(id));
+  handleTrusted("userscripts:import-file", () => importUserScriptFromFile());
 
-  ipcMain.handle("settings:open-window", async () => {
+  handleTrusted("settings:open-window", async () => {
     await openSettingsWindow();
     return true;
   });
-  ipcMain.handle("adblock:status", () => getAdblockerStatus());
-  ipcMain.handle("adblock:toggle", async () => {
+  handleTrusted("adblock:status", () => getAdblockerStatus());
+  handleTrusted("adblock:toggle", async () => {
     await setAdblockEnabled(!adblockEnabled);
     return getAdblockerStatus();
   });
-  ipcMain.handle("adblock:toggle-tab-pause", () => {
+  handleTrusted("adblock:toggle-tab-pause", () => {
     toggleActiveTabAdblockPause();
     return getAdblockerStatus();
   });
-  ipcMain.handle("navigation-menu:open", (_event, anchor: unknown) => openNavigationMenu(anchor));
-  ipcMain.handle("site-info-menu:open", async (_event, anchor: unknown) => openSiteInfoMenu(anchor));
+  handleTrusted("navigation-menu:open", (_event, anchor: unknown) => openNavigationMenu(anchor));
+  handleTrusted("site-info-menu:open", async (_event, anchor: unknown) => openSiteInfoMenu(anchor));
 
-  ipcMain.handle("palette:show", () => {
+  handleTrusted("palette:show", () => {
     focusPalette();
     return true;
   });
-  ipcMain.handle("palette:hide", () => {
+  handleTrusted("palette:hide", () => {
     hidePalette();
     return true;
   });
-  ipcMain.on("palette:toggle-shortcut", () => {
+  onTrusted("palette:toggle-shortcut", () => {
     togglePalette();
   });
-  ipcMain.handle("palette:get-items", () => buildPaletteItems());
-  ipcMain.handle("palette:execute", async (_event, id: unknown) => {
+  handleTrusted("palette:get-items", () => buildPaletteItems());
+  handleTrusted("palette:execute", async (_event, id: unknown) => {
     if (typeof id !== "string" || !id || id.length > 200) {
       return false;
     }
     await executePaletteCommand(id);
     return true;
   });
-  ipcMain.on("palette:report-height", (_event, height: unknown) => {
+  onTrusted("palette:report-height", (_event, height: unknown) => {
     if (typeof height !== "number" || !Number.isFinite(height)) {
       return;
     }
@@ -5754,22 +5926,22 @@ const registerIpc = (): void => {
     positionPaletteView();
   });
 
-  ipcMain.handle("notes:show", () => {
+  handleTrusted("notes:show", () => {
     showNotesView();
     return true;
   });
-  ipcMain.handle("notes:hide", () => {
+  handleTrusted("notes:hide", () => {
     hideNotesView();
     return true;
   });
-  ipcMain.handle("notes:toggle", () => {
+  handleTrusted("notes:toggle", () => {
     toggleNotesView();
     return true;
   });
-  ipcMain.handle("notes:get", () => notesContent);
-  ipcMain.handle("notes:save", async (_event, value: unknown) => saveNotesContent(value));
+  handleTrusted("notes:get", () => notesContent);
+  handleTrusted("notes:save", async (_event, value: unknown) => saveNotesContent(value));
 
-  ipcMain.handle("layout:set-viewport-top", (_event, top: number) => {
+  handleTrusted("layout:set-viewport-top", (_event, top: number) => {
     if (typeof top !== "number" || Number.isNaN(top)) {
       return false;
     }
@@ -6121,6 +6293,7 @@ const bootstrap = async (): Promise<void> => {
     return;
   }
 
+  setupPermissionHandlers();
   registerIpc();
   await persistentDataLoad;
   registerDownloadHandling();
@@ -6147,13 +6320,31 @@ const bootstrap = async (): Promise<void> => {
   scheduleAutoUpdateChecks();
 };
 
-app
-  .whenReady()
-  .then(bootstrap)
-  .catch((error) => {
-    console.error("Failed to bootstrap app:", error);
-    app.quit();
+const hasSingleInstanceLock = app.requestSingleInstanceLock();
+
+if (!hasSingleInstanceLock) {
+  app.quit();
+} else {
+  app.on("second-instance", (_event, argv) => {
+    if (!mainWindow || mainWindow.isDestroyed()) {
+      return;
+    }
+    if (mainWindow.isMinimized()) {
+      mainWindow.restore();
+    }
+    mainWindow.focus();
+    const requestedUrl = argv.find((arg) => isHttpUrl(arg));
+    openNewTab(requestedUrl);
   });
+
+  app
+    .whenReady()
+    .then(bootstrap)
+    .catch((error) => {
+      console.error("Failed to bootstrap app:", error);
+      app.quit();
+    });
+}
 
 app.on("before-quit", () => {
   if (statsDirty) {
