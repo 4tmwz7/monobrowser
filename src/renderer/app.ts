@@ -318,7 +318,11 @@ const navigateFromAddress = async (): Promise<void> => {
     return;
   }
 
+  // Focus moves to the page view, but this document keeps the input as its
+  // active element; renderControls would never update the address again.
+  addressInput.blur();
   await window.browserApi.navigate(input);
+  scheduleRender();
 };
 
 const handleKeyboardShortcut = async (event: KeyboardEvent): Promise<void> => {
