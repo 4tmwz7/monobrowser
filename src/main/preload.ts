@@ -10,6 +10,7 @@ type TabState = {
   isPinned: boolean;
   isMuted: boolean;
   isSleeping: boolean;
+  isPrivate: boolean;
   favicon: string | null;
 };
 
@@ -38,6 +39,7 @@ type DownloadRecord = {
   totalBytes: number;
   status: DownloadStatus;
   error?: string;
+  kind?: "update";
 };
 type SiteDataType = "cookies" | "localStorage" | "indexedDB" | "cache" | "serviceWorkers";
 type SiteDataEntry = { origin: string; lastSeenAt: string | null; cookieCount: number };
@@ -91,6 +93,8 @@ const browserApi = {
     ipcRenderer.invoke("tabs:create", initialUrl),
   closeTab: (tabId: number): Promise<boolean> =>
     ipcRenderer.invoke("tabs:close", tabId),
+  moveTab: (tabId: number, beforeTabId: number | null): Promise<boolean> =>
+    ipcRenderer.invoke("tabs:move", tabId, beforeTabId),
   switchTab: (tabId: number): Promise<boolean> =>
     ipcRenderer.invoke("tabs:switch", tabId),
   getTabsState: (): Promise<TabsStatePayload> =>

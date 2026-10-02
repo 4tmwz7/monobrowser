@@ -3,7 +3,7 @@
   "version": "0.5.1",
   "productName": "MonoBrowser",
   "description": "Minimalist monochrome desktop browser built with Electron and TypeScript",
-  "main": "dist/main/main.js",
+  "main": "dist/main/start.js",
   "author": "Filip Załupski",
   "license": "MIT",
   "scripts": {

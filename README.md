@@ -26,6 +26,11 @@ Notes:
 - On Wayland sessions the app runs as a native Wayland client; XWayland can be forced with `--ozone-platform=x11`.
 - If the AppImage fails to start because FUSE is missing, run it with `--appimage-extract-and-run`.
 
+## Bookmarks and tabs
+
+- Import bookmarks from HTML (Netscape format used by Chrome, Firefox, Edge) or JSON, and export to HTML or JSON, from the menu under Bookmarks.
+- Drag tabs to reorder them; pinned and unpinned tabs are reordered within their own group.
+
 ## Security notes
 
 - Windows installers are not code-signed, so SmartScreen may show a warning on first run.
@@ -37,6 +42,7 @@ Notes:
 
 - `Ctrl+T` - open new tab
 - `Ctrl+Shift+T` - reopen the last closed tab
+- `Ctrl+Shift+N` - open a private tab (in-memory session, no history; cleared when the last private tab closes)
 - `Ctrl+W` - close current tab
 - `Ctrl+R` or `F5` - reload current tab
 - `Ctrl+L` - focus and select the address bar

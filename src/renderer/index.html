@@ -118,6 +118,26 @@
         position: relative;
       }
 
+      .tab-btn.private .tab-title {
+        font-style: italic;
+      }
+
+      .tab-btn.private {
+        border-top: 2px dashed var(--accent);
+      }
+
+      .tab-btn.dragging {
+        opacity: 0.4;
+      }
+
+      .tab-btn.drop-before {
+        box-shadow: -2px 0 0 0 var(--white);
+      }
+
+      .tab-btn.drop-after {
+        box-shadow: 2px 0 0 0 var(--white);
+      }
+
       .tab-btn:hover {
         background: #242421;
         color: var(--white);

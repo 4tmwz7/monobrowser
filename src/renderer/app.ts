@@ -8,6 +8,7 @@ type TabState = {
   isPinned: boolean;
   isMuted: boolean;
   isSleeping: boolean;
+  isPrivate: boolean;
   favicon: string | null;
 };
 
@@ -32,6 +33,7 @@ type BrowserApi = {
   createTab: (initialUrl?: string) => Promise<number>;
   closeTab: (tabId: number) => Promise<boolean>;
   switchTab: (tabId: number) => Promise<boolean>;
+  moveTab: (tabId: number, beforeTabId: number | null) => Promise<boolean>;
   getTabsState: () => Promise<TabsStatePayload>;
   openTabContextMenu: (tabId: number, position: { x: number; y: number }) => Promise<boolean>;
   showFindWindow: () => Promise<boolean>;
@@ -78,6 +80,7 @@ const translations = {
     siteInfo: "Informacje o stronie", addressPlaceholder: "Szukaj lub wpisz adres", go: "Przejdź", history: "Historia",
     downloads: "Pobieranie", siteData: "Dane witryn", language: "Język",
     sleeping: "Karta uśpiona — kliknij, aby wybudzić",
+    privateTab: "Karta prywatna",
     palette: "Paleta komend (Ctrl+K)",
   },
   en: {
@@ -86,6 +89,7 @@ const translations = {
     siteInfo: "Page information", addressPlaceholder: "Search or enter address", go: "Go", history: "History",
     downloads: "Downloads", siteData: "Site data", language: "Language",
     sleeping: "Tab sleeping — click to wake it up",
+    privateTab: "Private tab",
     palette: "Command palette (Ctrl+K)",
   },
 } as const;
@@ -154,18 +158,28 @@ const renderControls = (): void => {
   }
 };
 
+let draggedTabId: number | null = null;
+let renderDeferredByDrag = false;
+
 const renderTabs = (): void => {
+  if (draggedTabId !== null) {
+    renderDeferredByDrag = true;
+    return;
+  }
   tabsContainer.innerHTML = "";
   const copy = translations[state.language];
 
   state.tabs.forEach((tab) => {
     const isActive = tab.id === state.activeTabId;
     const button = document.createElement("button");
-    button.className = `tab-btn${isActive ? " active" : ""}${tab.isLoading ? " loading" : ""}${tab.isPinned ? " pinned" : ""}${tab.isMuted ? " muted" : ""}${tab.isSleeping ? " sleeping" : ""}`;
+    button.className = `tab-btn${isActive ? " active" : ""}${tab.isLoading ? " loading" : ""}${tab.isPinned ? " pinned" : ""}${tab.isMuted ? " muted" : ""}${tab.isSleeping ? " sleeping" : ""}${tab.isPrivate ? " private" : ""}`;
     button.type = "button";
     button.title = tab.isSleeping
       ? `${tab.title || tab.url} — ${copy.sleeping}`
       : (tab.title || tab.url);
+    if (tab.isPrivate) {
+      button.title = `${button.title} — ${copy.privateTab}`;
+    }
 
     // Loading spinner
     const spinner = document.createElement("span");
@@ -173,6 +187,9 @@ const renderTabs = (): void => {
 
     const status = document.createElement("span");
     status.className = "tab-status";
+    if (tab.isPrivate) {
+      status.innerHTML += `<svg viewBox="0 0 16 16" aria-hidden="true"><path d="M1 7h14v1.5H1V7Zm2.5-3.5L5 2h6l1.5 1.5L13 7H3l.5-3.5ZM4.5 14a2 2 0 1 1 0-4 2 2 0 0 1 2 2c0 .5.5.75 1.5.75s1.5-.25 1.5-.75a2 2 0 1 1 2 2 2 2 0 0 1-2-1.5 5 5 0 0 0-3 0A2 2 0 0 1 4.5 14Z"/></svg>`;
+    }
     if (tab.isSleeping) {
       status.innerHTML += `<svg viewBox="0 0 24 24" aria-hidden="true"><path d="M21 12.79A9 9 0 1 1 11.21 3 7 7 0 0 0 21 12.79Z"/></svg>`;
     }
@@ -212,6 +229,50 @@ const renderTabs = (): void => {
 
     button.addEventListener("click", async () => {
       await window.browserApi.switchTab(tab.id);
+    });
+
+    const draggedTab = (): TabState | undefined => state.tabs.find((entry) => entry.id === draggedTabId);
+    const dropsBefore = (event: DragEvent): boolean => {
+      const rect = button.getBoundingClientRect();
+      return event.clientX < rect.left + rect.width / 2;
+    };
+    const clearDropMarks = (): void => {
+      button.classList.remove("drop-before", "drop-after");
+    };
+
+    button.draggable = true;
+    button.addEventListener("dragstart", (event) => {
+      draggedTabId = tab.id;
+      event.dataTransfer?.setData("text/plain", String(tab.id));
+      if (event.dataTransfer) event.dataTransfer.effectAllowed = "move";
+      requestAnimationFrame(() => button.classList.add("dragging"));
+    });
+    button.addEventListener("dragover", (event) => {
+      const dragged = draggedTab();
+      if (!dragged || dragged.id === tab.id || dragged.isPinned !== tab.isPinned) return;
+      event.preventDefault();
+      const before = dropsBefore(event);
+      button.classList.toggle("drop-before", before);
+      button.classList.toggle("drop-after", !before);
+    });
+    button.addEventListener("dragleave", clearDropMarks);
+    button.addEventListener("drop", (event) => {
+      const dragged = draggedTab();
+      clearDropMarks();
+      if (!dragged || dragged.id === tab.id || dragged.isPinned !== tab.isPinned) return;
+      event.preventDefault();
+      const index = state.tabs.findIndex((entry) => entry.id === tab.id);
+      const next = state.tabs[index + 1];
+      const beforeId = dropsBefore(event) ? tab.id : (next && next.isPinned === tab.isPinned ? next.id : null);
+      void window.browserApi.moveTab(dragged.id, beforeId);
+    });
+    button.addEventListener("dragend", () => {
+      draggedTabId = null;
+      if (renderDeferredByDrag) {
+        renderDeferredByDrag = false;
+        scheduleRender();
+      }
+      button.classList.remove("dragging");
     });
 
     button.addEventListener("contextmenu", async (event) => {

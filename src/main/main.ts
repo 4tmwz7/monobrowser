@@ -4,7 +4,8 @@ import fsSync from "node:fs";
 import fs from "node:fs/promises";
 import path from "node:path";
 import { ElectronBlocker, fullLists } from "@ghostery/adblocker-electron";
-import { autoUpdater } from "electron-updater";
+import { autoUpdater, CancellationToken } from "electron-updater";
+import { exportBookmarksHtml, exportBookmarksJson, parseBookmarksImport } from "./bookmarks-io.js";
 import { getErrorCode, isAboutBlankUrl, isHttpUrl, looksLikeHost } from "./url-utils.js";
 
 type TabState = {
@@ -17,6 +18,7 @@ type TabState = {
   isPinned: boolean;
   isMuted: boolean;
   isSleeping: boolean;
+  isPrivate: boolean;
   favicon: string | null;
 };
 
@@ -61,6 +63,7 @@ type DownloadRecord = {
   totalBytes: number;
   status: DownloadStatus;
   error?: string;
+  kind?: "update";
 };
 
 type DownloadStatePayload = {
@@ -1014,16 +1017,16 @@ const logNavigationError = (error: unknown): void => {
   }
 };
 
-const openUrlInNewTab = (url: string): void => {
+const openUrlInNewTab = (url: string, isPrivate: boolean = false): void => {
   const trimmed = url.trim();
 
   if (!trimmed) {
-    openNewTab(DEFAULT_URL);
+    openNewTab(DEFAULT_URL, isPrivate);
     return;
   }
 
   if (isHttpUrl(trimmed) || isAboutBlankUrl(trimmed)) {
-    openNewTab(trimmed);
+    openNewTab(trimmed, isPrivate);
   }
 };
 
@@ -1049,6 +1052,7 @@ const getTabSnapshot = (tab: TabRecord): TabState => ({
   isPinned: tab.isPinned,
   isMuted: tab.isMuted,
   isSleeping: tab.isSleeping,
+  isPrivate: tab.isPrivate,
   favicon: tab.favicon,
 });
 
@@ -1097,19 +1101,56 @@ const getMostRecentTabId = (): number | null => {
   return null;
 };
 
-const createTabView = (): WebContentsView => {
+const PRIVATE_PARTITION = "monobrowser-private";
+let privateSessionConfigured = false;
+
+// Partycja bez prefiksu "persist:" działa wyłącznie w pamięci – nic nie trafia na dysk.
+const getPrivateSession = (): Electron.Session => {
+  const privateSession = session.fromPartition(PRIVATE_PARTITION);
+  if (!privateSessionConfigured) {
+    privateSessionConfigured = true;
+    setupPermissionHandlers(privateSession, privatePermissionDecisions, "private");
+    attachAdblockerToSession(privateSession);
+    privateSession.on("will-download", (_event, item) => {
+      // Pobrania z kart prywatnych nie są zapisywane w historii pobierania.
+      item.setSaveDialogOptions({
+        title: appLanguage === "pl" ? "Zapisz pobierany plik" : "Save download",
+        defaultPath: path.join(app.getPath("downloads"), getSafeDownloadFileName(item.getFilename() || "download")),
+      });
+    });
+  }
+  return privateSession;
+};
+
+const clearPrivateSessionData = async (): Promise<void> => {
+  privatePermissionDecisions.clear();
+  if (!privateSessionConfigured) {
+    return;
+  }
+  const privateSession = session.fromPartition(PRIVATE_PARTITION);
+  try {
+    await privateSession.clearData();
+    await privateSession.clearCache();
+    await privateSession.clearAuthCache();
+  } catch (error) {
+    console.error("Failed to clear private session:", error);
+  }
+};
+
+const createTabView = (isPrivate: boolean = false): WebContentsView => {
   const view = new WebContentsView({
     webPreferences: {
       contextIsolation: true,
       nodeIntegration: false,
       sandbox: true,
+      ...(isPrivate ? { session: getPrivateSession() } : {}),
     },
   });
 
   view.setBackgroundColor("#f0efe9");
 
   view.webContents.setWindowOpenHandler(({ url }) => {
-    openUrlInNewTab(url);
+    openUrlInNewTab(url, isPrivate);
     return { action: "deny" };
   });
 
@@ -1124,14 +1165,20 @@ const broadcastTabsState = (): void => {
   tabsBroadcastScheduled = true;
   setImmediate(() => {
     tabsBroadcastScheduled = false;
+    const payload = getTabsStatePayload();
     if (mainWindow && !mainWindow.isDestroyed()) {
-      mainWindow.webContents.send("tabs:state", getTabsStatePayload());
+      mainWindow.webContents.send("tabs:state", payload);
     }
+    // Nakładki nie wyświetlają favikon – nie wysyłamy im dużych data URL.
+    const lightPayload = {
+      ...payload,
+      tabs: payload.tabs.map((tab) => ({ ...tab, favicon: null })),
+    };
     if (findView && !findView.webContents.isDestroyed()) {
-      findView.webContents.send("tabs:state", getTabsStatePayload());
+      findView.webContents.send("tabs:state", lightPayload);
     }
     if (paletteView && !paletteView.webContents.isDestroyed()) {
-      paletteView.webContents.send("tabs:state", getTabsStatePayload());
+      paletteView.webContents.send("tabs:state", lightPayload);
     }
   });
 };
@@ -1428,15 +1475,15 @@ const scheduleAdblockRefresh = (): void => {
   }, 60 * 60 * 1000);
 };
 
-const initAdblocker = (): void => {
-  session.defaultSession.registerPreloadScript({
+const attachAdblockerToSession = (targetSession: Electron.Session): void => {
+  targetSession.registerPreloadScript({
     type: "frame",
     filePath: ADBLOCKER_PRELOAD_PATH,
   });
 
   // Electron's webRequest API allows a single listener per event, so these
   // wrappers own the slot and forward to the engine only when appropriate.
-  session.defaultSession.webRequest.onBeforeRequest({ urls: ["<all_urls>"] }, (details, callback) => {
+  targetSession.webRequest.onBeforeRequest({ urls: ["<all_urls>"] }, (details, callback) => {
     if (!adblockEnabled || !adblockReady || !adblockBlocker) {
       callback({});
       return;
@@ -1449,7 +1496,7 @@ const initAdblocker = (): void => {
     adblockBlocker.onBeforeRequest(details, callback);
   });
 
-  session.defaultSession.webRequest.onHeadersReceived({ urls: ["<all_urls>"] }, (details, callback) => {
+  targetSession.webRequest.onHeadersReceived({ urls: ["<all_urls>"] }, (details, callback) => {
     if (!adblockEnabled || !adblockReady || !adblockBlocker) {
       callback({});
       return;
@@ -1462,7 +1509,7 @@ const initAdblocker = (): void => {
     adblockBlocker.onHeadersReceived(details, callback);
   });
 
-  session.defaultSession.webRequest.onErrorOccurred((details) => {
+  targetSession.webRequest.onErrorOccurred((details) => {
     if (!adblockEnabled || details.error !== "net::ERR_BLOCKED_BY_CLIENT") {
       return;
     }
@@ -1473,6 +1520,11 @@ const initAdblocker = (): void => {
       tab.blockedCount += 1;
     }
   });
+
+};
+
+const initAdblocker = (): void => {
+  attachAdblockerToSession(session.defaultSession);
 
   ipcMain.handle(ADBLOCK_INJECT_CHANNEL, (event, url: unknown, msg: unknown) => {
     if (!adblockEnabled || !adblockReady || !adblockBlocker || typeof url !== "string" || isInternalPageUrl(url)) {
@@ -1610,6 +1662,7 @@ const startStatsTimer = (): void => {
   if (statsTimer) {
     clearInterval(statsTimer);
   }
+  const tickSeconds = 5;
   let ticksSinceSave = 0;
   statsTimer = setInterval(() => {
     const active = Boolean(
@@ -1620,15 +1673,15 @@ const startStatsTimer = (): void => {
       && tabs.size > 0,
     );
     if (active) {
-      statsData.totals.seconds += 1;
-      ensureStatsDay().seconds += 1;
+      statsData.totals.seconds += tickSeconds;
+      ensureStatsDay().seconds += tickSeconds;
       statsDirty = true;
     }
-    ticksSinceSave = (ticksSinceSave + 1) % 60;
+    ticksSinceSave = (ticksSinceSave + 1) % 12;
     if (ticksSinceSave === 0 && statsDirty) {
       void saveStats();
     }
-  }, 1000);
+  }, tickSeconds * 1000);
 };
 
 const formatUsageDuration = (totalSeconds: number): string => {
@@ -1887,7 +1940,8 @@ const openStatsWindow = async (): Promise<void> => {
 
 const saveDownloads = async (): Promise<void> => {
   downloadRecords = downloadRecords.slice(0, MAX_DOWNLOAD_ITEMS);
-  await writeJsonAtomically(downloadsFilePath, downloadRecords);
+  // Pobieranie aktualizacji jest widoczne tylko w trakcie sesji – nie zapisujemy go na dysk.
+  await writeJsonAtomically(downloadsFilePath, downloadRecords.filter((record) => record.kind !== "update"));
 };
 
 const getDownloadStatePayload = (): DownloadStatePayload => ({
@@ -3103,7 +3157,7 @@ const renderDownloadsWindowHtml = (): string => {
       if (record.error) { const errors = { 'in-progress':copy.connectionInterrupted, interrupted:copy.downloadInterrupted, cancelled:copy.cancelledMessage, failed:copy.failedMessage }; card.append(make('div','error',errors[record.status] || copy.failedMessage)); }
       const actions = make('div','actions');
       if (record.status === 'in-progress') actions.append(action(copy.cancel, async () => { if (!await window.browserApi.cancelDownload(record.id)) showMessage(copy.cancelFailed); }, true));
-      if (record.status === 'completed') {
+      if (record.status === 'completed' && record.kind !== 'update') {
         actions.append(action(copy.openFile, async () => { if (!await window.browserApi.openDownloadedFile(record.id)) showMessage(copy.openFailed); }));
         actions.append(action(copy.showInFolder, async () => { if (!await window.browserApi.showDownloadInFolder(record.id)) showMessage(copy.showFailed); }));
       }
@@ -3751,6 +3805,117 @@ const clearBookmarks = async (): Promise<void> => {
   }
 };
 
+const MAX_BOOKMARK_IMPORT_FILE_BYTES = 10 * 1024 * 1024;
+
+const importBookmarksFromFile = async (): Promise<void> => {
+  if (!mainWindow || mainWindow.isDestroyed()) {
+    return;
+  }
+  const pl = appLanguage === "pl";
+  const selection = await dialog.showOpenDialog(mainWindow, {
+    title: pl ? "Importuj zakładki" : "Import bookmarks",
+    properties: ["openFile"],
+    filters: [
+      { name: pl ? "Zakładki (HTML, JSON)" : "Bookmarks (HTML, JSON)", extensions: ["html", "htm", "json"] },
+    ],
+  });
+  if (selection.canceled || selection.filePaths.length === 0) {
+    return;
+  }
+
+  let message: string;
+  try {
+    const filePath = selection.filePaths[0];
+    const stats = await fs.stat(filePath);
+    if (stats.size > MAX_BOOKMARK_IMPORT_FILE_BYTES) {
+      throw new Error(pl ? "Plik jest zbyt duży." : "The file is too large.");
+    }
+    const imported = parseBookmarksImport(await fs.readFile(filePath, "utf8"));
+    const knownUrls = new Set(bookmarkEntries.map((bookmark) => bookmark.url));
+    const additions: BookmarkEntry[] = [];
+    for (const item of imported) {
+      const url = getBookmarkableUrl(item.url);
+      if (!url || knownUrls.has(url) || bookmarkEntries.length + additions.length >= MAX_BOOKMARK_ITEMS) {
+        continue;
+      }
+      knownUrls.add(url);
+      additions.push({
+        id: `${Date.now()}-${Math.random().toString(16).slice(2)}`,
+        url,
+        title: item.title.trim() || url,
+        createdAt: item.createdAt ?? new Date().toISOString(),
+      });
+    }
+    bookmarkEntries = [...bookmarkEntries, ...additions];
+    await saveBookmarks();
+    message = pl
+      ? `Zaimportowano ${additions.length} z ${imported.length} zakładek.`
+      : `Imported ${additions.length} of ${imported.length} bookmarks.`;
+    if (bookmarkEntries.length >= MAX_BOOKMARK_ITEMS && additions.length < imported.length) {
+      message += pl ? ` Limit to ${MAX_BOOKMARK_ITEMS} zakładek.` : ` The limit is ${MAX_BOOKMARK_ITEMS} bookmarks.`;
+    }
+  } catch (error) {
+    message = pl
+      ? `Nie udało się zaimportować zakładek: ${error instanceof Error ? error.message : "nieznany błąd"}`
+      : `Could not import bookmarks: ${error instanceof Error ? error.message : "unknown error"}`;
+  }
+
+  if (mainWindow && !mainWindow.isDestroyed()) {
+    await dialog.showMessageBox(mainWindow, {
+      type: "info",
+      title: pl ? "Importuj zakładki" : "Import bookmarks",
+      message,
+      buttons: ["OK"],
+    });
+  }
+};
+
+const exportBookmarksToFile = async (): Promise<void> => {
+  if (!mainWindow || mainWindow.isDestroyed()) {
+    return;
+  }
+  const pl = appLanguage === "pl";
+  if (bookmarkEntries.length === 0) {
+    await dialog.showMessageBox(mainWindow, {
+      type: "info",
+      title: pl ? "Eksportuj zakładki" : "Export bookmarks",
+      message: pl ? "Brak zakładek do wyeksportowania." : "There are no bookmarks to export.",
+      buttons: ["OK"],
+    });
+    return;
+  }
+
+  const target = await dialog.showSaveDialog(mainWindow, {
+    title: pl ? "Eksportuj zakładki" : "Export bookmarks",
+    defaultPath: path.join(app.getPath("documents"), "monobrowser-bookmarks.html"),
+    filters: [
+      { name: "HTML", extensions: ["html"] },
+      { name: "JSON", extensions: ["json"] },
+    ],
+  });
+  if (target.canceled || !target.filePath) {
+    return;
+  }
+
+  try {
+    const content = target.filePath.toLowerCase().endsWith(".json")
+      ? exportBookmarksJson(bookmarkEntries)
+      : exportBookmarksHtml(bookmarkEntries);
+    await fs.writeFile(target.filePath, content, "utf8");
+  } catch (error) {
+    if (mainWindow && !mainWindow.isDestroyed()) {
+      await dialog.showMessageBox(mainWindow, {
+        type: "error",
+        title: pl ? "Eksportuj zakładki" : "Export bookmarks",
+        message: pl
+          ? `Nie udało się zapisać pliku: ${error instanceof Error ? error.message : "nieznany błąd"}`
+          : `Could not write the file: ${error instanceof Error ? error.message : "unknown error"}`,
+        buttons: ["OK"],
+      });
+    }
+  }
+};
+
 const getBookmarkMenuLabel = (bookmark: BookmarkEntry): string => {
   let hostname = "";
   try {
@@ -3971,13 +4136,13 @@ const openNavigationMenu = async (anchor: unknown): Promise<boolean> => {
   }
 
   const copy = appLanguage === "pl" ? {
-    title: "Menu", settings: "Ustawienia", devTools: "Narzędzia deweloperskie", bookmarks: "Zakładki", addBookmark: "Dodaj bieżącą stronę", removeCurrentBookmark: "Usuń bieżącą zakładkę",
-    noBookmarks: "Brak zapisanych zakładek", clearBookmarks: "Wyczyść wszystkie zakładki", history: "Historia", downloads: "Pobieranie",
+    title: "Menu", settings: "Ustawienia", newPrivateTab: "Nowa karta prywatna", devTools: "Narzędzia deweloperskie", bookmarks: "Zakładki", addBookmark: "Dodaj bieżącą stronę", removeCurrentBookmark: "Usuń bieżącą zakładkę",
+    noBookmarks: "Brak zapisanych zakładek", clearBookmarks: "Wyczyść wszystkie zakładki", importBookmarks: "Importuj zakładki…", exportBookmarks: "Eksportuj zakładki…", history: "Historia", downloads: "Pobieranie",
     siteData: "Dane witryn", language: "Język", polish: "Polski", english: "Angielski", remove: "Usuń",
     notes: "Notatki", stats: "Statystyki", adblock: "Blokowanie treści", on: "Włączone", off: "Wyłączone",
   } : {
-    title: "Menu", settings: "Settings", devTools: "Developer tools", bookmarks: "Bookmarks", addBookmark: "Bookmark current page", removeCurrentBookmark: "Remove current bookmark",
-    noBookmarks: "No saved bookmarks", clearBookmarks: "Clear all bookmarks", history: "History", downloads: "Downloads",
+    title: "Menu", settings: "Settings", newPrivateTab: "New private tab", devTools: "Developer tools", bookmarks: "Bookmarks", addBookmark: "Bookmark current page", removeCurrentBookmark: "Remove current bookmark",
+    noBookmarks: "No saved bookmarks", clearBookmarks: "Clear all bookmarks", importBookmarks: "Import bookmarks…", exportBookmarks: "Export bookmarks…", history: "History", downloads: "Downloads",
     siteData: "Site data", language: "Language", polish: "Polish", english: "English", remove: "Remove",
     notes: "Notes", stats: "Statistics", adblock: "Content blocking", on: "On", off: "Off",
   };
@@ -3994,13 +4159,16 @@ const openNavigationMenu = async (anchor: unknown): Promise<boolean> => {
   const bookmarksContent = bookmarkEntries.length > 0
     ? `<div class="bookmark-list">${bookmarkRows}</div><a class="menu-item danger" href="monobrowser-menu://bookmarks-clear">${copy.clearBookmarks}</a>`
     : `<span class="menu-item disabled">${copy.noBookmarks}</span>`;
+  const bookmarkTransfer = `<a class="menu-item" href="monobrowser-menu://bookmarks-import">${copy.importBookmarks}</a>`
+    + (bookmarkEntries.length > 0 ? `<a class="menu-item" href="monobrowser-menu://bookmarks-export">${copy.exportBookmarks}</a>` : "");
   const html = `<!doctype html><html lang="${appLanguage}"><head><meta charset="UTF-8"><meta name="viewport" content="width=device-width,initial-scale=1">
 <meta http-equiv="Content-Security-Policy" content="default-src 'none'; style-src 'unsafe-inline'; script-src 'unsafe-inline'"><title>${copy.title}</title><style>${POPUP_MENU_STYLES}</style></head><body>
 <nav class="popup nav-popup" aria-label="${copy.title}">
   <h1 class="popup-title">MonoBrowser / ${copy.title}</h1>
   <a class="menu-item" href="monobrowser-menu://settings">${copy.settings}</a>
+  <a class="menu-item" href="monobrowser-menu://new-private-tab">${copy.newPrivateTab}<span class="shortcut">Ctrl+Shift+N</span></a>
   <a class="menu-item" href="monobrowser-menu://dev-tools">${copy.devTools}<span class="shortcut">F12</span></a>
-  <details><summary>${copy.bookmarks}<span style="margin-left:auto;color:inherit;font-size:9px">${bookmarkEntries.length}</span></summary><div class="submenu">${bookmarkToggle}${bookmarksContent}</div></details>
+  <details><summary>${copy.bookmarks}<span style="margin-left:auto;color:inherit;font-size:9px">${bookmarkEntries.length}</span></summary><div class="submenu">${bookmarkToggle}${bookmarksContent}${bookmarkTransfer}</div></details>
   <a class="menu-item" href="monobrowser-menu://history">${copy.history}</a>
   <a class="menu-item" href="monobrowser-menu://downloads">${copy.downloads}</a>
   <a class="menu-item" href="monobrowser-menu://site-data">${copy.siteData}</a>
@@ -4031,6 +4199,7 @@ const openNavigationMenu = async (anchor: unknown): Promise<boolean> => {
   return openStyledPopup("navigation", position, 340, 520, html, async (actionUrl) => {
     const action = actionUrl.hostname;
     if (action === "settings") return openSettingsWindow();
+    if (action === "new-private-tab") { openNewPrivateTab(); return; }
     if (action === "dev-tools") return toggleActiveTabDevTools();
     if (action === "history") return openHistoryWindow();
     if (action === "downloads") return openDownloadsWindow();
@@ -4040,6 +4209,8 @@ const openNavigationMenu = async (anchor: unknown): Promise<boolean> => {
     if (action === "adblock-toggle") { await setAdblockEnabled(!adblockEnabled); return; }
     if (action === "bookmark-toggle") return void await toggleActiveBookmark();
     if (action === "bookmarks-clear") return clearBookmarks();
+    if (action === "bookmarks-import") return importBookmarksFromFile();
+    if (action === "bookmarks-export") return exportBookmarksToFile();
     if (action === "language") {
       const language = normalizeLanguage(actionUrl.searchParams.get("value"));
       if (language) await setApplicationLanguage(language);
@@ -4255,15 +4426,15 @@ const openPageContextMenu = async (
     if (contents.isDestroyed()) return;
     switch (actionUrl.hostname) {
       case "context-open-link-here": await contents.loadURL(linkUrl!); break;
-      case "context-open-link": openNewTab(linkUrl!); break;
-      case "context-open-link-background": createTab(linkUrl!, false); break;
+      case "context-open-link": openNewTab(linkUrl!, tab.isPrivate); break;
+      case "context-open-link-background": createTab(linkUrl!, false, tab.isPrivate); break;
       case "context-copy-link": clipboard.writeText(linkUrl!); break;
       case "context-copy-link-text": clipboard.writeText(params.linkText.trim()); break;
       case "context-save-link": contents.downloadURL(linkUrl!); break;
-      case "context-open-image": openNewTab(imageUrl!); break;
+      case "context-open-image": openNewTab(imageUrl!, tab.isPrivate); break;
       case "context-copy-image": clipboard.writeText(imageUrl!); break;
       case "context-save-image": contents.downloadURL(imageUrl!); break;
-      case "context-search-selection": openNewTab(buildSearchUrl(selection)); break;
+      case "context-search-selection": openNewTab(buildSearchUrl(selection), tab.isPrivate); break;
       case "context-copy-selection": clipboard.writeText(selection); break;
       case "context-undo": contents.undo(); break;
       case "context-redo": contents.redo(); break;
@@ -4337,7 +4508,7 @@ const openTabContextMenu = async (tabId: number, anchor: unknown): Promise<boole
   return openStyledPopup("context", position, 340, preferredHeight, html, async (actionUrl) => {
     const currentTab = tabs.get(tabId);
     switch (actionUrl.hostname) {
-      case "tab-duplicate": if (currentTab) createTab(currentTab.url, true); break;
+      case "tab-duplicate": if (currentTab) createTab(currentTab.url, true, currentTab.isPrivate); break;
       case "tab-toggle-pin":
         if (currentTab) {
           currentTab.isPinned = !currentTab.isPinned;
@@ -4635,6 +4806,7 @@ const buildPaletteItems = (): PaletteItem[] => {
   const pl = appLanguage === "pl";
   const items: PaletteItem[] = [
     { id: "new-tab", kind: "command", label: pl ? "Nowa karta" : "New tab", hint: "Ctrl+T", keywords: "nowa karta new tab open otworz" },
+    { id: "new-private-tab", kind: "command", label: pl ? "Nowa karta prywatna" : "New private tab", hint: "Ctrl+Shift+N", keywords: "prywatna karta incognito private new tab nowa" },
     { id: "close-tab", kind: "command", label: pl ? "Zamknij kartę" : "Close tab", hint: "Ctrl+W", keywords: "zamknij karte close tab" },
     { id: "reload", kind: "command", label: pl ? "Przeładuj stronę" : "Reload page", hint: "Ctrl+R", keywords: "przeladuj reload odswiez refresh" },
     { id: "back", kind: "command", label: pl ? "Wstecz" : "Back", hint: "Alt+←", keywords: "wstecz back historia" },
@@ -4693,6 +4865,7 @@ const executePaletteCommand = async (id: string): Promise<void> => {
 
   switch (id) {
     case "new-tab": openNewTab(); break;
+    case "new-private-tab": openNewPrivateTab(); break;
     case "close-tab": closeCurrentTab(); break;
     case "reload": reloadActiveTabView(); break;
     case "back": {
@@ -4955,6 +5128,11 @@ const handleBeforeInputEvent = (
     focusFindBar();
     return;
   }
+  if (input.shift && (key === "n" || code === "keyn")) {
+    event.preventDefault();
+    openNewPrivateTab();
+    return;
+  }
   if (key === "t" || code === "keyt") {
     event.preventDefault();
     input.shift ? reopenLastClosedTab() : openNewTab();
@@ -5136,7 +5314,7 @@ const closeTab = (id: number): boolean => {
 
   const wasActive = activeTabId === id;
   const tabToClose = tabs.get(id)!;
-  if (tabToClose.url) {
+  if (tabToClose.url && !tabToClose.isPrivate) {
     recentlyClosedTabUrls.unshift(tabToClose.url);
     recentlyClosedTabUrls.splice(20);
   }
@@ -5147,6 +5325,10 @@ const closeTab = (id: number): boolean => {
   removeTabFromMruOrder(id);
   if (tabToClose.view && !tabToClose.view.webContents.isDestroyed()) {
     tabToClose.view.webContents.close();
+  }
+
+  if (tabToClose.isPrivate && !Array.from(tabs.values()).some((tab) => tab.isPrivate)) {
+    void clearPrivateSessionData();
   }
 
   if (tabs.size === 0) {
@@ -5164,7 +5346,7 @@ const closeTab = (id: number): boolean => {
   return true;
 };
 
-const FAVICON_MAX_BYTES = 256 * 1024;
+const FAVICON_MAX_BYTES = 64 * 1024;
 const FAVICON_CACHE_LIMIT = 300;
 const faviconCache = new Map<string, string | null>();
 
@@ -5243,7 +5425,9 @@ const wireTabEvents = (tab: TabRecord, view: WebContentsView): void => {
       tab.faviconOrigin = null;
     }
     updateTabFromWebContents(tab);
-    recordVisit(contents.getURL());
+    if (!tab.isPrivate) {
+      recordVisit(contents.getURL());
+    }
     executedUserScriptKeys.delete(contents);
   });
   contents.on("did-navigate-in-page", () => {
@@ -5254,7 +5438,9 @@ const wireTabEvents = (tab: TabRecord, view: WebContentsView): void => {
     updateTabFromWebContents(tab);
     void updateStartPageBackgroundFromContents(contents);
     void injectUserScriptsIntoContents(contents, "document-idle");
-    await appendHistory(contents.getURL(), contents.getTitle());
+    if (!tab.isPrivate) {
+      await appendHistory(contents.getURL(), contents.getTitle());
+    }
   });
   contents.on("destroyed", () => {
     if (tab.view === view) {
@@ -5266,10 +5452,11 @@ const wireTabEvents = (tab: TabRecord, view: WebContentsView): void => {
 const createTab = (
   initialUrl: string = DEFAULT_URL,
   makeActive: boolean = true,
+  isPrivate: boolean = false,
 ): number => {
   const id = nextTabId++;
   const normalizedInitialUrl = normalizeInputToUrl(initialUrl);
-  const view = createTabView();
+  const view = createTabView(isPrivate);
 
   if (isDefaultStartPageUrl(normalizedInitialUrl)) {
     applyStartPageBackgroundToView(view);
@@ -5285,6 +5472,7 @@ const createTab = (
     isPinned: false,
     isMuted: false,
     isSleeping: false,
+    isPrivate,
     favicon: null,
     lastActiveAt: Date.now(),
     adblockPaused: false,
@@ -5358,7 +5546,7 @@ const wakeTab = (tab: TabRecord): WebContentsView | null => {
     return tab.view;
   }
 
-  const view = createTabView();
+  const view = createTabView(tab.isPrivate);
   if (isDefaultStartPageUrl(tab.url)) {
     applyStartPageBackgroundToView(view);
   }
@@ -5411,13 +5599,33 @@ const startTabSleepTimer = (): void => {
   }, TAB_SLEEP_SWEEP_INTERVAL_MS);
 };
 
-const openNewTab = (initialUrl?: string): number => {
+const openNewTab = (initialUrl?: string, isPrivate: boolean = false): number => {
   const requestedUrl = initialUrl?.trim();
-  if (requestedUrl) {
-    return createTab(requestedUrl, true);
+  return createTab(requestedUrl || DEFAULT_URL, true, isPrivate);
+};
+
+const openNewPrivateTab = (): number => openNewTab(undefined, true);
+
+// beforeTabId === null oznacza koniec własnej grupy (przypięte/nieprzypięte).
+const moveTab = (tabId: number, beforeTabId: number | null): boolean => {
+  const moving = tabs.get(tabId);
+  if (!moving || tabId === beforeTabId) {
+    return false;
   }
 
-  return createTab(DEFAULT_URL, true);
+  const all = Array.from(tabs.values());
+  const group = all.filter((tab) => tab.isPinned === moving.isPinned && tab.id !== tabId);
+  const others = all.filter((tab) => tab.isPinned !== moving.isPinned);
+  const foundIndex = beforeTabId === null ? -1 : group.findIndex((tab) => tab.id === beforeTabId);
+  group.splice(foundIndex < 0 ? group.length : foundIndex, 0, moving);
+
+  const reordered = moving.isPinned ? [...group, ...others] : [...others, ...group];
+  tabs.clear();
+  for (const tab of reordered) {
+    tabs.set(tab.id, tab);
+  }
+  broadcastTabsState();
+  return true;
 };
 
 const closeCurrentTab = (): boolean => {
@@ -5452,16 +5660,23 @@ const PROMPTED_PERMISSIONS: Record<string, { pl: string; en: string }> = {
 };
 
 const permissionDecisions = new Map<string, boolean>();
+const privatePermissionDecisions = new Map<string, boolean>();
 const pendingPermissionPrompts = new Map<string, Promise<boolean>>();
 
-const promptForPermission = (origin: string, permission: string): Promise<boolean> => {
+const promptForPermission = (
+  origin: string,
+  permission: string,
+  decisions: Map<string, boolean>,
+  scope: string,
+): Promise<boolean> => {
   const key = `${origin}|${permission}`;
-  const known = permissionDecisions.get(key);
+  const pendingKey = `${scope}|${key}`;
+  const known = decisions.get(key);
   if (known !== undefined) {
     return Promise.resolve(known);
   }
 
-  const pending = pendingPermissionPrompts.get(key);
+  const pending = pendingPermissionPrompts.get(pendingKey);
   if (pending) {
     return pending;
   }
@@ -5484,12 +5699,12 @@ const promptForPermission = (origin: string, permission: string): Promise<boolea
   const prompt = (parent ? dialog.showMessageBox(parent, options) : dialog.showMessageBox(options))
     .then(({ response }) => {
       const allowed = response === 0;
-      permissionDecisions.set(key, allowed);
+      decisions.set(key, allowed);
       return allowed;
     })
     .catch(() => false)
-    .finally(() => pendingPermissionPrompts.delete(key));
-  pendingPermissionPrompts.set(key, prompt);
+    .finally(() => pendingPermissionPrompts.delete(pendingKey));
+  pendingPermissionPrompts.set(pendingKey, prompt);
   return prompt;
 };
 
@@ -5502,10 +5717,12 @@ const getPermissionOrigin = (url: string): string | null => {
   }
 };
 
-const setupPermissionHandlers = (): void => {
-  const defaultSession = session.defaultSession;
-
-  defaultSession.setPermissionRequestHandler((webContents, permission, callback, details) => {
+function setupPermissionHandlers(
+  targetSession: Electron.Session,
+  decisions: Map<string, boolean> = permissionDecisions,
+  scope: string = "default",
+): void {
+  targetSession.setPermissionRequestHandler((webContents, permission, callback, details) => {
     if (AUTO_ALLOWED_PERMISSIONS.has(permission)) {
       callback(true);
       return;
@@ -5515,16 +5732,16 @@ const setupPermissionHandlers = (): void => {
       callback(false);
       return;
     }
-    void promptForPermission(origin, permission).then(callback);
+    void promptForPermission(origin, permission, decisions, scope).then(callback);
   });
 
-  defaultSession.setPermissionCheckHandler((_webContents, permission, requestingOrigin) => {
+  targetSession.setPermissionCheckHandler((_webContents, permission, requestingOrigin) => {
     if (AUTO_ALLOWED_PERMISSIONS.has(permission)) {
       return true;
     }
-    return permissionDecisions.get(`${requestingOrigin}|${permission}`) === true;
+    return decisions.get(`${requestingOrigin}|${permission}`) === true;
   });
-};
+}
 
 // Kanały IPC są dostępne wyłącznie dla własnych okien aplikacji (file:/data:), nigdy dla kart z internetu.
 const isTrustedIpcSender = (event: IpcMainEvent | IpcMainInvokeEvent): boolean => {
@@ -5568,6 +5785,12 @@ const registerIpc = (): void => {
     openNewTab(initialUrl);
   });
 
+  handleTrusted("tabs:move", (_event, tabId: unknown, beforeTabId: unknown) => {
+    if (!Number.isInteger(tabId) || !(beforeTabId === null || Number.isInteger(beforeTabId))) {
+      return false;
+    }
+    return moveTab(tabId as number, beforeTabId as number | null);
+  });
   handleTrusted("tabs:close", (_event, tabId: number) => {
     return closeTab(tabId);
   });
@@ -5703,7 +5926,7 @@ const registerIpc = (): void => {
 
     try {
       const normalizedUrl = normalizeInputToUrl(input);
-      if (isSearchQueryInput(input)) {
+      if (!tab.isPrivate && isSearchQueryInput(input)) {
         recordSearch();
       }
       tab.url = normalizedUrl;
@@ -5793,6 +6016,9 @@ const registerIpc = (): void => {
     if (typeof id !== "string" || !id || id.length > 200) {
       return false;
     }
+    if (id === UPDATE_DOWNLOAD_ID) {
+      return cancelUpdateDownload();
+    }
     const item = activeDownloads.get(id);
     if (!item) {
       return false;
@@ -5802,7 +6028,7 @@ const registerIpc = (): void => {
   });
 
   handleTrusted("downloads:clear-history", async () => {
-    downloadRecords = downloadRecords.filter((record) => activeDownloads.has(record.id));
+    downloadRecords = downloadRecords.filter((record) => activeDownloads.has(record.id) || (record.kind === "update" && record.status === "in-progress"));
     await saveDownloads();
     broadcastDownloads();
     return true;
@@ -5952,7 +6178,80 @@ const registerIpc = (): void => {
   });
 };
 
+const UPDATE_DOWNLOAD_ID = "app-update";
+const UPDATE_PROGRESS_THROTTLE_MS = 400;
+let updateCancellationToken: CancellationToken | null = null;
+let updateDownloadInFlight = false;
+let downloadedUpdateVersion: string | null = null;
+let lastUpdateProgressBroadcast = 0;
+
+const createUpdateDownloadRecord = (version: string): void => {
+  const pl = appLanguage === "pl";
+  const record: DownloadRecord = {
+    id: UPDATE_DOWNLOAD_ID,
+    kind: "update",
+    fileName: pl ? `Aktualizacja MonoBrowser ${version}` : `MonoBrowser update ${version}`,
+    sourceUrl: "https://github.com/4tmwz7/monobrowser/releases",
+    sourceOrigin: "github.com",
+    savePath: "",
+    startedAt: new Date().toISOString(),
+    finishedAt: null,
+    receivedBytes: 0,
+    totalBytes: 0,
+    status: "in-progress",
+  };
+  downloadRecords = [record, ...downloadRecords.filter((entry) => entry.id !== UPDATE_DOWNLOAD_ID)].slice(0, MAX_DOWNLOAD_ITEMS);
+  broadcastDownloads();
+};
+
+const updateDownloadRecord = (patch: Partial<DownloadRecord>): void => {
+  downloadRecords = downloadRecords.map((record) =>
+    record.id === UPDATE_DOWNLOAD_ID ? { ...record, ...patch } : record);
+  broadcastDownloads();
+};
+
+const finishUpdateDownload = (status: DownloadStatus, error?: string): void => {
+  updateDownloadInFlight = false;
+  updateCancellationToken = null;
+  updateDownloadRecord({ status, finishedAt: new Date().toISOString(), ...(error ? { error } : {}) });
+};
+
+const cancelUpdateDownload = (): boolean => {
+  if (!updateDownloadInFlight || !updateCancellationToken) {
+    return false;
+  }
+  updateCancellationToken.cancel();
+  return true;
+};
+
+const startUpdateDownload = async (version: string): Promise<void> => {
+  if (updateDownloadInFlight || downloadedUpdateVersion === version) {
+    return;
+  }
+
+  updateDownloadInFlight = true;
+  updateCancellationToken = new CancellationToken();
+  lastUpdateProgressBroadcast = 0;
+  createUpdateDownloadRecord(version);
+
+  try {
+    await autoUpdater.downloadUpdate(updateCancellationToken);
+  } catch (error) {
+    const cancelled = updateCancellationToken?.cancelled === true;
+    finishUpdateDownload(
+      cancelled ? "cancelled" : "failed",
+      cancelled ? undefined : (error instanceof Error ? error.message : String(error)),
+    );
+    if (!cancelled) {
+      console.error("Update download failed:", error);
+    }
+  }
+};
+
 const registerAutoUpdater = (): void => {
+  // Pobieranie uruchamiamy ręcznie (startUpdateDownload), żeby było widoczne i anulowalne.
+  autoUpdater.autoDownload = false;
+
   autoUpdater.on("checking-for-update", () => {
     updateCheckInProgress = true;
   });
@@ -5970,19 +6269,41 @@ const registerAutoUpdater = (): void => {
     console.error("Auto-update error:", error);
   });
 
-  autoUpdater.on("update-downloaded", async () => {
+  autoUpdater.on("download-progress", (progress) => {
+    const now = Date.now();
+    if (now - lastUpdateProgressBroadcast < UPDATE_PROGRESS_THROTTLE_MS) {
+      return;
+    }
+    lastUpdateProgressBroadcast = now;
+    updateDownloadRecord({
+      receivedBytes: Math.round(progress.transferred),
+      totalBytes: Math.round(progress.total),
+    });
+  });
+
+  autoUpdater.on("update-downloaded", async (info) => {
+    downloadedUpdateVersion = info.version;
+    const record = downloadRecords.find((entry) => entry.id === UPDATE_DOWNLOAD_ID);
+    updateDownloadRecord({
+      receivedBytes: record?.totalBytes || record?.receivedBytes || 0,
+      totalBytes: record?.totalBytes || record?.receivedBytes || 0,
+    });
+    finishUpdateDownload("completed");
+
     const windowRef = mainWindow;
-    if (!windowRef) {
-      autoUpdater.quitAndInstall();
+    if (!windowRef || windowRef.isDestroyed()) {
       return;
     }
 
+    const pl = appLanguage === "pl";
     const result = await dialog.showMessageBox(windowRef, {
       type: "info",
-      title: "Update ready",
-      message: "A new version of MonoBrowser has been downloaded.",
-      detail: "Restart now to install the update.",
-      buttons: ["Restart now", "Later"],
+      title: pl ? "Aktualizacja gotowa" : "Update ready",
+      message: pl
+        ? "Pobrano nową wersję MonoBrowser."
+        : "A new version of MonoBrowser has been downloaded.",
+      detail: pl ? "Uruchom ponownie teraz, aby ją zainstalować." : "Restart now to install the update.",
+      buttons: pl ? ["Uruchom ponownie", "Później"] : ["Restart now", "Later"],
       defaultId: 0,
       cancelId: 1,
     });
@@ -6046,16 +6367,20 @@ const scheduleAutoUpdateChecks = (): void => {
         updateCheckInProgress = false;
         return;
       }
-      await autoUpdater.checkForUpdatesAndNotify();
+      const result = await autoUpdater.checkForUpdates();
+      updateCheckInProgress = false;
+      if (result?.isUpdateAvailable) {
+        await startUpdateDownload(result.updateInfo.version);
+      }
     } catch (error) {
       updateCheckInProgress = false;
       console.error("Lightweight update check failed:", error);
     }
   };
 
-  const initialDelayMs = 45 * 1000;
   const sixHoursMs = 6 * 60 * 60 * 1000;
-  setTimeout(() => { void checkForUpdates(); }, initialDelayMs);
+  // Pierwsze sprawdzenie od razu po uruchomieniu, kolejne co 6 godzin.
+  void checkForUpdates();
   setInterval(() => { void checkForUpdates(); }, sixHoursMs);
 };
 
@@ -6146,14 +6471,14 @@ const createMainWindow = async (
 const setupApplicationMenu = (): void => {
   const isMac = process.platform === "darwin";
   const copy = appLanguage === "pl" ? {
-    file: "Plik", newTab: "Nowa karta", closeTab: "Zamknij kartę", quit: "Zakończ",
+    file: "Plik", newTab: "Nowa karta", newPrivateTab: "Nowa karta prywatna", closeTab: "Zamknij kartę", quit: "Zakończ",
     edit: "Edycja", undo: "Cofnij", redo: "Ponów", cut: "Wytnij", copy: "Kopiuj", paste: "Wklej",
     pasteMatch: "Wklej i dopasuj styl", delete: "Usuń", selectAll: "Zaznacz wszystko", speech: "Mowa",
     view: "Widok", reload: "Odśwież", forceReload: "Wymuś odświeżenie", devTools: "Narzędzia deweloperskie",
     resetZoom: "Rozmiar rzeczywisty", zoomIn: "Powiększ", zoomOut: "Pomniejsz", fullscreen: "Pełny ekran",
     window: "Okno", minimize: "Minimalizuj", zoom: "Maksymalizuj", front: "Przenieś wszystko na wierzch",
   } : {
-    file: "File", newTab: "New Tab", closeTab: "Close Tab", quit: "Quit",
+    file: "File", newTab: "New Tab", newPrivateTab: "New Private Tab", closeTab: "Close Tab", quit: "Quit",
     edit: "Edit", undo: "Undo", redo: "Redo", cut: "Cut", copy: "Copy", paste: "Paste",
     pasteMatch: "Paste and Match Style", delete: "Delete", selectAll: "Select All", speech: "Speech",
     view: "View", reload: "Reload", forceReload: "Force Reload", devTools: "Developer Tools",
@@ -6171,6 +6496,13 @@ const setupApplicationMenu = (): void => {
           accelerator: "CmdOrCtrl+T",
           click: () => {
             openNewTab();
+          },
+        },
+        {
+          label: copy.newPrivateTab,
+          accelerator: "CmdOrCtrl+Shift+N",
+          click: () => {
+            openNewPrivateTab();
           },
         },
         {
@@ -6293,7 +6625,7 @@ const bootstrap = async (): Promise<void> => {
     return;
   }
 
-  setupPermissionHandlers();
+  setupPermissionHandlers(session.defaultSession);
   registerIpc();
   await persistentDataLoad;
   registerDownloadHandling();
