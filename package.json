@@ -1,6 +1,6 @@
 {
   "name": "monobrowser",
-  "version": "0.5.1",
+  "version": "0.5.2",
   "productName": "MonoBrowser",
   "description": "Minimalist monochrome desktop browser built with Electron and TypeScript",
   "main": "dist/main/start.js",
