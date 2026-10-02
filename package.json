@@ -14,6 +14,7 @@
     "copy:html": "node scripts/copy-renderer-html.mjs",
     "build": "npm run clean && npm run gen:icon && npm run build:main && npm run build:renderer && npm run copy:html",
     "test": "npm run build:main && node --test dist/main/",
+    "test:e2e": "npm run build && xvfb-run -a -s \"-screen 0 1400x900x24\" node scripts/e2e-smoke.mjs",
     "dev": "npm run build && electron .",
     "start": "electron .",
     "dist": "npm run dist:win",

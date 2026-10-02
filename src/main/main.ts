@@ -5754,7 +5754,9 @@ function setupPermissionHandlers(
     if (AUTO_ALLOWED_PERMISSIONS.has(permission)) {
       return true;
     }
-    return decisions.get(`${requestingOrigin}|${permission}`) === true;
+    // Electron potrafi podać origin z końcowym "/", a decyzje są zapisane jako URL.origin.
+    const origin = getPermissionOrigin(requestingOrigin) ?? requestingOrigin;
+    return decisions.get(`${origin}|${permission}`) === true;
   });
 }
 
