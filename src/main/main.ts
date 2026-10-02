@@ -5260,6 +5260,18 @@ const updateTabFromWebContents = (tab: TabRecord): void => {
   }
 };
 
+// Ponownie podpięty WebContentsView potrafi zostać "ukryty" w kompozytorze (czarna strona
+// po zmianie karty), więc po podpięciu wymuszamy widoczność i ponowne narysowanie.
+const revealTabView = (view: WebContentsView): void => {
+  view.setVisible(true);
+  setImmediate(() => {
+    if (!view.webContents.isDestroyed()) {
+      applyActiveViewBounds();
+      view.webContents.invalidate();
+    }
+  });
+};
+
 const setActiveTab = (id: number): boolean => {
   if (!mainWindow) {
     return false;
@@ -5281,10 +5293,13 @@ const setActiveTab = (id: number): boolean => {
   const previousActiveTab = activeTabId === null ? null : tabs.get(activeTabId);
   if (previousActiveTab && previousActiveTab.id !== id) {
     if (previousActiveTab.view) {
-      detachView(previousActiveTab.view);
+      // Nie odpinamy widoku: ponownie dodany WebContentsView zostaje czarny (błąd kompozytora),
+      // dlatego nieaktywne karty tylko ukrywamy.
+      previousActiveTab.view.setVisible(false);
     }
   }
   attachViewOnTop(tab.view);
+  revealTabView(tab.view);
   if (downloadProgressVisible) {
     attachDownloadProgressView();
   }
