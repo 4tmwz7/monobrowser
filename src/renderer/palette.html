@@ -7,15 +7,17 @@
     <title>MonoBrowser Palette</title>
     <style>
       :root {
-        color-scheme: light;
-        --black: #0a0a0a;
-        --white: #f0efe9;
-        --accent: #9c9b95;
-        --grey: #5c5b57;
+        --black: var(--mb-fg, #0a0a0a);
+        --white: var(--mb-bg, #f0efe9);
+        --accent: var(--mb-accent, #9c9b95);
+        --grey: var(--mb-muted, #5c5b57);
+        --on-accent: var(--mb-on-accent, #0a0a0a);
         font-family: ui-monospace, "Cascadia Mono", "Courier New", monospace;
       }
       * { box-sizing: border-box; margin: 0; padding: 0; }
       html, body { width: 100%; height: 100%; overflow: hidden; background: transparent; }
+      /* Room for the hard offset shadow inside the view, so it is never clipped into a stray strip. */
+      body { padding: 0 6px 6px 0; }
       #palette {
         width: 100%;
         height: fit-content;
@@ -36,7 +38,8 @@
         outline: 0;
         background: var(--white);
         color: var(--black);
-        font: 13px inherit;
+        font: inherit;
+        font-size: 13px;
       }
       #palette-input:focus { box-shadow: inset 3px 0 0 var(--black); }
       #palette-list {
@@ -44,24 +47,27 @@
         margin: 0;
         padding: 3px;
         display: grid;
+        grid-template-columns: minmax(0, 1fr);
         gap: 1px;
         max-height: none;
       }
       .palette-row {
         min-height: 30px;
-        display: flex;
+        display: grid;
+        grid-template-columns: 14px minmax(0, 1fr) auto;
         align-items: center;
         gap: 8px;
         padding: 0 8px;
         border: 0;
         background: var(--white);
         color: var(--black);
-        font: 11px inherit;
+        font: inherit;
+        font-size: 12px;
         cursor: pointer;
         text-align: left;
         width: 100%;
       }
-      .palette-row:hover, .palette-row.selected { background: var(--black); color: var(--white); }
+      .palette-row.selected { background: var(--black); color: var(--white); }
       .palette-row .kind {
         flex: 0 0 auto;
         width: 13px;
@@ -71,31 +77,33 @@
         justify-content: center;
       }
       .palette-row .kind svg { width: 11px; height: 11px; fill: currentColor; }
-      .palette-row .label { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-      .palette-row .hint { flex: 0 0 auto; color: var(--grey); font-size: 9px; white-space: nowrap; }
-      .palette-row:hover .hint, .palette-row.selected .hint { color: #b5b4ae; }
+      .palette-row .label { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+      .palette-row .hint { min-width: min-content; justify-self: end; max-width: min(300px, 45vw); padding-left: 8px; overflow: hidden; text-overflow: ellipsis; text-align: right; color: var(--grey); font-size: 11px; white-space: nowrap; }
+      .palette-row.selected .hint { color: color-mix(in srgb, var(--white) 70%, var(--black)); }
       .palette-empty {
         min-height: 30px;
         display: flex;
         align-items: center;
         padding: 0 8px;
         color: var(--grey);
-        font-size: 10px;
+        font-size: 12px;
       }
       #palette-footer {
         flex: 0 0 auto;
         display: flex;
         justify-content: space-between;
         gap: 8px;
-        padding: 4px 8px;
+        padding: 6px 10px;
         border-top: 2px solid var(--black);
         color: var(--grey);
-        font-size: 9px;
+        font-size: 11px;
+        line-height: 1.4;
       }
+      #palette-footer span { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
     </style>
   </head>
   <body>
-    <div id="palette" role="dialog" aria-label="Paleta komend">
+    <div id="palette" data-mb-overlay="pop" role="dialog" aria-label="Paleta komend">
       <input id="palette-input" type="text" placeholder="Wpisz komendę…" autocomplete="off" spellcheck="false" />
       <ul id="palette-list" aria-live="polite"></ul>
       <div id="palette-footer">

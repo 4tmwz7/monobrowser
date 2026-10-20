@@ -452,3 +452,24 @@ Exhibit B - "Incompatible With Secondary Licenses" Notice
   This Source Code Form is "Incompatible With Secondary Licenses", as
   defined by the Mozilla Public License, v. 2.0.
 ```
+
+## Color theme palettes
+
+The color presets in Settings > Colors use only the color palette values (hex
+codes) of the following themes. No theme code or assets are bundled.
+
+| Theme | Author | Source | License |
+| --- | --- | --- | --- |
+| Rosé Pine (Main, Moon, Dawn) | Rosé Pine contributors (mvllow) | https://github.com/rose-pine/rose-pine-palette | MIT - color palette values used |
+| Everforest (Dark/Light, Medium) | sainnhe | https://github.com/sainnhe/everforest | MIT - color palette values used |
+| Gruvbox (Dark, Light) | Pavel Pertsev (morhetz) | https://github.com/morhetz/gruvbox | MIT - color palette values used |
+| Nord | Arctic Ice Studio / Sven Greb (Nord project) | https://github.com/nordtheme/nord | Apache-2.0 (permissive) - color palette values used |
+| Dracula | Dracula Theme | https://github.com/dracula/dracula-theme | MIT - color palette values used |
+| Tokyo Night | enkia | https://github.com/enkia/tokyo-night-vscode-theme | MIT - color palette values used |
+| Solarized (Dark, Light) | Ethan Schoonover | https://github.com/altercation/solarized | MIT - color palette values used |
+| Kanagawa (Wave) | Tommaso Laurenzi (rebelot) | https://github.com/rebelot/kanagawa.nvim | MIT - color palette values used |
+| One Dark | GitHub Inc. (Atom) | https://github.com/atom/one-dark-syntax | MIT - color palette values used |
+
+Some mapped values (for example muted text or hover backgrounds) were adjusted
+slightly from the official palettes to keep a text contrast ratio of at least
+4.5:1.

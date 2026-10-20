@@ -7,11 +7,11 @@
     <title>MonoBrowser Notes</title>
     <style>
       :root {
-        color-scheme: light;
-        --black: #0a0a0a;
-        --white: #f0efe9;
-        --accent: #9c9b95;
-        --grey: #5c5b57;
+        --black: var(--mb-fg, #0a0a0a);
+        --white: var(--mb-bg, #f0efe9);
+        --accent: var(--mb-accent, #9c9b95);
+        --grey: var(--mb-muted, #5c5b57);
+        --on-accent: var(--mb-on-accent, #0a0a0a);
         font-family: ui-monospace, "Cascadia Mono", "Courier New", monospace;
       }
       * { box-sizing: border-box; margin: 0; padding: 0; }
@@ -30,30 +30,32 @@
         align-items: center;
         justify-content: space-between;
         gap: 8px;
-        padding: 7px 9px;
+        padding: 8px 10px;
         border-bottom: 2px solid var(--black);
-        background: var(--black);
-        color: var(--white);
+        background: var(--mb-surface, var(--white));
+        color: var(--black);
       }
       header .title {
-        font-size: 10px;
+        font-size: 12px;
         font-weight: 700;
         letter-spacing: .12em;
         text-transform: uppercase;
       }
       #notes-toggle {
-        border: 2px solid var(--white);
-        background: var(--white);
+        border: 2px solid var(--black);
+        background: transparent;
         color: var(--black);
         border-radius: 0;
         padding: 4px 9px;
-        font: 700 9px inherit;
+        font: inherit;
+        font-size: 11px;
+        font-weight: 700;
         letter-spacing: .08em;
         text-transform: uppercase;
         cursor: pointer;
       }
-      #notes-toggle:hover { background: var(--accent); }
-      #notes-toggle.active { background: var(--black); color: var(--white); border-color: var(--white); }
+      #notes-toggle:hover { background: var(--accent); color: var(--on-accent); }
+      #notes-toggle.active { background: var(--black); color: var(--white); border-color: var(--black); }
       #notes-editor {
         flex: 1 1 auto;
         min-height: 0;
@@ -64,7 +66,9 @@
         border-radius: 0;
         background: var(--white);
         color: var(--black);
-        font: 11px/1.55 inherit;
+        font: inherit;
+        font-size: 13px;
+        line-height: 1.55;
         padding: 10px 11px;
       }
       #notes-preview {
@@ -72,30 +76,33 @@
         min-height: 0;
         overflow: auto;
         padding: 10px 11px;
-        font: 11px/1.55 inherit;
+        font: inherit;
+        font-size: 13px;
+        line-height: 1.55;
         color: var(--black);
       }
-      #notes-preview h1, #notes-preview h2, #notes-preview h3 { margin: 10px 0 4px; font-size: 13px; text-transform: uppercase; letter-spacing: .05em; }
-      #notes-preview h2 { font-size: 12px; }
-      #notes-preview h3 { font-size: 11px; }
+      #notes-preview h1, #notes-preview h2, #notes-preview h3 { margin: 10px 0 4px; font-size: 15px; text-transform: uppercase; letter-spacing: .05em; }
+      #notes-preview h2 { font-size: 13px; }
+      #notes-preview h3 { font-size: 12px; }
       #notes-preview p { margin: 5px 0; overflow-wrap: anywhere; }
       #notes-preview ul, #notes-preview ol { margin: 5px 0 5px 20px; }
       #notes-preview li { margin: 2px 0; }
-      #notes-preview code { border: 1px solid var(--accent); padding: 0 3px; background: #e4e3dd; }
+      #notes-preview code { border: 1px solid var(--accent); padding: 0 3px; background: var(--mb-surface-2, #e4e3dd); }
       #notes-preview a { color: var(--black); text-decoration: underline; }
       #notes-preview blockquote { margin: 6px 0; padding: 4px 10px; border-left: 3px solid var(--black); color: var(--grey); }
       #notes-preview hr { border: 0; border-top: 2px solid var(--black); margin: 10px 0; }
       #notes-status {
         flex: 0 0 auto;
-        padding: 3px 9px 5px;
+        padding: 6px 10px;
         border-top: 2px solid var(--black);
+        background: var(--mb-surface, var(--white));
         color: var(--grey);
-        font-size: 9px;
+        font-size: 11px;
       }
     </style>
   </head>
   <body>
-    <div id="notes" role="complementary" aria-label="Notatki">
+    <div id="notes" data-mb-overlay="slide-right" role="complementary" aria-label="Notatki">
       <header>
         <span class="title" id="notes-title">Notatki</span>
         <button id="notes-toggle" type="button" title="Przełącz podgląd">Podgląd</button>

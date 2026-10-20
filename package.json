@@ -10,7 +10,7 @@
     "clean": "rimraf dist",
     "gen:icon": "node scripts/generate-icon.mjs",
     "build:main": "tsc -p tsconfig.main.json",
-    "build:renderer": "esbuild src/renderer/app.ts src/renderer/find.ts src/renderer/palette.ts src/renderer/notes.ts --bundle --platform=browser --format=iife --outdir=dist/renderer",
+    "build:renderer": "esbuild src/renderer/app.ts src/renderer/find.ts src/renderer/palette.ts src/renderer/notes.ts src/renderer/glance.ts src/renderer/prompt.ts src/renderer/split-frame.ts --bundle --platform=browser --format=iife --outdir=dist/renderer",
     "copy:html": "node scripts/copy-renderer-html.mjs",
     "build": "npm run clean && npm run gen:icon && npm run build:main && npm run build:renderer && npm run copy:html",
     "test": "npm run build:main && node --test \"dist/main/**/*.test.js\"",
@@ -19,6 +19,7 @@
     "start": "electron .",
     "dist": "npm run dist:win",
     "dist:win": "npm run build && electron-builder --win nsis --x64",
+    "dist:win:portable": "npm run build && electron-builder --win portable --x64",
     "dist:linux": "npm run build && electron-builder --linux AppImage --x64",
     "dist:all": "npm run build && electron-builder --win nsis --linux AppImage --x64"
   },
@@ -35,9 +36,19 @@
           "arch": [
             "x64"
           ]
+        },
+        {
+          "target": "portable",
+          "arch": [
+            "x64"
+          ]
         }
       ],
       "artifactName": "${productName}-Setup-${version}.${ext}"
+    },
+    "portable": {
+      "artifactName": "${productName}-${version}-portable.${ext}",
+      "requestExecutionLevel": "user"
     },
     "linux": {
       "target": [
@@ -73,11 +84,11 @@
     }
   },
   "dependencies": {
-    "@ghostery/adblocker-electron": "^2.18.2",
+    "@ghostery/adblocker-electron": "^2.20.1",
     "electron-updater": "^6.8.9"
   },
   "devDependencies": {
-    "electron": "^44.5.1",
+    "electron": "^44.9.0",
     "electron-builder": "^26.15.3",
     "esbuild": "^0.28.2",
     "rimraf": "^6.1.3",

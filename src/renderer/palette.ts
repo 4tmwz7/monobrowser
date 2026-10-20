@@ -204,6 +204,21 @@ input.addEventListener("keydown", (event) => {
   }
 });
 
+// Hover moves the one and only selection (keyboard and pointer share selectedIndex), so two rows never look active at once.
+let lastPointer = { x: -1, y: -1 };
+const selectRowFromPointer = (event: MouseEvent): void => {
+  // Ignore synthetic moves after a re-render (the pointer did not actually move), or arrow keys would be undone.
+  if (event.clientX === lastPointer.x && event.clientY === lastPointer.y) return;
+  lastPointer = { x: event.clientX, y: event.clientY };
+  const row = (event.target as HTMLElement | null)?.closest(".palette-row") as HTMLElement | null;
+  if (!row) return;
+  const index = filteredItems.findIndex((item) => item.id === row.dataset.paletteId);
+  if (index < 0 || index === selectedIndex) return;
+  selectedIndex = index;
+  list.querySelectorAll(".palette-row").forEach((element) => element.classList.toggle("selected", element === row));
+};
+list.addEventListener("mousemove", selectRowFromPointer);
+
 list.addEventListener("click", (event) => {
   const target = (event.target as HTMLElement | null)?.closest(".palette-row") as HTMLElement | null;
   if (!target) return;

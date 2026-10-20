@@ -1,0 +1,73 @@
+<!doctype html>
+<html lang="pl">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <meta http-equiv="Content-Security-Policy" content="default-src 'none'; script-src 'self'; style-src 'unsafe-inline'" />
+    <title>MonoBrowser Glance</title>
+    <style>
+      :root {
+        --black: var(--mb-fg, #0a0a0a);
+        --white: var(--mb-bg, #f0efe9);
+        --accent: var(--mb-accent, #9c9b95);
+        --grey: var(--mb-muted, #5c5b57);
+        --on-accent: var(--mb-on-accent, #0a0a0a);
+        font-family: ui-monospace, "Cascadia Mono", "Courier New", monospace;
+      }
+      * { box-sizing: border-box; margin: 0; padding: 0; }
+      html, body { width: 100%; height: 100%; overflow: hidden; background: transparent; }
+      #backdrop { position: absolute; inset: 0; background: color-mix(in srgb, black 50%, transparent); }
+      #frame {
+        position: absolute;
+        border: 3px solid var(--black);
+        background: var(--white);
+        box-shadow: 6px 6px 0 var(--accent);
+      }
+      #bar {
+        height: 42px;
+        display: flex;
+        align-items: center;
+        gap: 6px;
+        padding: 0 6px 0 10px;
+        border-bottom: 2px solid var(--black);
+        background: var(--white);
+        color: var(--black);
+      }
+      #info { min-width: 0; flex: 1; display: flex; flex-direction: column; justify-content: center; gap: 1px; }
+      #title, #url { overflow: hidden; white-space: nowrap; text-overflow: ellipsis; }
+      #title { font-size: 11px; font-weight: 700; letter-spacing: .04em; }
+      #url { color: var(--grey); font-size: 10px; }
+      .glance-btn {
+        height: 28px;
+        padding: 0 10px;
+        flex: 0 0 auto;
+        display: flex;
+        align-items: center;
+        justify-content: center;
+        border: 2px solid var(--black);
+        border-radius: 0;
+        background: var(--white);
+        color: var(--black);
+        font: inherit;
+        font-size: 11px;
+        font-weight: 700;
+        letter-spacing: .04em;
+        cursor: pointer;
+      }
+      .glance-btn:hover, .glance-btn:focus-visible { outline: 0; background: var(--black); color: var(--white); }
+      #glance-close { width: 28px; padding: 0; font-size: 16px; line-height: 1; }
+    </style>
+  </head>
+  <body>
+    <div id="backdrop" data-mb-overlay="fade"></div>
+    <div id="frame" data-mb-overlay="pop" hidden>
+      <div id="bar">
+        <div id="info"><span id="title"></span><span id="url"></span></div>
+        <button id="glance-background" class="glance-btn" type="button"></button>
+        <button id="glance-expand" class="glance-btn" type="button"></button>
+        <button id="glance-close" class="glance-btn" type="button" aria-label="Close" title="Close">&times;</button>
+      </div>
+    </div>
+    <script src="./glance.js"></script>
+  </body>
+</html>

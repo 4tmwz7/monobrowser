@@ -1,0 +1,54 @@
+<!doctype html>
+<html lang="pl">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <meta http-equiv="Content-Security-Policy" content="default-src 'none'; script-src 'self'; style-src 'unsafe-inline'; font-src data:" />
+    <title>MonoBrowser Prompt</title>
+    <style>
+      :root {
+        font-family: ui-monospace, "Cascadia Mono", "Courier New", monospace;
+      }
+      * { box-sizing: border-box; margin: 0; padding: 0; }
+      html, body { width: 100%; background: transparent; overflow: hidden; }
+      #wrap { padding: 0 6px 6px 0; }
+      #box { animation: mb-pop-in var(--mb-dur, 160ms) var(--mb-ease, ease) backwards; border: 3px solid var(--mb-border, #0a0a0a); background: var(--mb-surface, #f0efe9); color: var(--mb-fg, #0a0a0a); box-shadow: 5px 5px 0 var(--mb-accent, #9c9b95); }
+      #title { padding: 9px 14px 7px; background: var(--mb-fg, #0a0a0a); color: var(--mb-bg, #f0efe9); font-family: "Bebas Neue", Impact, "Arial Narrow", ui-monospace, monospace; font-size: 22px; line-height: 1; font-weight: 400; letter-spacing: .06em; text-transform: uppercase; }
+      #body { padding: 14px; display: grid; gap: 8px; font-size: 12px; line-height: 1.5; }
+      .line { word-break: break-word; }
+      .line.strong { font-weight: 700; font-size: 14px; }
+      .line.muted { color: var(--mb-muted, #5c5b57); font-size: 14px; font-weight: 400; line-height: 1.45; }
+      .line.warn { border: 2px dashed var(--mb-danger, #0a0a0a); padding: 6px 8px; font-size: 12px; }
+      #fields { display: grid; gap: 8px; margin-top: 4px; }
+      #fields[hidden] { display: none; }
+      #fields label { display: grid; gap: 3px; font-size: 11px; letter-spacing: .08em; text-transform: uppercase; color: var(--mb-muted, #5c5b57); }
+      #fields input { height: 34px; padding: 0 9px; border: 2px solid var(--mb-border, #0a0a0a); border-radius: 0; outline: 0; background: var(--mb-bg, #f0efe9); color: var(--mb-fg, #0a0a0a); font-family: inherit; font-size: 12px; }
+      #fields input:focus { box-shadow: 3px 3px 0 var(--mb-accent, #9c9b95); }
+      #actions { display: flex; gap: 8px; margin-top: 6px; }
+      button { flex: 1; height: 34px; padding: 0 12px; border: 2px solid var(--mb-border, #0a0a0a); border-radius: 0; background: var(--mb-bg, #f0efe9); color: var(--mb-fg, #0a0a0a); font-family: inherit; font-weight: 700; font-size: 11px; letter-spacing: .08em; text-transform: uppercase; cursor: pointer; }
+      button:hover, button:focus-visible { background: var(--mb-fg, #0a0a0a); color: var(--mb-bg, #f0efe9); outline: 0; }
+      button.primary { background: var(--mb-fg, #0a0a0a); color: var(--mb-on-accent, var(--mb-bg, #f0efe9)); }
+      button.primary:hover, button.primary:focus-visible { background: var(--mb-bg, #f0efe9); color: var(--mb-fg, #0a0a0a); }
+      button.danger { border-style: dashed; border-color: var(--mb-danger, #0a0a0a); }
+    </style>
+  </head>
+  <body>
+    <div id="wrap">
+      <div id="box" role="dialog" aria-modal="true" aria-labelledby="title">
+        <div id="title"></div>
+        <form id="body" autocomplete="off">
+          <div id="lines"></div>
+          <div id="fields" hidden>
+            <label><span id="user-label"></span><input id="username" type="text" autocomplete="off" spellcheck="false" /></label>
+            <label><span id="pass-label"></span><input id="password" type="password" autocomplete="off" spellcheck="false" /></label>
+          </div>
+          <div id="actions">
+            <button id="secondary" type="button"></button>
+            <button id="primary" class="primary" type="submit"></button>
+          </div>
+        </form>
+      </div>
+    </div>
+    <script src="./prompt.js"></script>
+  </body>
+</html>

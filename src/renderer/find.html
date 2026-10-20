@@ -7,11 +7,11 @@
     <title>MonoBrowser Find</title>
     <style>
       :root {
-        color-scheme: light;
-        --black: #0a0a0a;
-        --white: #f0efe9;
-        --accent: #9c9b95;
-        --grey: #5c5b57;
+        --black: var(--mb-fg, #0a0a0a);
+        --white: var(--mb-bg, #f0efe9);
+        --accent: var(--mb-accent, #9c9b95);
+        --grey: var(--mb-muted, #5c5b57);
+        --on-accent: var(--mb-on-accent, #0a0a0a);
         font-family: ui-monospace, "Cascadia Mono", "Courier New", monospace;
       }
       * { box-sizing: border-box; margin: 0; padding: 0; }
@@ -36,10 +36,11 @@
         outline: 0;
         background: var(--white);
         color: var(--black);
-        font: 11px inherit;
+        font: inherit;
+        font-size: 12px;
       }
       #find-input:focus { box-shadow: 3px 3px 0 var(--accent); transform: translate(-1px, -1px); }
-      #find-result { min-width: 42px; color: var(--grey); font-size: 10px; text-align: center; }
+      #find-result { min-width: 44px; color: var(--grey); font-size: 11px; text-align: center; font-variant-numeric: tabular-nums; }
       .find-btn {
         width: 30px;
         height: 30px;
@@ -53,13 +54,14 @@
         color: var(--black);
         cursor: pointer;
       }
-      .find-btn:hover:not(:disabled), .find-btn:focus-visible { outline: 0; background: var(--black); color: var(--white); }
+      .find-btn:hover:not(:disabled), .find-btn:focus-visible { background: var(--black); color: var(--white); }
+      .find-btn:focus-visible { outline: 2px solid var(--accent); outline-offset: 1px; }
       .find-btn:disabled { opacity: .35; cursor: not-allowed; }
       .find-btn svg { width: 13px; height: 13px; fill: currentColor; }
     </style>
   </head>
   <body>
-    <div id="find-bar" role="search">
+    <div id="find-bar" role="search" data-mb-overlay="pop-up">
       <input id="find-input" type="text" placeholder="Znajdź na stronie" autocomplete="off" spellcheck="false" />
       <span id="find-result" aria-live="polite">0/0</span>
       <button id="find-previous" class="find-btn" type="button" aria-label="Poprzedni wynik" title="Poprzedni wynik" disabled>

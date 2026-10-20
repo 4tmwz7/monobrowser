@@ -1,5 +1,9 @@
 import path from "node:path";
 import { app } from "electron";
+import { applyPortableMode } from "./portable-mode.js";
+
+// Tryb przenośny: ścieżki danych muszą być ustawione przed czymkolwiek, co czyta userData (i przed blokadą instancji).
+applyPortableMode();
 
 // Cache skompilowanego kodu V8 skraca ładowanie main.js i zależności przy kolejnych startach.
 try {

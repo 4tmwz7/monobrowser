@@ -14,7 +14,10 @@ await Promise.all([
   "find.html",
   "palette.html",
   "notes.html",
+  "glance.html",
+  "prompt.html",
   "download-progress.html",
+  "split-frame.html",
 ].map((fileName) => copyFile(
   path.join(root, "src", "renderer", fileName),
   path.join(destinationDir, fileName),
