@@ -2,6 +2,7 @@
 // and the nonce-protected message protocol. No Electron imports (unit-testable).
 import crypto from "node:crypto";
 import { displayUrl } from "./url-utils.js";
+import { INTERACTION_VARS_MB_CSS } from "./interaction-css.js";
 
 export type ErrorLang = "pl" | "en";
 
@@ -187,6 +188,7 @@ export const renderErrorPageHtml = (options: ErrorPageOptions): string => {
   ${fontDataUrlProvider() ? `@font-face { font-family: "Bebas Neue"; src: url("${fontDataUrlProvider()}") format("truetype"); font-weight: 400; font-display: block; }` : ""}
   :root {
     --font: ui-monospace, "Cascadia Mono", "Courier New", monospace;
+    ${INTERACTION_VARS_MB_CSS}
   }
   * { box-sizing: border-box; }
   html, body { margin: 0; min-height: 100%; background: var(--mb-bg, #f0efe9); color: var(--mb-fg, #0a0a0a); font-family: var(--font); }
@@ -201,9 +203,12 @@ export const renderErrorPageHtml = (options: ErrorPageOptions): string => {
   ul { margin: 0 0 18px; padding-left: 20px; font-size: 13px; line-height: 1.7; color: var(--mb-muted, #5c5b57); }
   .actions { display: flex; flex-wrap: wrap; gap: 10px; margin-top: 22px; }
   button { font: 700 12px var(--font); letter-spacing: .06em; text-transform: uppercase; padding: 11px 18px; border: 2px solid var(--mb-border, #0a0a0a); border-radius: 0; background: var(--mb-bg, #f0efe9); color: var(--mb-fg, #0a0a0a); cursor: pointer; }
-  button:hover, button:focus-visible { background: var(--mb-fg, #0a0a0a); color: var(--mb-bg, #f0efe9); outline: 0; }
+  button:hover { background: var(--ctl-hover-bg); }
+  button:active { background: var(--ctl-press-bg); }
+  button:focus-visible, summary:focus-visible { outline: 2px solid var(--mb-accent, #9c9b95); outline-offset: 2px; }
   button.primary { background: var(--mb-fg, #0a0a0a); color: var(--mb-on-accent, var(--mb-bg, #f0efe9)); }
-  button.primary:hover, button.primary:focus-visible { background: var(--mb-bg, #f0efe9); color: var(--mb-fg, #0a0a0a); }
+  button.primary:hover { background: var(--ctl-solid-hover); }
+  button.primary:active { background: var(--ctl-solid-press); }
   button.danger { border-style: dashed; border-color: var(--mb-danger, #0a0a0a); }
   details { margin-top: 20px; border-top: 2px solid var(--mb-fg, #0a0a0a); padding-top: 14px; }
   summary { cursor: pointer; font-size: 12px; letter-spacing: .08em; text-transform: uppercase; }

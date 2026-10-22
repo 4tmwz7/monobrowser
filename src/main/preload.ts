@@ -213,6 +213,15 @@ const browserApi = {
   setCompactPointer: (inside: boolean): void => ipcRenderer.send("compact:pointer", inside),
   // Split view: a tab drag started/ended (page area turns into left/right drop zones).
   notifyTabDrag: (tabId: number | null): void => ipcRenderer.send("split:tab-drag", tabId),
+  // Toolbar pins: menu functions pinned as icon buttons (see toolbar-pins.ts).
+  getToolbarPins: (): Promise<unknown> => ipcRenderer.invoke("toolbar:get"),
+  runToolbarAction: (id: string): Promise<boolean> => ipcRenderer.invoke("toolbar:run", id),
+  setToolbarPinned: (id: string, pinned: boolean): Promise<unknown> => ipcRenderer.invoke("toolbar:set-pinned", id, pinned),
+  onToolbarPinsChanged: (callback: (payload: unknown) => void): (() => void) => {
+    const listener = (_event: Electron.IpcRendererEvent, payload: unknown) => callback(payload);
+    ipcRenderer.on("toolbar:changed", listener);
+    return () => ipcRenderer.removeListener("toolbar:changed", listener);
+  },
   getLayoutSettings: (): Promise<LayoutSettings> => ipcRenderer.invoke("layout:get"),
   setLayoutSettings: (patch: Partial<LayoutSettings>): Promise<LayoutSettings> =>
     ipcRenderer.invoke("layout:set", patch),
@@ -298,6 +307,11 @@ const browserApi = {
     ipcRenderer.on("address:focus", listener);
     return () => ipcRenderer.removeListener("address:focus", listener);
   },
+  onBlurAddress: (callback: () => void): (() => void) => {
+    const listener = () => callback();
+    ipcRenderer.on("address:blur", listener);
+    return () => ipcRenderer.removeListener("address:blur", listener);
+  },
   triggerNewTabShortcut: (initialUrl?: string): void => {
     ipcRenderer.send("tabs:create-shortcut", initialUrl);
   },
@@ -327,6 +341,7 @@ const browserApi = {
   getAnimationSettings: (): Promise<{ enabled: boolean }> => ipcRenderer.invoke("animations:get"),
   setAnimationSettings: (patch: { enabled: boolean }): Promise<{ enabled: boolean }> => ipcRenderer.invoke("animations:set", patch),
   getStartupSettings: (): Promise<StartupSettings> => ipcRenderer.invoke("startup:get"),
+  rememberSettingsTab: (tab: string): void => ipcRenderer.send("settings:remember-tab", tab),
   setStartupSettings: (patch: Partial<StartupSettings>): Promise<StartupSettings> =>
     ipcRenderer.invoke("startup:set", patch),
   getPortableState: (): Promise<unknown> => ipcRenderer.invoke("portable:get-state"),

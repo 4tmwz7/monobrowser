@@ -3,6 +3,7 @@
 // script talks to the trusted preload bridge (window.browserApi) and applies every choice live.
 
 import { ONBOARDING_STEPS, isLastStep, nextStep, onboardingKeyAction, prevStep } from "./onboarding.js";
+import { INTERACTION_VARS_MB_CSS } from "./interaction-css.js";
 
 export type OnboardingLanguage = "pl" | "en";
 
@@ -67,7 +68,7 @@ export const renderOnboardingPageHtml = (options: RenderOnboardingOptions): stri
 <title>${copy.title}</title>
 <style>
 ${fontFace}
-:root{font-family:ui-monospace,"Cascadia Mono","Courier New",monospace}
+:root{font-family:ui-monospace,"Cascadia Mono","Courier New",monospace;${INTERACTION_VARS_MB_CSS}}
 *{box-sizing:border-box}
 html,body{margin:0;height:100%}
 body{display:flex;flex-direction:column;background:var(--mb-bg,#f0efe9);color:var(--mb-fg,#0a0a0a);overflow:hidden}
@@ -87,8 +88,9 @@ h2{margin:0;font-size:11px;font-weight:700;letter-spacing:.14em;text-transform:u
 .opt{position:relative;display:grid;gap:4px;padding:12px 14px;border:2px solid var(--mb-border,#b3b2ab);background:var(--mb-surface,#e4e3dc);cursor:pointer;font-size:12px;font-weight:700;letter-spacing:.06em;text-transform:uppercase;min-width:110px}
 .opt small{font-size:11px;font-weight:400;letter-spacing:.02em;text-transform:none;color:var(--mb-muted,#5c5b57)}
 .opt input{position:absolute;opacity:0;inset:0;width:100%;height:100%;margin:0;cursor:pointer}
-.opt:hover{background:color-mix(in srgb,var(--mb-surface,#e4e3dc) 50%,var(--mb-surface-2,#d8d7d1))}
-.opt:has(input:checked),.opt:has(input:checked):hover{border-color:var(--mb-fg,#0a0a0a);background:var(--mb-surface-2,#d8d7d1)}
+.opt:hover{background:var(--ctl-hover-bg)}
+.opt:active{background:var(--ctl-press-bg)}
+.opt:has(input:checked),.opt:has(input:checked):hover,.opt:has(input:checked):active{border-color:var(--mb-fg,#0a0a0a);background:var(--ctl-sel-bg);box-shadow:inset 0 0 0 1px var(--mb-fg,#0a0a0a)}
 .opt:has(input:focus-visible){outline:2px solid var(--mb-accent,#9c9b95);outline-offset:2px}
 .themes{display:grid;grid-template-columns:repeat(auto-fill,minmax(150px,1fr));gap:10px}
 .themes .opt{min-width:0;padding:8px;align-content:start;grid-template-rows:auto auto 30px}
@@ -128,7 +130,13 @@ kbd{font:inherit;font-weight:700;border:1px solid var(--mb-fg,#0a0a0a);padding:1
 button.b{border:2px solid var(--mb-fg,#0a0a0a);background:var(--mb-fg,#0a0a0a);color:var(--mb-bg,#f0efe9);border-radius:0;padding:10px 16px;font:inherit;font-size:11px;font-weight:700;letter-spacing:.1em;text-transform:uppercase;cursor:pointer}
 button.b.ghost{background:transparent;color:var(--mb-fg,#0a0a0a)}
 button.b.link{border-color:transparent;background:transparent;color:var(--mb-muted,#5c5b57);padding-left:6px;padding-right:6px}
-button.b:hover:not(:disabled),button.b:focus-visible{background:var(--mb-accent,#9c9b95);color:var(--mb-on-accent,#0a0a0a);border-color:var(--mb-fg,#0a0a0a);outline:0}
+button.b:hover:not(:disabled){background:var(--ctl-solid-hover)}
+button.b:active:not(:disabled){background:var(--ctl-solid-press)}
+button.b.ghost:hover:not(:disabled),button.b.link:hover:not(:disabled){background:var(--ctl-hover-bg);color:var(--mb-fg,#0a0a0a)}
+button.b.ghost:active:not(:disabled),button.b.link:active:not(:disabled){background:var(--ctl-press-bg)}
+button:focus-visible,select:focus-visible{outline:2px solid var(--mb-accent,#9c9b95);outline-offset:2px}
+.toggle:hover{background:var(--ctl-hover-bg)}
+select:hover{background:var(--ctl-hover-bg)}
 button.b:disabled{opacity:.4;cursor:not-allowed}
 button.b[hidden]{display:none}
 @media (max-width:560px){.top,.foot{padding:12px 14px}main{padding:18px 14px}}

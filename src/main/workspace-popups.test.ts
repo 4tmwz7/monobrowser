@@ -42,3 +42,9 @@ test("delete confirmation offers move/close only when the workspace has tabs", (
   assert.ok(!empty.includes("ws-delete-close"));
   assert.ok(empty.includes("ws-delete-move"));
 });
+
+test("switcher offers deleting every space except the main one", () => {
+  const html = renderWorkspaceSwitcherHtml(ctx, [{ ...createMainWorkspace(), count: 1 }, { ...evil, count: 0 }], "main").html;
+  assert.ok(html.includes("monobrowser-menu://ws-delete?id=ws-evil"));
+  assert.ok(!html.includes("ws-delete?id=main"));
+});

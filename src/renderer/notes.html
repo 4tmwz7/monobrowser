@@ -7,6 +7,7 @@
     <title>MonoBrowser Notes</title>
     <style>
       :root {
+        /*@mb-interaction-vars*/
         --black: var(--mb-fg, #0a0a0a);
         --white: var(--mb-bg, #f0efe9);
         --accent: var(--mb-accent, #9c9b95);
@@ -54,8 +55,10 @@
         text-transform: uppercase;
         cursor: pointer;
       }
-      #notes-toggle:hover { background: var(--accent); color: var(--on-accent); }
-      #notes-toggle.active { background: var(--black); color: var(--white); border-color: var(--black); }
+      #notes-toggle:hover { background: var(--ctl-hover-bg); }
+      #notes-toggle:active { background: var(--ctl-press-bg); }
+      #notes-toggle.active, #notes-toggle.active:hover { background: var(--ctl-sel-bg); border-color: var(--black); box-shadow: inset 0 0 0 1px var(--black); }
+      #notes-toggle:focus-visible { outline: 2px solid var(--accent); outline-offset: 1px; }
       #notes-editor {
         flex: 1 1 auto;
         min-height: 0;

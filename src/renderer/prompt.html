@@ -7,6 +7,7 @@
     <title>MonoBrowser Prompt</title>
     <style>
       :root {
+        /*@mb-interaction-vars*/
         font-family: ui-monospace, "Cascadia Mono", "Courier New", monospace;
       }
       * { box-sizing: border-box; margin: 0; padding: 0; }
@@ -23,12 +24,15 @@
       #fields[hidden] { display: none; }
       #fields label { display: grid; gap: 3px; font-size: 11px; letter-spacing: .08em; text-transform: uppercase; color: var(--mb-muted, #5c5b57); }
       #fields input { height: 34px; padding: 0 9px; border: 2px solid var(--mb-border, #0a0a0a); border-radius: 0; outline: 0; background: var(--mb-bg, #f0efe9); color: var(--mb-fg, #0a0a0a); font-family: inherit; font-size: 12px; }
-      #fields input:focus { box-shadow: 3px 3px 0 var(--mb-accent, #9c9b95); }
+      #fields input:focus-visible { outline: 2px solid var(--mb-accent, #9c9b95); outline-offset: 2px; }
       #actions { display: flex; gap: 8px; margin-top: 6px; }
       button { flex: 1; height: 34px; padding: 0 12px; border: 2px solid var(--mb-border, #0a0a0a); border-radius: 0; background: var(--mb-bg, #f0efe9); color: var(--mb-fg, #0a0a0a); font-family: inherit; font-weight: 700; font-size: 11px; letter-spacing: .08em; text-transform: uppercase; cursor: pointer; }
-      button:hover, button:focus-visible { background: var(--mb-fg, #0a0a0a); color: var(--mb-bg, #f0efe9); outline: 0; }
+      button:hover { background: var(--ctl-hover-bg); }
+      button:active { background: var(--ctl-press-bg); }
+      button:focus-visible { outline: 2px solid var(--mb-accent, #9c9b95); outline-offset: 2px; }
       button.primary { background: var(--mb-fg, #0a0a0a); color: var(--mb-on-accent, var(--mb-bg, #f0efe9)); }
-      button.primary:hover, button.primary:focus-visible { background: var(--mb-bg, #f0efe9); color: var(--mb-fg, #0a0a0a); }
+      button.primary:hover { background: var(--ctl-solid-hover); }
+      button.primary:active { background: var(--ctl-solid-press); }
       button.danger { border-style: dashed; border-color: var(--mb-danger, #0a0a0a); }
     </style>
   </head>

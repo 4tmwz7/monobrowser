@@ -74,11 +74,16 @@ type BrowserApi = {
   toggleAdblockTabPause: () => Promise<AdblockerStatus>;
   onLanguageChanged: (callback: (language: AppLanguage) => void) => () => void;
   onFocusAddress: (callback: () => void) => () => void;
+  onBlurAddress: (callback: () => void) => () => void;
   setViewport: (rect: { x: number; y: number }) => Promise<boolean>;
   setSidebarDragging: (dragging: boolean) => Promise<boolean>;
   setCompactKeep: (flags: { address: boolean }) => void;
   setCompactPointer: (inside: boolean) => void;
   notifyTabDrag: (tabId: number | null) => void;
+  getToolbarPins: () => Promise<unknown>;
+  runToolbarAction: (id: string) => Promise<boolean>;
+  setToolbarPinned: (id: string, pinned: boolean) => Promise<unknown>;
+  onToolbarPinsChanged: (callback: (payload: unknown) => void) => () => void;
   getLayoutSettings: () => Promise<LayoutSettings>;
   setLayoutSettings: (patch: Partial<LayoutSettings>) => Promise<LayoutSettings>;
   onLayoutChanged: (callback: (layout: LayoutSettings) => void) => () => void;
@@ -483,6 +488,7 @@ const activeChanged = new Map<number, { wasActive: boolean; at: number }>();
 const previousActive = new Map<number, boolean>();
 type TabGhost = { el: HTMLElement; parent: HTMLElement; index: number; start: number; dur: number; vertical: boolean };
 const tabGhosts: TabGhost[] = [];
+let lastRenderedWorkspaceId: string | null = null;
 
 const runGhost = (ghost: TabGhost): void => {
   const elapsed = performance.now() - ghost.start;
@@ -500,7 +506,16 @@ const renderTabs = (): void => {
     return;
   }
   const { dur } = animDurations();
-  const animate = dur > 0;
+  // A Space switch swaps the whole strip at once: no enter/leave animations for that render.
+  const workspaceSwitched = lastRenderedWorkspaceId !== null && lastRenderedWorkspaceId !== state.currentWorkspaceId;
+  lastRenderedWorkspaceId = state.currentWorkspaceId;
+  if (workspaceSwitched) {
+    for (const ghost of tabGhosts) { ghost.el.getAnimations().forEach((a) => a.cancel()); ghost.el.remove(); }
+    tabGhosts.length = 0;
+    enterStarted.clear();
+    state.tabs.forEach((tab) => knownTabIds.add(tab.id));
+  }
+  const animate = dur > 0 && !workspaceSwitched;
   const now = performance.now();
   // Snapshot the old strip: removed tabs become collapsing ghosts at their old position.
   const oldButtons = new Map<number, { el: HTMLElement; parent: HTMLElement; index: number }>();
@@ -916,6 +931,50 @@ const wireEvents = (): void => {
     await window.browserApi.openSettingsWindow();
   });
 
+  // Pinned menu functions (icon buttons left of the hamburger). Same action as the menu row, run in the main process.
+  const TOOLBAR_PIN_ICONS: Record<string, { path: string; evenodd?: boolean }> = {
+    notes: { evenodd: true, path: "M3.5 2h6.9l2.6 2.6V14h-9.5V2Zm1.5 1.5v9h6.5V5.5H9.5V3.5H5Zm1 4h4v1.2H6V7.5Zm0 2.4h4v1.2H6V9.9Z" },
+    downloads: { path: "M7.25 2h1.5v6.19l2.22-2.22 1.06 1.06L8 11.06 3.97 7.03l1.06-1.06 2.22 2.22V2ZM2.5 12h11v1.5h-11V12Z" },
+    history: { evenodd: true, path: "M8 2a6 6 0 1 0 0 12A6 6 0 0 0 8 2Zm0 1.5a4.5 4.5 0 1 1 0 9 4.5 4.5 0 0 1 0-9Zm-.75 1.75h1.5v2.44l1.78 1.78-1.06 1.06-2.22-2.22V5.25Z" },
+    bookmarks: { evenodd: true, path: "M4 2h8v12L8 11l-4 3V2Zm1.5 1.5v7.6L8 9.2l2.5 1.9V3.5h-5Z" },
+    "new-private-tab": { path: "M5.2 2h5.6l1.2 4H4l1.2-4ZM2 7h12v1.3H2V7Zm1 2.8h3.6a.9.9 0 0 1 .9.9v.4a2.2 2.2 0 0 1-2.2 2.2h-1A2.2 2.2 0 0 1 2.1 11v-.3a.9.9 0 0 1 .9-.9Zm5.5 0h3.6a.9.9 0 0 1 .9.9v.3a2.2 2.2 0 0 1-2.2 2.2h-1a2.2 2.2 0 0 1-2.2-2.2v-.4a.9.9 0 0 1 .9-.9Z" },
+    "dev-tools": { path: "M5.53 4.47 2 8l3.53 3.53 1.06-1.06L4.12 8l2.47-2.47-1.06-1.06Zm4.94 0-1.06 1.06L11.88 8l-2.47 2.47 1.06 1.06L14 8l-3.53-3.53Z" },
+    "compact-toggle": { evenodd: true, path: "M2.5 3h11v10h-11V3Zm1.5 3.5v5h8v-5H4Z" },
+  };
+  const toolbarPinsHost = document.getElementById("toolbar-pins") as HTMLDivElement;
+  const SVG_NS = "http://www.w3.org/2000/svg";
+  const renderToolbarPins = (payload: unknown): void => {
+    const pinned = (payload as { pinned?: Array<{ id?: unknown; label?: unknown }> } | null)?.pinned;
+    toolbarPinsHost.replaceChildren();
+    if (!Array.isArray(pinned)) return;
+    for (const entry of pinned) {
+      const id = typeof entry?.id === "string" ? entry.id : "";
+      const icon = TOOLBAR_PIN_ICONS[id];
+      if (!icon) continue;
+      const label = typeof entry.label === "string" ? entry.label : id;
+      const button = document.createElement("button");
+      button.type = "button";
+      button.className = "nav-btn toolbar-pin";
+      button.dataset.action = id;
+      button.title = label;
+      button.setAttribute("aria-label", label);
+      const svg = document.createElementNS(SVG_NS, "svg");
+      svg.setAttribute("viewBox", "0 0 16 16");
+      svg.setAttribute("aria-hidden", "true");
+      const path = document.createElementNS(SVG_NS, "path");
+      path.setAttribute("d", icon.path);
+      if (icon.evenodd) path.setAttribute("fill-rule", "evenodd");
+      svg.appendChild(path);
+      button.appendChild(svg);
+      onPress(button, () => window.browserApi.runToolbarAction(id));
+      toolbarPinsHost.appendChild(button);
+    }
+  };
+  window.browserApi.onToolbarPinsChanged(renderToolbarPins);
+  // Tooltips are localized in the main process: refetch when the language changes.
+  window.browserApi.onLanguageChanged(() => { void window.browserApi.getToolbarPins().then(renderToolbarPins); });
+  void window.browserApi.getToolbarPins().then(renderToolbarPins);
+
   // Like Chrome: a click that focuses the address bar selects all of it; a
   // click into an already focused field just places the caret.
   let selectAddressOnMouseUp = false;
@@ -954,7 +1013,11 @@ const wireEvents = (): void => {
     addressInput.addEventListener("blur", () => window.browserApi.setCompactKeep({ address: false }));
     window.addEventListener("blur", () => window.browserApi.setCompactKeep({ address: false }));
   }
-  addressInput.addEventListener("blur", () => { addressDirty = false; scheduleRender(); });
+  addressInput.addEventListener("blur", () => {
+    addressDirty = false;
+    addressInput.setSelectionRange(0, 0);
+    scheduleRender();
+  });
   addressInput.addEventListener("keydown", (event) => {
     if (event.key === "Escape") {
       addressDirty = false;
@@ -1106,6 +1169,7 @@ const wireEvents = (): void => {
   window.browserApi.onTabsState((payload) => {
     const isNewTab = payload.tabs.length > state.tabs.length;
     const previousActive = state.activeTabId;
+    const workspaceChanged = !!payload.currentWorkspaceId && payload.currentWorkspaceId !== state.currentWorkspaceId;
     
     state.tabs = payload.tabs;
     state.activeTabId = payload.activeTabId;
@@ -1121,8 +1185,9 @@ const wireEvents = (): void => {
 
     // Auto-scroll to newly created or newly focused tabs (also after the enter animation has settled the layout).
     if (isNewTab || (state.activeTabId && state.activeTabId !== previousActive)) {
-      requestAnimationFrame(() => requestAnimationFrame(() => revealActiveTab(true)));
-      window.setTimeout(() => revealActiveTab(true), animDurations().dur + 60);
+      const smooth = !workspaceChanged;
+      requestAnimationFrame(() => requestAnimationFrame(() => revealActiveTab(smooth)));
+      window.setTimeout(() => revealActiveTab(smooth), animDurations().dur + 60);
     }
   });
 
@@ -1134,6 +1199,14 @@ const wireEvents = (): void => {
     if (resizingSidebar) return;
     Object.assign(layout, next);
     applyLayout();
+  });
+
+  // Focus moved into a page (WebContentsView): the field gets no blur of its own, so drop focus and selection here.
+  window.browserApi.onBlurAddress(() => {
+    if (document.activeElement === addressInput) addressInput.blur();
+    addressInput.setSelectionRange(0, 0);
+    window.getSelection()?.removeAllRanges();
+    selectAddressOnMouseUp = false;
   });
 
   window.browserApi.onFocusAddress(() => {

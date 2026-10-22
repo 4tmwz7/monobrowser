@@ -81,6 +81,10 @@ const hostOf = (url: string): string => {
   }
 };
 
+let unloadGuardBypassed = false;
+/** While true (app is quitting for an update) beforeunload handlers can no longer veto closing. */
+export const setUnloadGuardBypass = (value: boolean): void => { unloadGuardBypassed = value; };
+
 /** Whether a "Leave site?" prompt for this contents is open right now. */
 export const isUnloadPromptOpen = (contents: WebContents): boolean => wired.get(contents)?.prompting === true;
 
@@ -136,6 +140,10 @@ export const wireUnloadGuard = (contents: WebContents, host: UnloadGuardHost): v
   };
 
   contents.on("will-prevent-unload", (event) => {
+    if (unloadGuardBypassed) {
+      event.preventDefault(); // allow the unload: the app is quitting to install an update
+      return;
+    }
     if (gate.consume()) {
       event.preventDefault(); // allow the unload
       return;

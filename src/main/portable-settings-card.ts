@@ -69,7 +69,6 @@ export const renderPortableSettingsCard = (language: Language, autoUpdate = fals
   #portable-card .pt-pw { display:grid; gap:8px; max-width:320px; margin:0 0 13px; }
   #portable-card .pt-pw[hidden], #portable-card [hidden] { display:none; }
   #portable-card .pt-pw input { width:100%; padding:10px; border:2px solid var(--mb-border,#0a0a0a); border-radius:0; outline:0; background:var(--mb-surface,#f0efe9); color:var(--mb-fg,#0a0a0a); font:11px ui-monospace,"Cascadia Mono","Courier New",monospace; }
-  #portable-card .pt-pw input:focus { box-shadow:4px 4px 0 var(--mb-accent,#9c9b95); }
   #portable-card .pt-actions { display:flex; gap:9px; flex-wrap:wrap; align-items:center; }
   #pt-message { min-height:18px; font-size:11px; color:var(--mb-fg,#0a0a0a); } #pt-message.error { color:var(--mb-danger,#8b2931); }
 </style>

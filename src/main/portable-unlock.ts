@@ -41,12 +41,16 @@ export const renderUnlockHtml = (language: Language): string => {
   .hint { color:var(--u-muted); font-size:10px; }
   label { font-size:11px; font-weight:700; text-transform:uppercase; letter-spacing:.08em; }
   input { width:100%; padding:10px; border:2px solid var(--u-border); border-radius:0; outline:0; background:var(--u-surface); color:var(--u-fg); font:inherit; font-size:13px; transition:box-shadow var(--mb-dur,160ms) var(--mb-ease,cubic-bezier(.2,.7,.2,1)); }
-  input:focus { box-shadow:4px 4px 0 var(--u-accent); }
+  input:focus-visible { outline:2px solid var(--u-accent); outline-offset:2px; }
   #error { min-height:16px; color:var(--u-danger); font-size:11px; }
   .actions { display:flex; justify-content:flex-end; gap:8px; }
   button { border:2px solid var(--u-border); border-radius:0; padding:9px 14px; font:inherit; font-size:10px; font-weight:700; letter-spacing:.08em; text-transform:uppercase; cursor:pointer; background:var(--u-surface); color:var(--u-fg); transition:background var(--mb-dur,160ms) var(--mb-ease,cubic-bezier(.2,.7,.2,1)); }
   button.primary { background:var(--u-fg); color:var(--u-bg); }
-  button:hover:not(:disabled), button:focus-visible { background:var(--u-accent); color:var(--u-fg); outline:0; }
+  button:hover:not(:disabled) { background:color-mix(in srgb, var(--u-fg) 16%, var(--u-bg)); }
+  button:active:not(:disabled) { background:color-mix(in srgb, var(--u-fg) 26%, var(--u-bg)); }
+  button.primary:hover:not(:disabled) { background:color-mix(in srgb, var(--u-fg) 82%, var(--u-bg)); }
+  button.primary:active:not(:disabled) { background:color-mix(in srgb, var(--u-fg) 66%, var(--u-bg)); }
+  button:focus-visible { outline:2px solid var(--u-accent); outline-offset:2px; }
   button:disabled { opacity:.45; cursor:not-allowed; }
 </style></head><body>
 <header>MonoBrowser / ${escapeHtml(copy.heading)}</header>

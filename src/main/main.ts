@@ -4,6 +4,8 @@ import {
   themeApplyScript, LEGACY_ALIAS_CSS, themeCss, type ThemeSettings, type ThemeTokens,
 } from "./theme.js";
 import { findHighlightCss, UI_BASE_END_CSS, UI_BASE_START_CSS } from "./ui-base-css.js";
+import { INTERACTION_VARS_CSS } from "./interaction-css.js";
+import { normalizeSettingsTab, type SettingsTab } from "./settings-tabs.js";
 import { app, BrowserWindow, clipboard, dialog, ipcMain, nativeTheme, systemPreferences, session, Menu, webContents, shell, WebContentsView, MenuItemConstructorOptions } from "electron";
 import type { DownloadItem, IpcMainEvent, IpcMainInvokeEvent, WebContents } from "electron";
 import crypto from "node:crypto";
@@ -15,6 +17,7 @@ import { autoUpdater, CancellationToken } from "electron-updater";
 import { exportBookmarksHtml, exportBookmarksJson, parseBookmarksImport } from "./bookmarks-io.js";
 import { buildViewSourceUrl, getErrorCode, isAboutBlankUrl, isFileUrl, isHttpUrl, isInternalSchemeInput, isViewSourceUrl, looksLikeHost, recoverEmbeddedUrl, shortUrlLabel } from "./url-utils.js";
 import { DEFAULT_LAYOUT_SETTINGS, mergeLayoutSettings, normalizeLayoutSettings, type LayoutSettings } from "./layout-settings.js";
+import { PINNABLE_TOOLBAR_ACTIONS, isToolbarActionId, normalizeToolbarPins, setToolbarPinned, type ToolbarActionId } from "./toolbar-pins.js";
 import { DEFAULT_GLANCE_SETTINGS, mergeGlanceSettings, normalizeGlanceSettings, type GlanceSettings } from "./glance-settings.js";
 import { isHostExcepted, isUrlExcepted, normalizeExceptionHost, parseExceptionList } from "./adblock-exceptions.js";
 import { buildGlanceTriggerScript, parseGlanceMessage } from "./glance-trigger.js";
@@ -42,11 +45,13 @@ import { DEFAULT_ANIMATION_SETTINGS, areAnimationsEffective, normalizeAnimationS
 import { DEFAULT_STARTUP_SETTINGS, normalizeStartupSettings, type StartupSettings } from "./startup-settings.js";
 import { clampZoom, normalizeZoomStore, stepZoom, withZoomEntry, zoomOriginKey, type ZoomStore } from "./zoom-utils.js";
 import { resolveDropTargets } from "./drop-utils.js";
+import { buildSwipeTriggerScript, parseSwipeMessage } from "./swipe-navigation.js";
 import { spellcheckLanguagesFor } from "./spellcheck-utils.js";
 import { PROGRESS_HUD_HTML, STATUS_HUD_HTML } from "./hud-html.js";
 import { createPromptOverlay, type PromptOverlay } from "./prompt-overlay.js";
 import { authDedupeKey, buildAuthRequest, buildPermissionRequest, createPendingGroups } from "./prompt-queue.js";
-import { isUnloadPromptOpen, recordCloseIntent, wireUnloadGuard } from "./unload-guard.js";
+import { aggregateStats, STATS_PERIODS, type StatsPeriod } from "./stats-periods.js";
+import { isUnloadPromptOpen, recordCloseIntent, setUnloadGuardBypass, wireUnloadGuard } from "./unload-guard.js";
 import { ONBOARDING_FILE, clampStep, normalizeOnboardingFlag, shouldAutoShowOnboarding } from "./onboarding.js";
 import { renderOnboardingPageHtml } from "./onboarding-page.js";
 import { extractMarkdownUrls, renderMarkdownLite } from "./markdown-lite.js";
@@ -314,15 +319,18 @@ let promptOverlay: PromptOverlay | null = null;
 // margin so the shell (not the page) keeps receiving the pointer moves.
 const SIDEBAR_DRAG_MARGIN = 64;
 let layoutSettingsFilePath = "";
+let toolbarPinsFilePath = "";
+let toolbarPins: ToolbarActionId[] = [];
 let layoutSettings: LayoutSettings = { ...DEFAULT_LAYOUT_SETTINGS };
 let glanceSettingsFilePath = "";
 let glanceSettings: GlanceSettings = { ...DEFAULT_GLANCE_SETTINGS };
 let experimentalSettingsFilePath = "";
 let experimentalSettings: ExperimentalSettings = normalizeExperimentalSettings(null, getSystemInfo());
 let resourceLimiter: ResourceLimiter | null = null;
-// Secret shared only with the isolated-world trigger script (see glance-trigger.ts).
+// Secret shared only with the isolated-world trigger scripts (see glance-trigger.ts, swipe-navigation.ts).
 const glanceNonce = crypto.randomBytes(16).toString("hex");
 const GLANCE_WORLD_ID = 1001;
+const SWIPE_COOLDOWN_MS = 1000;
 // Only one Glance (quick link preview overlay) exists at a time.
 type GlanceRecord = {
   view: WebContentsView;
@@ -343,6 +351,7 @@ let userScriptEntries: UserScript[] = [];
 let downloadRecords: DownloadRecord[] = [];
 let siteOriginRecords: SiteOriginRecord[] = [];
 let appLanguage: AppLanguage = "pl";
+let settingsActiveTab: SettingsTab = "search";
 let searchSettings: SearchSettings = { ...DEFAULT_SEARCH_SETTINGS };
 let statsFilePath = "";
 let statsData: StatsData = createEmptyStatsData();
@@ -895,7 +904,7 @@ const createSplashWindow = async (): Promise<void> => {
     maximizable: false,
     fullscreenable: false,
     alwaysOnTop: true,
-    autoHideMenuBar: true,
+    autoHideMenuBar: false,
     backgroundColor: getSafeStartPageBackgroundColor(startPageBackgroundColor),
     webPreferences: {
       contextIsolation: true,
@@ -1045,6 +1054,7 @@ const applyThemeEverywhere = (): void => {
     if (!tab.view || tab.view.webContents.isDestroyed()) continue;
     try { tab.view.setBackgroundColor(tabCanvasColorFor(tab.view.webContents.getURL())); } catch { /* view may be closing */ }
     if (isThemedTabPage(tab)) pushThemeTo(tab.view.webContents);
+    else if (!tab.internalKind) applySwipeTriggerToContents(tab.view.webContents);
   }
   const payload = getThemeState();
   if (mainWindow && !mainWindow.isDestroyed()) mainWindow.webContents.send("theme:changed", payload);
@@ -1089,7 +1099,7 @@ const renderStartPageHtml = (): string => {
   <title>${copy.title}</title>
   <style>
     @font-face { font-family:"Bebas Neue"; src:url("${bebasNeueFontUrl}") format("truetype"); font-style:normal; font-weight:400; font-display:block; }
-    :root { ${LEGACY_ALIAS_CSS} --sp-bg:var(--mb-bg); --sp-text:var(--mb-fg); --sp-box-bg:var(--mb-surface); --sp-box-text:var(--mb-fg); --sp-field-bg:var(--mb-bg); font-family: ui-monospace, "Cascadia Mono", "Courier New", monospace; }
+    :root { ${LEGACY_ALIAS_CSS} ${INTERACTION_VARS_CSS} --sp-bg:var(--mb-bg); --sp-text:var(--mb-fg); --sp-box-bg:var(--mb-surface); --sp-box-text:var(--mb-fg); --sp-field-bg:var(--mb-bg); font-family: ui-monospace, "Cascadia Mono", "Courier New", monospace; }
     * { box-sizing: border-box; }
     body { min-height:100vh; margin:0; overflow:hidden; background:var(--sp-bg); color:var(--sp-text); cursor:crosshair; }
     body::after { content:""; position:fixed; inset:0; z-index:5; pointer-events:none; opacity:.035; background:url("data:image/svg+xml,%3Csvg viewBox='0 0 180 180' xmlns='http://www.w3.org/2000/svg'%3E%3Cfilter id='n'%3E%3CfeTurbulence type='fractalNoise' baseFrequency='.95' numOctaves='3' stitchTiles='stitch'/%3E%3C/filter%3E%3Crect width='100%25' height='100%25' filter='url(%23n)'/%3E%3C/svg%3E"); }
@@ -1108,7 +1118,8 @@ const renderStartPageHtml = (): string => {
     input { min-width:0; height:62px; padding:0 18px; border:0; outline:0; background:transparent; color:var(--sp-box-text); font:14px ui-monospace,"Cascadia Mono","Courier New",monospace; }
     input::placeholder { color:var(--mb-muted); opacity:1; }
     button { min-width:132px; height:62px; padding:0 22px; border:0; border-left:2px solid var(--sp-box-text); background:var(--sp-box-text); color:var(--mb-bg); font:700 10px ui-monospace,"Cascadia Mono","Courier New",monospace; letter-spacing:.22em; text-transform:uppercase; cursor:pointer; }
-    button:hover { background:var(--accent); color:var(--mb-on-accent); }
+    button:hover { background:var(--ctl-solid-hover); color:var(--mb-bg); }
+    button:active { background:var(--ctl-solid-press); }
     @media(max-width:900px) { body{overflow:auto} main{grid-template-columns:1fr} .brand-panel{min-height:38vh;border-right:0;border-bottom:3px solid var(--sp-text)} .brand{font-size:clamp(48px,20vw,150px)} .search-panel{min-height:62vh} }
     @media(max-width:620px) { .search-panel,.brand-panel{padding:30px 22px} form{grid-template-columns:1fr} button{width:100%;border-left:0;border-top:2px solid var(--sp-box-text)} }
   </style>
@@ -1395,6 +1406,7 @@ const createTabView = (isPrivate: boolean = false, internal: boolean = false): W
   });
   view.webContents.on("focus", dismissOverlaysOnOutsideClick);
   view.webContents.on("focus", () => onTabViewFocused(view.webContents));
+  view.webContents.on("focus", () => releaseAddressFieldOnPageFocus());
 
   if (internal) {
     // Strona wewnętrzna nigdy nie ładuje stron z internetu (ma most preload): linki http(s) otwierają się w nowej karcie.
@@ -1814,6 +1826,21 @@ const applyGlanceTriggerToContents = (contents: WebContents): void => {
   if (contents.isDestroyed()) return;
   contents
     .executeJavaScriptInIsolatedWorld(GLANCE_WORLD_ID, [{ code: buildGlanceTriggerScript(glanceNonce, glanceSettings) }])
+    .catch(() => undefined);
+};
+
+// Gest wstecz/dalej na touchpadzie (swipe-navigation.ts); skrypt musi wiedzieć, w którą stronę jest historia.
+const applySwipeTriggerToContents = (contents: WebContents): void => {
+  if (contents.isDestroyed()) return;
+  const { bg, fg, accent, onAccent } = getThemeTokens();
+  const config = {
+    colors: { bg, fg, accent, onAccent },
+    animate: areAnimationsEffective(),
+    canGoBack: contents.navigationHistory.canGoBack(),
+    canGoForward: contents.navigationHistory.canGoForward(),
+  };
+  contents
+    .executeJavaScriptInIsolatedWorld(GLANCE_WORLD_ID, [{ code: buildSwipeTriggerScript(glanceNonce, config) }])
     .catch(() => undefined);
 };
 
@@ -2321,6 +2348,7 @@ const renderStatsPageHtml = (): string => {
     topSites: "Najczęściej odwiedzane",
     noData: "Brak danych.",
     today: "dziś",
+    tabs: { today: "Dziś", week: "7 dni", month: "30 dni", total: "W sumie" } as Record<StatsPeriod, string>,
     since: "Korzystasz z MonoBrowser od",
   } : {
     documentTitle: "MonoBrowser — Statistics",
@@ -2333,18 +2361,22 @@ const renderStatsPageHtml = (): string => {
     topSites: "Most visited",
     noData: "No data yet.",
     today: "today",
+    tabs: { today: "Today", week: "7 days", month: "30 days", total: "Total" } as Record<StatsPeriod, string>,
     since: "Using MonoBrowser since",
   };
-  const todayKey = getStatsDayKey();
-  const today: StatsDay = statsData.days[todayKey]
-    ?? { seconds: 0, visits: 0, blocked: 0, downloads: 0, searches: 0 };
-  const timeToday = formatUsageDuration(today.seconds);
-  const timeTotal = formatUsageDuration(statsData.totals.seconds);
   const topDomains = Object.entries(statsData.domains)
     .sort((a, b) => b[1] - a[1])
     .slice(0, 5);
-  const todayCount = (value: number): string => `${copy.today}: ${value}`;
-  const timeTodayLabel = `${copy.today}: ${timeToday}`;
+  const renderPeriodRows = (period: StatsPeriod): string => {
+    const values = aggregateStats(statsData.totals, statsData.days, period);
+    return [
+      [copy.pages, String(values.visits)],
+      [copy.time, formatUsageDuration(values.seconds)],
+      [copy.downloads, String(values.downloads)],
+      [copy.blocked, String(values.blocked)],
+      [copy.searches, String(values.searches)],
+    ].map(([label, value]) => `<div class="stats-row"><span class="stats-label">${escapeHtml(label)}</span><strong>${escapeHtml(value)}</strong></div>`).join("");
+  };
   const topRows = topDomains.length > 0
     ? topDomains.map(([hostname, count]) =>
       `<div class="stats-row"><span class="stats-label">${escapeHtml(hostname)}</span><strong>${count}</strong></div>`).join("")
@@ -2455,6 +2487,24 @@ const renderStatsPageHtml = (): string => {
         font-size: 13px;
       }
 
+      .stats-radio { position: absolute; opacity: 0; pointer-events: none; }
+      .stats-tab {
+        display: inline-block;
+        padding: 7px 12px;
+        border: 2px solid var(--black);
+        margin: 0 -2px 8px 0;
+        font-size: 11px;
+        font-weight: 700;
+        letter-spacing: .08em;
+        text-transform: uppercase;
+        cursor: pointer;
+      }
+      .stats-panel { display: none; }
+      #p-today:checked ~ #panel-today { display: flex; }
+      #p-week:checked ~ #panel-week { display: flex; }
+      #p-month:checked ~ #panel-month { display: flex; }
+      #p-total:checked ~ #panel-total { display: flex; }
+
       .stats-today {
         margin-left: auto;
         color: var(--grey);
@@ -2480,12 +2530,9 @@ const renderStatsPageHtml = (): string => {
   <body>
     <header><span>${copy.heading}</span></header>
     <main>
-      <div class="card">
-        <div class="stats-row"><span class="stats-label">${copy.pages}</span><span class="stats-today">${escapeHtml(today.visits > 0 ? todayCount(today.visits) : "")}</span><strong>${statsData.totals.visits}</strong></div>
-        <div class="stats-row"><span class="stats-label">${copy.time}</span><span class="stats-today">${escapeHtml(today.seconds > 0 ? timeTodayLabel : "")}</span><strong>${escapeHtml(timeTotal)}</strong></div>
-        <div class="stats-row"><span class="stats-label">${copy.downloads}</span><span class="stats-today">${escapeHtml(today.downloads > 0 ? todayCount(today.downloads) : "")}</span><strong>${statsData.totals.downloads}</strong></div>
-        <div class="stats-row"><span class="stats-label">${copy.blocked}</span><span class="stats-today">${escapeHtml(today.blocked > 0 ? todayCount(today.blocked) : "")}</span><strong>${statsData.totals.blocked}</strong></div>
-        <div class="stats-row"><span class="stats-label">${copy.searches}</span><span class="stats-today">${escapeHtml(today.searches > 0 ? todayCount(today.searches) : "")}</span><strong>${statsData.totals.searches}</strong></div>
+      <div class="stats-tabs">
+        ${STATS_PERIODS.map((period) => `<input type="radio" name="period" id="p-${period}" class="stats-radio"${period === "total" ? " checked" : ""} /><label for="p-${period}" class="stats-tab">${escapeHtml(copy.tabs[period])}</label>`).join("")}
+        ${STATS_PERIODS.map((period) => `<div class="card stats-panel" id="panel-${period}">${renderPeriodRows(period)}</div>`).join("")}
       </div>
       <h2>${copy.topSites}</h2>
       <div class="card">${topRows}</div>
@@ -3013,10 +3060,6 @@ const renderHistoryPageHtml = (entries: HistoryEntry[]): string => {
         transition: background var(--mb-dur, 120ms);
       }
 
-      .clear-history:hover:not(:disabled) {
-        background: var(--accent);
-      }
-
       .clear-history:disabled {
         opacity: 0.45;
         cursor: not-allowed;
@@ -3062,7 +3105,7 @@ const renderHistoryPageHtml = (entries: HistoryEntry[]): string => {
       }
 
       li:hover {
-        background: var(--mb-surface-2);
+        background: var(--ctl-hover-bg);
       }
 
       a {
@@ -3632,7 +3675,6 @@ const INTERNAL_CONFIRM_STYLES = `
   #mb-confirm .mb-actions { display:flex; justify-content:flex-end; gap:8px; }
   #mb-confirm button { border:2px solid var(--black); border-radius:0; padding:8px 11px; font:inherit; font-size:11px; font-weight:700; letter-spacing:.06em; text-transform:uppercase; cursor:pointer; background:var(--white); color:var(--black); }
   #mb-confirm button[value="ok"] { background:var(--black); color:var(--white); }
-  #mb-confirm button:hover, #mb-confirm button:focus-visible { background:var(--accent); color:var(--mb-on-accent); outline:0; }
 `;
 
 const renderInternalConfirmMarkup = (): string => {
@@ -3658,10 +3700,8 @@ const INTERNAL_WINDOW_STYLES = `
   button, input { font: inherit; }
   button { border:2px solid var(--black); background:var(--black); color:var(--white); border-radius:0; padding:8px 11px; font-size:11px; font-weight:700; letter-spacing:.06em; text-transform:uppercase; cursor:pointer; }
   header button { border-color:var(--white); background:var(--white); color:var(--black); }
-  button:hover:not(:disabled) { background:var(--accent); color:var(--mb-on-accent); }
   button:disabled { opacity: .45; cursor: not-allowed; }
   button.danger, button.secondary { border-color:var(--black); background:var(--white); color:var(--black); }
-  button.secondary:hover:not(:disabled) { background:var(--accent); color:var(--mb-on-accent); }
   header button.danger { border-color:var(--white); }
   main { padding: 14px 18px; }
   .empty, .muted { color:var(--grey); }
@@ -3795,14 +3835,12 @@ const renderSiteDataPageHtml = (): string => {
   header { align-items: stretch; flex-direction: column; }
   .heading { display:flex; align-items:center; justify-content:space-between; }
   #filter { width:100%; border:2px solid var(--black); background:var(--white); color:var(--black); border-radius:0; padding:10px 11px; outline:none; }
-  #filter:focus { box-shadow:4px 4px 0 var(--accent); }
   table { width:100%; border-collapse:collapse; background:var(--white); border:2px solid var(--black); }
   th,td { padding:11px 12px; border-bottom:1px solid var(--black); text-align:left; font-size:12px; }
   th { color:var(--grey); font-size:11px; letter-spacing:.08em; text-transform:uppercase; } td:first-child { overflow-wrap:anywhere; }
   th:last-child, td:last-child { width:1%; white-space:nowrap; text-align:right; }
   /* Per-row destructive action: secondary outline in the danger color (not a filled primary). */
   button.row-danger { background:transparent; border-color:var(--mb-danger); color:var(--mb-danger); }
-  button.row-danger:hover:not(:disabled), button.row-danger:focus-visible { background:var(--mb-danger); border-color:var(--mb-danger); color:var(--mb-bg); }
   footer { margin-top:16px; padding:15px; background:var(--white); border:2px solid var(--black); border-radius:0; }
   footer h2 { margin:0 0 6px; font-size:12px; letter-spacing:.1em; text-transform:uppercase; } footer .muted { font-size:12px; } .global-actions { display:flex; flex-wrap:wrap; gap:8px; margin-top:10px; }
   dialog { width:min(520px,calc(100vw - 30px)); border:3px solid var(--black); border-radius:0; padding:0; background:var(--white); color:var(--black); }
@@ -3884,6 +3922,8 @@ const renderSettingsPageHtml = (): string => {
     glanceHeading: "Glance", glanceDescription: "Szybki podgląd linków bez otwierania ich w nowej karcie", glanceEnable: "Włącz Glance",
     glanceTriggerLabel: "Sposób wywołania", glanceAlt: "Alt + klik", glanceCtrl: "Ctrl + klik", glanceShift: "Shift + klik", glanceLongPress: "Długie przytrzymanie",
     animHeading: "Animacje", animDescription: "Płynne przejścia menu, kart i paneli. Wyłączane też automatycznie, gdy system prosi o ograniczenie ruchu.", animOn: "Włączone", animOff: "Wyłączone", animOnHint: "Płynne przejścia menu i kart.", animOffHint: "Zmiany natychmiast, bez ruchu.",
+    toolbarHeading: "Pasek narzędzi", toolbarDescription: "Wybierz funkcje, które mają mieć własny przycisk na pasku narzędzi. Zmiana działa od razu.", toolbarNames: { notes: "Notatki", downloads: "Pobieranie", history: "Historia", bookmarks: "Zakładka bieżącej strony", "new-private-tab": "Karta prywatna", "dev-tools": "Narzędzia deweloperskie", "compact-toggle": "Tryb kompaktowy" } as Record<ToolbarActionId, string>,
+    languageHeading: "Język", languageDescription: "Język interfejsu przeglądarki. Zmiana działa od razu.", languagePolishDescription: "Interfejs w języku polskim.", languageEnglishDescription: "Interface in English.",
     startupHeading: "Przy starcie", startupDescription: "Wybierz, co ma się otworzyć po uruchomieniu przeglądarki. Zmiana działa od razu.",
     startupRestore: "Przywróć poprzednią sesję", startupRestoreDescription: "Otwiera karty z ostatniego uruchomienia; karty prywatne nigdy nie są zapisywane.",
     startupNewTab: "Otwórz nową kartę", startupNewTabDescription: "Zaczyna od pustej karty startowej.",
@@ -3924,6 +3964,8 @@ const renderSettingsPageHtml = (): string => {
     glanceHeading: "Glance", glanceDescription: "Get a quick overview of your links without opening them in a new tab", glanceEnable: "Enable Glance",
     glanceTriggerLabel: "Trigger method", glanceAlt: "Alt + click", glanceCtrl: "Ctrl + click", glanceShift: "Shift + click", glanceLongPress: "Long press",
     animHeading: "Animations", animDescription: "Smooth transitions for menus, tabs and panels. Also turned off automatically when the system asks for reduced motion.", animOn: "On", animOff: "Off", animOnHint: "Smooth menu and tab transitions.", animOffHint: "Instant changes, no motion.",
+    toolbarHeading: "Toolbar", toolbarDescription: "Choose which functions get their own button on the toolbar. Changes apply immediately.", toolbarNames: { notes: "Notes", downloads: "Downloads", history: "History", bookmarks: "Bookmark current page", "new-private-tab": "Private tab", "dev-tools": "Developer tools", "compact-toggle": "Compact mode" } as Record<ToolbarActionId, string>,
+    languageHeading: "Language", languageDescription: "Language of the browser interface. Changes apply immediately.", languagePolishDescription: "Interface in Polish.", languageEnglishDescription: "Interface in English.",
     startupHeading: "On startup", startupDescription: "Choose what opens when the browser starts. Changes apply immediately.",
     startupRestore: "Restore the previous session", startupRestoreDescription: "Reopens the tabs from the last run; private tabs are never saved.",
     startupNewTab: "Open a new tab", startupNewTabDescription: "Starts with an empty start page.",
@@ -3949,8 +3991,6 @@ const renderSettingsPageHtml = (): string => {
   header h1 { font-size:13px; font-weight:700; letter-spacing:.12em; text-transform:uppercase; }
   .tabs { width:min(760px,100%); margin:0 auto; padding:16px 24px 0; display:flex; flex-wrap:wrap; row-gap:8px; }
   .tab { border:2px solid var(--black); border-radius:0; background:var(--white); color:var(--black); padding:10px 18px; font-size:11px; font-weight:700; letter-spacing:.08em; text-transform:uppercase; cursor:pointer; margin-right:-2px; }
-  .tab.active { background:var(--black); color:var(--white); }
-  .tab:hover:not(.active) { background:var(--accent); color:var(--mb-on-accent); }
   main { width:min(760px,100%); margin:0 auto; padding:24px; display:grid; gap:16px; }
   .panel[hidden] { display:none; }
   .card { border:3px solid var(--black); border-radius:0; background:var(--white); padding:20px; box-shadow:none; }
@@ -3959,9 +3999,6 @@ const renderSettingsPageHtml = (): string => {
   .engine { position:relative; display:block; min-width:0; }
   .engine input { position:absolute; opacity:0; pointer-events:none; }
   .engine-body { height:100%; min-height:94px; padding:13px; border:2px solid var(--line); border-radius:0; background:var(--surface); cursor:pointer; display:block; transition:background var(--mb-dur,120ms),border-color var(--mb-dur,120ms),box-shadow var(--mb-dur,120ms); }
-  .engine-body:hover { background:var(--surface-2); }
-  .engine input:checked + .engine-body { border-color:var(--black); background:var(--surface-2); }
-  .engine input:focus-visible + .engine-body, .runat input:focus-visible + .runat-body { outline:2px solid var(--accent); outline-offset:2px; }
   .engine-name { display:flex; align-items:center; gap:8px; margin-bottom:7px; font-size:13px; font-weight:650; }
   .engine-mark { width:9px; height:9px; border:1px solid currentColor; border-radius:0; background:transparent; }
   input:checked + .engine-body .engine-mark { background:var(--black); }
@@ -3969,12 +4006,11 @@ const renderSettingsPageHtml = (): string => {
   .custom-field { margin-top:14px; display:grid; gap:7px; }
   .custom-field label { color:var(--black); font-size:11px; font-weight:700; text-transform:uppercase; letter-spacing:.08em; }
   #custom-url { width:100%; padding:11px; border:2px solid var(--black); border-radius:0; outline:0; background:var(--white); color:var(--black); font:inherit; font-size:12px; }
-  #custom-url:focus { box-shadow:4px 4px 0 var(--accent); } #custom-url:disabled { opacity:.42; }
+  #custom-url:disabled { opacity:.42; }
   .hint { color:var(--grey); font-size:11px; } code { color:var(--black); font-weight:700; }
   .actions { display:flex; align-items:center; justify-content:space-between; gap:12px; margin-top:17px; }
   #message, #scripts-message { min-height:18px; color:var(--black); font-size:11px; } #message.error, #scripts-message.error { color:var(--mb-danger); }
   #save { border:2px solid var(--black); border-radius:0; background:var(--black); color:var(--white); font-weight:700; text-transform:uppercase; letter-spacing:.12em; }
-  #save:hover { background:var(--accent); color:var(--mb-on-accent); }
   .blocker-row { display:flex; align-items:center; justify-content:space-between; gap:16px; }
   .blocker-copy { display:grid; gap:4px; } .blocker-name { font-size:11px; font-weight:700; }
   .badge { display:inline-flex; align-items:center; gap:7px; padding:7px 10px; border:2px solid var(--black); border-radius:0; color:var(--white); background:var(--black); font-size:11px; text-transform:uppercase; letter-spacing:.1em; white-space:nowrap; }
@@ -3982,7 +4018,6 @@ const renderSettingsPageHtml = (): string => {
   .badge.off::before { background:transparent; box-shadow:inset 0 0 0 1px var(--white); }
   .scripts-toolbar { display:flex; align-items:center; gap:9px; flex-wrap:wrap; margin-bottom:15px; }
   button.secondary { border:2px solid var(--black); background:var(--white); color:var(--black); }
-  button.secondary:hover { background:var(--accent); color:var(--mb-on-accent); }
   .scripts-toolbar #scripts-message { margin-left:auto; }
   .script-row { padding:12px 0; border-bottom:2px solid var(--black); display:grid; gap:7px; }
   .script-row:last-child { border-bottom:none; padding-bottom:2px; }
@@ -3994,26 +4029,22 @@ const renderSettingsPageHtml = (): string => {
   .limit-row { display:grid; grid-template-columns:minmax(0,1fr) 110px 72px; gap:10px; align-items:center; }
   .limit-row input[type=range] { width:100%; min-width:0; margin:0; accent-color:var(--black); }
   .limit-row input[type=number], .limit-row select { width:100%; min-width:0; height:38px; padding:0 9px; border:2px solid var(--black); border-radius:0; outline:0; background:var(--white); color:var(--black); font:inherit; font-size:12px; }
-  .limit-row input[type=number]:focus, .limit-row select:focus { box-shadow:4px 4px 0 var(--accent); }
   .field .hint, #cpu-status, #cpu-info, #ram-info { line-height:1.6; }
   .field > label { font-size:11px; font-weight:700; text-transform:uppercase; letter-spacing:.08em; }
   .field input[type=text], .field textarea { width:100%; padding:10px; border:2px solid var(--black); border-radius:0; outline:0; background:var(--white); color:var(--black); font:inherit; font-size:12px; }
   .field textarea { resize:vertical; }
-  .field input:focus, .field textarea:focus { box-shadow:4px 4px 0 var(--accent); }
   #script-code { min-height:220px; }
   .runat-row { display:flex; gap:9px; flex-wrap:wrap; }
   .runat { position:relative; display:block; }
   .runat input { position:absolute; opacity:0; pointer-events:none; }
   .runat-body { display:block; padding:8px 12px; border:2px solid var(--line); background:var(--surface); border-radius:0; cursor:pointer; font-size:11px; font-weight:700; }
-  .runat input:checked + .runat-body { border-color:var(--black); box-shadow:4px 4px 0 var(--accent); }
   .checkbox-row { display:flex; align-items:center; gap:9px; font-size:11px; font-weight:700; text-transform:uppercase; letter-spacing:.08em; cursor:pointer; }
   .checkbox-row input { width:15px; height:15px; accent-color:var(--black); }
   .checkbox-row:has(input:disabled) { color:var(--grey); opacity:.55; cursor:not-allowed; } .checkbox-row input:disabled { cursor:not-allowed; }
   #glance-trigger { width:100%; max-width:320px; padding:10px; border:2px solid var(--black); border-radius:0; outline:0; background:var(--white); color:var(--black); font:inherit; font-size:12px; }
-  #glance-trigger:focus { box-shadow:4px 4px 0 var(--accent); } #glance-trigger:disabled { opacity:.42; }
+  #glance-trigger:disabled { opacity:.42; }
   .editor-actions { display:flex; justify-content:flex-end; gap:9px; margin-top:16px; }
   .editor-actions button.primary { border:2px solid var(--black); background:var(--black); color:var(--white); font-weight:700; text-transform:uppercase; letter-spacing:.1em; }
-  .editor-actions button.primary:hover { background:var(--accent); color:var(--mb-on-accent); }
   .color-grid { display:grid; grid-template-columns:repeat(auto-fill,minmax(230px,1fr)); gap:9px; margin-bottom:4px; }
   .color-item { display:flex; align-items:center; gap:9px; padding:8px; border:2px solid var(--black); font-size:11px; font-weight:700; text-transform:uppercase; letter-spacing:.06em; }
   .color-item input[type=color] { width:34px; height:26px; padding:0; border:2px solid var(--black); border-radius:0; background:transparent; cursor:pointer; flex:none; }
@@ -4022,9 +4053,6 @@ const renderSettingsPageHtml = (): string => {
   .theme-grid { display:grid; grid-template-columns:repeat(auto-fill,minmax(168px,1fr)); gap:10px; align-items:stretch; }
   .theme-btn { position:relative; min-width:0; height:100%; display:flex; flex-direction:column; align-items:stretch; gap:6px; padding:8px; border:2px solid var(--line); border-radius:0; background:var(--surface); color:var(--black); font:inherit; font-size:11px; font-weight:700; text-transform:uppercase; letter-spacing:.06em; text-align:left; cursor:pointer; transition:background var(--mb-dur,120ms),border-color var(--mb-dur,120ms),box-shadow var(--mb-dur,120ms); }
   .theme-btn .theme-name { padding-right:18px; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
-  .theme-btn:hover:not(:disabled) { background:var(--surface-2); color:var(--black); }
-  .theme-btn:focus-visible { outline:2px solid var(--accent); outline-offset:2px; }
-  .theme-btn.selected { border-color:var(--black); background:var(--surface-2); }
   .theme-btn.selected::after { content:"\\2713"; position:absolute; top:6px; right:8px; font-size:13px; line-height:1; }
   .theme-btn { min-height:76px; }
   #animations-card .engine-body { min-height:76px; }
@@ -4068,6 +4096,13 @@ ${UI_BASE_END_CSS}
       <span id="exceptions-message" class="hint" role="status"></span></section>
   </section>
   <section id="panel-browsing" class="panel" hidden>
+    <section class="card" id="language-card">
+      <h2>${copy.languageHeading}</h2><p class="description">${copy.languageDescription}</p>
+      <div class="engines" style="grid-template-columns:repeat(2,1fr)">
+        <label class="engine"><input type="radio" name="app-language" value="pl"${appLanguage === "pl" ? " checked" : ""}><span class="engine-body"><span class="engine-name"><i class="engine-mark"></i>Polski</span><span class="engine-copy">${copy.languagePolishDescription}</span></span></label>
+        <label class="engine"><input type="radio" name="app-language" value="en"${appLanguage === "en" ? " checked" : ""}><span class="engine-body"><span class="engine-name"><i class="engine-mark"></i>English</span><span class="engine-copy">${copy.languageEnglishDescription}</span></span></label>
+      </div>
+    </section>
     <section class="card" id="layout-card">
       <h2>${copy.layoutHeading}</h2><p class="description">${copy.layoutDescription}</p>
       <div class="engines" style="grid-template-columns:repeat(2,1fr)">
@@ -4081,6 +4116,10 @@ ${UI_BASE_END_CSS}
       <div class="field"><label class="checkbox-row" for="glance-enabled"><input id="glance-enabled" type="checkbox" checked>${copy.glanceEnable}</label></div>
       <div class="field"><label for="glance-trigger">${copy.glanceTriggerLabel}</label>
         <select id="glance-trigger"><option value="alt">${copy.glanceAlt}</option><option value="ctrl">${copy.glanceCtrl}</option><option value="shift">${copy.glanceShift}</option><option value="longpress">${copy.glanceLongPress}</option></select></div>
+    </section>
+    <section class="card" id="toolbar-card">
+      <h2>${copy.toolbarHeading}</h2><p class="description">${copy.toolbarDescription}</p>
+      <div class="field" style="display:grid;grid-template-columns:repeat(auto-fill,minmax(220px,1fr));gap:12px 24px">${PINNABLE_TOOLBAR_ACTIONS.map((id) => `<label class="checkbox-row" for="toolbar-pin-${id}"><input id="toolbar-pin-${id}" type="checkbox" data-toolbar-id="${id}">${escapeHtml(copy.toolbarNames[id])}</label>`).join("")}</div>
     </section>
     <section class="card" id="startup-card">
       <h2>${copy.startupHeading}</h2><p class="description">${copy.startupDescription}</p>
@@ -4179,7 +4218,10 @@ ${UI_BASE_END_CSS}
     tabs.forEach((tab) => tab.classList.toggle('active', tab.dataset.tab === name));
     Object.keys(panels).forEach((key) => { panels[key].hidden = key !== name; });
   };
-  tabs.forEach((tab) => tab.addEventListener('click', () => activate(tab.dataset.tab)));
+  tabs.forEach((tab) => tab.addEventListener('click', () => { activate(tab.dataset.tab); window.browserApi.rememberSettingsTab(tab.dataset.tab); }));
+  // The page reloads when the language changes: restore the tab the user was on.
+  const initialTab = ${JSON.stringify(settingsActiveTab)};
+  if (tabs.some((tab) => tab.dataset.tab === initialTab && !tab.hidden)) activate(initialTab);
 
   // Workspaces: rename / icon / color / reorder / delete (deleting asks in a window popup).
   const wsRows = document.getElementById('ws-rows');
@@ -4312,12 +4354,26 @@ ${UI_BASE_END_CSS}
   }));
   window.browserApi.getAnimationSettings().then((settings) => showAnim(settings.enabled)).catch(() => undefined);
 
+  const languageInputs = Array.from(document.querySelectorAll('input[name=app-language]'));
+  languageInputs.forEach((input) => input.addEventListener('change', () => { if (input.checked) void window.browserApi.setLanguage(input.value); }));
+
   const startupInputs = Array.from(document.querySelectorAll('input[name=startup-mode]'));
   const showStartup = (value) => startupInputs.forEach((input) => { input.checked = input.value === value; });
   startupInputs.forEach((input) => input.addEventListener('change', async () => {
     if (input.checked) showStartup((await window.browserApi.setStartupSettings({ startupMode: input.value })).startupMode);
   }));
   window.browserApi.getStartupSettings().then((settings) => showStartup(settings.startupMode)).catch(() => undefined);
+
+  const toolbarBoxes = Array.from(document.querySelectorAll('input[data-toolbar-id]'));
+  const showToolbarPins = (payload) => {
+    const pinned = new Set(((payload && payload.pinned) || []).map((entry) => entry.id));
+    toolbarBoxes.forEach((box) => { box.checked = pinned.has(box.dataset.toolbarId); });
+  };
+  toolbarBoxes.forEach((box) => box.addEventListener('change', async () => {
+    showToolbarPins(await window.browserApi.setToolbarPinned(box.dataset.toolbarId, box.checked));
+  }));
+  window.browserApi.getToolbarPins().then(showToolbarPins).catch(() => undefined);
+  window.browserApi.onToolbarPinsChanged(showToolbarPins);
 
   const glanceEnabled = document.getElementById('glance-enabled');
   const glanceTrigger = document.getElementById('glance-trigger');
@@ -5055,22 +5111,26 @@ const getBookmarkMenuLabel = (bookmark: BookmarkEntry): string => {
 
 const POPUP_MENU_STYLES = `
   ${UI_BASE_START_CSS}
-  :root { ${LEGACY_ALIAS_CSS} font-family:ui-monospace,"Cascadia Mono","Courier New",monospace; }
+  :root { ${LEGACY_ALIAS_CSS} ${INTERACTION_VARS_CSS} font-family:ui-monospace,"Cascadia Mono","Courier New",monospace; }
   * { box-sizing:border-box; }
   button,input,select,textarea { font:inherit; }
   html,body { width:100%; height:100%; margin:0; overflow:hidden; background:transparent; }
   body { padding:7px 9px 9px 7px; color:var(--black); }
+  /* Popup hanging above its button (bottom edge fixed): submenus open upwards, so the clicked header stays under the cursor. */
+  body.mb-grow-up details[open] { display:flex; flex-direction:column-reverse; }
   .popup { width:100%; height:100%; overflow:auto; scrollbar-width:thin; border:3px solid var(--black); border-radius:0; background:var(--white); box-shadow:5px 5px 0 var(--accent); }
   .nav-popup { height:auto; max-height:calc(100vh - 16px); overflow:hidden; }
   .nav-popup.height-limited { overflow:auto; }
   .popup::after { content:""; position:fixed; inset:7px 9px 9px 7px; pointer-events:none; opacity:.025; background:url("data:image/svg+xml,%3Csvg viewBox='0 0 180 180' xmlns='http://www.w3.org/2000/svg'%3E%3Cfilter id='n'%3E%3CfeTurbulence type='fractalNoise' baseFrequency='.95' numOctaves='3' stitchTiles='stitch'/%3E%3C/filter%3E%3Crect width='100%25' height='100%25' filter='url(%23n)'/%3E%3C/svg%3E"); }
   a,summary { position:relative; z-index:1; color:var(--black); text-decoration:none; }
   .menu-item,summary { min-height:44px; padding:0 14px; display:flex; align-items:center; gap:10px; border:0; border-bottom:1px solid var(--black); background:var(--white); font-size:12px; font-weight:700; letter-spacing:.04em; cursor:pointer; user-select:none; }
-  .menu-item:hover,.menu-item:focus-visible,summary:hover,summary:focus-visible { outline:0; background:var(--black); color:var(--white); }
+  /* Same interaction language as the toolbar: quiet hover fill, stronger pressed fill, accent outline for keyboard focus. */
+  .menu-item:hover,summary:hover { background:var(--ctl-hover-bg); color:var(--black); }
+  .menu-item:focus-visible,summary:focus-visible { outline:2px solid var(--accent); outline-offset:-2px; background:var(--ctl-hover-bg); color:var(--black); }
+  .menu-item:active,summary:active { background:var(--ctl-press-bg); }
   .menu-item.disabled { color:var(--grey); cursor:not-allowed; }
   .menu-item.disabled:hover { background:var(--white); color:var(--grey); }
   .shortcut { margin-left:auto; color:var(--grey); font-size:11px; font-weight:400; }
-  .menu-item:hover .shortcut,.menu-item:focus-visible .shortcut { color:var(--white); }
   .menu-heading { position:relative; z-index:1; padding:9px 14px 6px; color:var(--grey); font-size:11px; font-weight:700; letter-spacing:.1em; text-transform:uppercase; background:var(--white); border-bottom:1px solid var(--black); }
   .menu-separator { height:7px; border-bottom:2px solid var(--black); background:var(--mb-surface-2); }
   details { border:0; }
@@ -5080,20 +5140,21 @@ const POPUP_MENU_STYLES = `
   summary:has(.summary-count)::after { margin-left:0; }
   .summary-count { margin-left:auto; color:inherit; font-size:11px; font-weight:700; font-variant-numeric:tabular-nums; opacity:.75; }
   details[open] > summary { background:var(--mb-surface-2); color:var(--black); border-bottom-color:transparent; }
-  details[open] > summary:hover,details[open] > summary:focus-visible { background:var(--black); color:var(--white); }
+  details[open] > summary:hover,details[open] > summary:focus-visible { background:var(--ctl-hover-bg); color:var(--black); }
   details[open] > summary::after { transform:rotate(45deg); }
   .submenu { border-bottom:1px solid var(--black); background:var(--mb-surface); padding:0 0 4px; display:grid; gap:0; }
   .submenu .menu-item { min-height:36px; border:0; border-left:3px solid var(--accent); background:transparent; color:var(--black); padding:0 14px 0 18px; font-size:12px; font-weight:600; }
   .submenu .menu-item .menu-label { color:inherit; }
-  .submenu .menu-item:hover,.submenu .menu-item:focus-visible { background:var(--black); color:var(--white); }
+  .submenu .menu-item:hover,.submenu .menu-item:focus-visible { background:var(--ctl-hover-bg); color:var(--black); }
   .bookmark-list { max-height:190px; overflow:auto; display:grid; gap:5px; }
   .bookmark-row { display:grid; grid-template-columns:minmax(0,1fr) 36px; }
   .bookmark-row .menu-item { min-width:0; border-right:0; }
   .bookmark-title { overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
   .remove { justify-content:center; padding:0; font-size:15px!important; }
+  .nav-menu .menu-item,.nav-menu summary { min-height:36px; }
   .danger { background:var(--black)!important; color:var(--white)!important; }
-  .danger:hover { background:var(--accent)!important; color:var(--mb-on-accent)!important; }
-  .selected::before { content:"■"; font-size:8px; }
+  .danger:hover { background:var(--ctl-solid-hover)!important; color:var(--white)!important; }
+  .danger:active { background:var(--ctl-solid-press)!important; }
   .popup-title { position:relative; z-index:1; margin:0; padding:15px 16px 13px; border-bottom:3px solid var(--black); background:var(--mb-surface); color:var(--black); font-size:13px; letter-spacing:.12em; text-transform:uppercase; }
   .info-body { position:relative; z-index:1; padding:12px; display:grid; gap:10px; }
   .popup-sub { display:block; margin-top:5px; color:var(--grey); font-size:11px; font-weight:400; letter-spacing:0; text-transform:none; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
@@ -5119,7 +5180,9 @@ const POPUP_MENU_STYLES = `
   .info-row strong { text-align:right; font-size:12px; }
   .notice { border:2px solid var(--black); padding:9px 10px; background:var(--mb-surface-2); color:var(--black); font-size:11px; line-height:1.45; }
   .info-action { min-height:42px; border:2px solid var(--black); display:flex; align-items:center; justify-content:center; background:var(--black); color:var(--white); font-size:11px; font-weight:700; letter-spacing:.1em; text-transform:uppercase; }
-  .info-action:hover,.info-action:focus-visible { outline:0; background:var(--accent); color:var(--mb-on-accent); }
+  .info-action:hover { background:var(--ctl-solid-hover); color:var(--white); }
+  .info-action:active { background:var(--ctl-solid-press); }
+  .info-action:focus-visible { outline:2px solid var(--accent); outline-offset:-4px; }
   .context-popup { overflow:hidden; }
   .context-groups { padding:8px; display:grid; grid-template-columns:repeat(3,minmax(0,1fr)); align-items:start; gap:8px; }
   .context-group { min-width:0; border:2px solid var(--black); background:var(--white); }
@@ -5142,8 +5205,11 @@ const POPUP_HEIGHT_REPORT_SCRIPT = `<script>
   if (!popup) return;
   const reportHeight = () => {
     const popupBorderHeight = popup.getBoundingClientRect().height - popup.clientHeight;
-    const windowPaddingHeight = window.innerHeight - popup.getBoundingClientRect().height;
-    const height = Math.ceil(popup.scrollHeight + popupBorderHeight + windowPaddingHeight + 1);
+    // Only the body padding around the popup counts. (Measuring innerHeight minus the popup counted
+    // the view's own slack too, so the menu could grow but never shrink back after a submenu closed.)
+    const bodyStyle = getComputedStyle(document.body);
+    const bodyPaddingHeight = parseFloat(bodyStyle.paddingTop) + parseFloat(bodyStyle.paddingBottom);
+    const height = Math.ceil(popup.scrollHeight + popupBorderHeight + bodyPaddingHeight + 1);
     location.href = 'monobrowser-menu://resize?height=' + height;
   };
   document.querySelectorAll('details').forEach(details => details.addEventListener('toggle', () => requestAnimationFrame(reportHeight)));
@@ -5192,9 +5258,11 @@ const retireOverlayView = (view: WebContentsView, remove: () => void): void => {
 };
 const closePopup = (restoreFocus = false, animate = true): void => {
   const active = activePopup;
-  activePopup = null;
-  popupToken += 1;
   if (!active) return;
+  activePopup = null;
+  // Bump only for a real close: a no-op close (the toggle press right after a blur dismissal)
+  // must not invalidate the pending fade-out hide, or the invisible popup keeps catching the mouse.
+  popupToken += 1;
   if (popupView && !popupView.webContents.isDestroyed()) {
     const hideNow = (): void => {
       if (!popupView || popupView.webContents.isDestroyed()) return;
@@ -5314,7 +5382,8 @@ const ensurePopupView = (): WebContentsView | null => {
         active.bounds = resized.bounds;
         view.setBounds(active.bounds);
         void contents.executeJavaScript(
-          `document.querySelector('.nav-popup')?.classList.toggle('height-limited', ${heightLimited});`,
+          // Without the limit the popup has no scrollbar: drop a scroll offset left from an opened submenu.
+          `{ const popup = document.querySelector('.nav-popup'); if (popup) { popup.classList.toggle('height-limited', ${heightLimited}); if (!${heightLimited}) popup.scrollTop = 0; } }`,
           true,
         ).catch(() => undefined);
       }
@@ -5414,7 +5483,8 @@ const openStyledPopup = async (
   attachPopupViewOnTop();
   view.setVisible(true);
   // A fade-out script queued by closePopup for the previous popup page can land in this new page: clear it.
-  view.webContents.executeJavaScript("document.body.classList.remove('mb-out');document.body.classList.add('mb-in')", true).catch(() => undefined);
+  const growUp = activePopup.fixedEdge === "bottom";
+  view.webContents.executeJavaScript(`document.body.classList.remove('mb-out');document.body.classList.add('mb-in');document.body.classList.toggle('mb-grow-up', ${growUp})`, true).catch(() => undefined);
   view.webContents.invalidate();
   view.webContents.focus();
   return true;
@@ -5435,7 +5505,8 @@ const openMessagePopup = async (
 <meta http-equiv="Content-Security-Policy" content="default-src 'none'; style-src 'unsafe-inline'; script-src 'unsafe-inline'"><title>${escapeHtml(title)}</title><style id="mb-theme">${themeCss(getThemeTokens())}</style><style>${POPUP_MENU_STYLES}
   .message-text { position:relative; z-index:1; border:2px solid var(--black); padding:12px; font-size:12px; line-height:1.5; overflow-wrap:anywhere; white-space:pre-wrap; }
   .info-action.secondary { background:var(--white); color:var(--black); }
-  .info-action.secondary:hover, .info-action.secondary:focus-visible { background:var(--accent); }
+  .info-action.secondary:hover { background:var(--ctl-hover-bg); color:var(--black); }
+  .info-action.secondary:active { background:var(--ctl-press-bg); }
 </style></head><body>
 <section class="popup"><h1 class="popup-title">${escapeHtml(title)}</h1><div class="info-body">
   <div class="message-text">${escapeHtml(message)}</div>
@@ -5448,6 +5519,68 @@ const openMessagePopup = async (
   });
 };
 
+// ── Toolbar pins: menu functions pinned as icon buttons next to the hamburger button ──
+const loadToolbarPins = async (): Promise<void> => {
+  try {
+    toolbarPins = normalizeToolbarPins(JSON.parse(await fs.readFile(toolbarPinsFilePath, "utf8")));
+  } catch {
+    toolbarPins = [];
+  }
+};
+
+/** Tooltip text (with shortcut hint) of each pinnable function, in the UI language. */
+const getToolbarActionLabels = (): Record<ToolbarActionId, string> => appLanguage === "pl" ? {
+  notes: "Notatki (Ctrl+Shift+M)",
+  downloads: "Pobieranie",
+  history: "Historia",
+  bookmarks: "Zakładka: dodaj lub usuń bieżącą stronę",
+  "new-private-tab": "Nowa karta prywatna (Ctrl+Shift+N)",
+  "dev-tools": "Narzędzia deweloperskie (F12)",
+  "compact-toggle": "Tryb kompaktowy (Ctrl+Shift+C)",
+} : {
+  notes: "Notes (Ctrl+Shift+M)",
+  downloads: "Downloads",
+  history: "History",
+  bookmarks: "Bookmark: add or remove current page",
+  "new-private-tab": "New private tab (Ctrl+Shift+N)",
+  "dev-tools": "Developer tools (F12)",
+  "compact-toggle": "Compact mode (Ctrl+Shift+C)",
+};
+
+const buildToolbarPinsPayload = (): { pinned: Array<{ id: ToolbarActionId; label: string }> } => {
+  const labels = getToolbarActionLabels();
+  return { pinned: toolbarPins.map((id) => ({ id, label: labels[id] })) };
+};
+
+const broadcastToolbarPins = (): void => {
+  const payload = buildToolbarPinsPayload();
+  for (const target of [mainWindow?.webContents, compactChrome?.getContents(), ...getInternalTabs("settings").map((tab) => getTabContents(tab))]) {
+    if (target && !target.isDestroyed()) target.send("toolbar:changed", payload);
+  }
+};
+
+const changeToolbarPin = async (id: unknown, pinned: boolean): Promise<void> => {
+  if (!isToolbarActionId(id)) return;
+  toolbarPins = setToolbarPinned(toolbarPins, id, pinned);
+  await writeJsonAtomically(toolbarPinsFilePath, { pinned: toolbarPins });
+  broadcastToolbarPins();
+};
+
+/** The single implementation of every pinnable function: used by the menu rows and by the pinned toolbar buttons. */
+const runToolbarAction = async (id: unknown): Promise<boolean> => {
+  if (!isToolbarActionId(id)) return false;
+  switch (id) {
+    case "new-private-tab": openNewPrivateTab(); break;
+    case "dev-tools": toggleActiveTabDevTools(); break;
+    case "history": await openInternalPage("history"); break;
+    case "downloads": await openInternalPage("downloads"); break;
+    case "notes": toggleNotesView(); break;
+    case "compact-toggle": toggleCompactMode(); break;
+    case "bookmarks": await toggleActiveBookmark(); break;
+  }
+  return true;
+};
+
 const openNavigationMenu = async (anchor: unknown): Promise<boolean> => {
   const position = getMenuAnchor(anchor);
   if (!mainWindow || mainWindow.isDestroyed() || !position) {
@@ -5457,15 +5590,17 @@ const openNavigationMenu = async (anchor: unknown): Promise<boolean> => {
   const copy = appLanguage === "pl" ? {
     title: "Menu", settings: "Ustawienia", newPrivateTab: "Nowa karta prywatna", devTools: "Narzędzia deweloperskie", bookmarks: "Zakładki", addBookmark: "Dodaj bieżącą stronę", removeCurrentBookmark: "Usuń bieżącą zakładkę",
     noBookmarks: "Brak zapisanych zakładek", clearBookmarks: "Wyczyść wszystkie zakładki", importBookmarks: "Importuj zakładki…", exportBookmarks: "Eksportuj zakładki…", history: "Historia", downloads: "Pobieranie",
-    siteData: "Dane witryn", language: "Język", polish: "Polski", english: "Angielski", remove: "Usuń",
+    siteData: "Dane witryn", remove: "Usuń",
     welcome: "Pokaż powitanie", about: "O programie", notes: "Notatki", stats: "Statystyki", adblock: "Blokowanie treści (globalnie)", on: "Włączone", off: "Wyłączone",
     compact: "Tryb kompaktowy", splitClose: "Zamknij podzielony widok",
+    tools: "Narzędzia", help: "Pomoc",
   } : {
     title: "Menu", settings: "Settings", newPrivateTab: "New private tab", devTools: "Developer tools", bookmarks: "Bookmarks", addBookmark: "Bookmark current page", removeCurrentBookmark: "Remove current bookmark",
     noBookmarks: "No saved bookmarks", clearBookmarks: "Clear all bookmarks", importBookmarks: "Import bookmarks…", exportBookmarks: "Export bookmarks…", history: "History", downloads: "Downloads",
-    siteData: "Site data", language: "Language", polish: "Polish", english: "English", remove: "Remove",
+    siteData: "Site data", remove: "Remove",
     welcome: "Show welcome", about: "About", notes: "Notes", stats: "Statistics", adblock: "Content blocking (global)", on: "On", off: "Off",
     compact: "Compact mode", splitClose: "Close split view",
+    tools: "Tools", help: "Help",
   };
   // One "Split with…" submenu: "New tab" first, then the other tabs of the space (same as the tab menu).
   const splitMenuRows = activeTabId !== null && splitRegistry.groupOf(activeTabId)
@@ -5489,40 +5624,35 @@ const openNavigationMenu = async (anchor: unknown): Promise<boolean> => {
     + (bookmarkEntries.length > 0 ? `<a class="menu-item" href="monobrowser-menu://bookmarks-export">${copy.exportBookmarks}</a>` : "");
   const html = `<!doctype html><html lang="${appLanguage}"><head><meta charset="UTF-8"><meta name="viewport" content="width=device-width,initial-scale=1">
 <meta http-equiv="Content-Security-Policy" content="default-src 'none'; style-src 'unsafe-inline'; script-src 'unsafe-inline'"><title>${copy.title}</title><style id="mb-theme">${themeCss(getThemeTokens())}</style><style>${POPUP_MENU_STYLES}</style></head><body>
-<nav class="popup nav-popup" aria-label="${copy.title}">
+<nav class="popup nav-popup nav-menu" aria-label="${copy.title}">
   <h1 class="popup-title">MonoBrowser / ${copy.title}</h1>
-  <a class="menu-item" href="monobrowser-menu://settings">${copy.settings}</a>
   <a class="menu-item" href="monobrowser-menu://new-private-tab">${copy.newPrivateTab}<span class="shortcut">Ctrl+Shift+N</span></a>
-  <a class="menu-item" href="monobrowser-menu://dev-tools">${copy.devTools}<span class="shortcut">F12</span></a>
   <details><summary>${copy.bookmarks}<span class="summary-count">${bookmarkEntries.length}</span></summary><div class="submenu">${bookmarkToggle}${bookmarksContent}${bookmarkTransfer}</div></details>
   <a class="menu-item" href="monobrowser-menu://history">${copy.history}</a>
   <a class="menu-item" href="monobrowser-menu://downloads">${copy.downloads}</a>
-  <a class="menu-item" href="monobrowser-menu://site-data">${copy.siteData}</a>
-  <a class="menu-item" href="monobrowser-menu://stats">${copy.stats}</a>
   <a class="menu-item" href="monobrowser-menu://notes">${copy.notes}<span class="shortcut">Ctrl+Shift+M</span></a>
-  <a class="menu-item" href="monobrowser-menu://compact-toggle">${copy.compact}<span class="shortcut">${layoutSettings.compactMode ? copy.on : "Ctrl+Shift+C"}</span></a>
   ${splitMenuRows}
-  <a class="menu-item" href="monobrowser-menu://welcome">${copy.welcome}</a>
-  <a class="menu-item" href="monobrowser-menu://about">${copy.about}</a>
-  <a class="menu-item" href="monobrowser-menu://adblock-toggle">${copy.adblock}<span class="shortcut">${adblockEnabled ? copy.on : copy.off}</span></a>
-  <details><summary>${copy.language}</summary><div class="submenu">
-    <a class="menu-item${appLanguage === "pl" ? " selected" : ""}" href="monobrowser-menu://language?value=pl">${copy.polish}</a>
-    <a class="menu-item${appLanguage === "en" ? " selected" : ""}" href="monobrowser-menu://language?value=en">${copy.english}</a>
+  <a class="menu-item" href="monobrowser-menu://compact-toggle">${copy.compact}<span class="shortcut">${layoutSettings.compactMode ? copy.on : "Ctrl+Shift+C"}</span></a>
+  <details><summary>${copy.tools}</summary><div class="submenu">
+    <a class="menu-item" href="monobrowser-menu://dev-tools">${copy.devTools}<span class="shortcut">F12</span></a>
+    <a class="menu-item" href="monobrowser-menu://site-data">${copy.siteData}</a>
+    <a class="menu-item" href="monobrowser-menu://adblock-toggle">${copy.adblock}<span class="shortcut">${adblockEnabled ? copy.on : copy.off}</span></a>
+    <a class="menu-item" href="monobrowser-menu://stats">${copy.stats}</a>
+  </div></details>
+  <a class="menu-item" href="monobrowser-menu://settings">${copy.settings}</a>
+  <details><summary>${copy.help}</summary><div class="submenu">
+    <a class="menu-item" href="monobrowser-menu://welcome">${copy.welcome}</a>
+    <a class="menu-item" href="monobrowser-menu://about">${copy.about}</a>
   </div></details>
 </nav>
 ${POPUP_HEIGHT_REPORT_SCRIPT}</body></html>`;
 
   return openStyledPopup("navigation", position, 340, 520, html, async (actionUrl) => {
     const action = actionUrl.hostname;
-    if (action === "settings") return openSettingsWindow();
-    if (action === "new-private-tab") { openNewPrivateTab(); return; }
-    if (action === "dev-tools") return toggleActiveTabDevTools();
-    if (action === "history") return openInternalPage("history");
-    if (action === "downloads") return openInternalPage("downloads");
     if (action === "site-data") return openInternalPage("site-data");
     if (action === "stats") return openInternalPage("stats");
-    if (action === "notes") { toggleNotesView(); return; }
-    if (action === "compact-toggle") { toggleCompactMode(); return; }
+    if (action === "settings") return openSettingsWindow();
+    if (isToolbarActionId(action) && action !== "bookmarks") { await runToolbarAction(action); return; }
     if (action === "split-toggle") { toggleSplitForActiveTab(); return; }
     if (handleSplitSubmenuAction(splitBaseTabId, actionUrl)) return;
     if (action === "about") return openInternalPage("about");
@@ -5532,11 +5662,6 @@ ${POPUP_HEIGHT_REPORT_SCRIPT}</body></html>`;
     if (action === "bookmarks-clear") return clearBookmarks();
     if (action === "bookmarks-import") return importBookmarksFromFile();
     if (action === "bookmarks-export") return exportBookmarksToFile();
-    if (action === "language") {
-      const language = normalizeLanguage(actionUrl.searchParams.get("value"));
-      if (language) await setApplicationLanguage(language);
-      return;
-    }
     const bookmark = bookmarkEntries.find((entry) => entry.id === actionUrl.searchParams.get("id"));
     if (!bookmark) return;
     if (action === "bookmark-open") openNewTab(bookmark.url);
@@ -6043,6 +6168,14 @@ const clearHistory = async (): Promise<void> => {
   broadcastHistory();
 };
 
+// Page focus does not blur the shell's <input> (separate webContents): tell the shell to drop focus and selection.
+const releaseAddressFieldOnPageFocus = (): void => {
+  if (Date.now() < programmaticFocusUntil) return;
+  if (mainWindow && !mainWindow.isDestroyed()) mainWindow.webContents.send("address:blur");
+  const chromeContents = compactChrome?.getContents();
+  if (chromeContents && !chromeContents.isDestroyed()) chromeContents.send("address:blur");
+};
+
 const focusAddressBar = (): void => {
   if (!mainWindow || mainWindow.isDestroyed()) return;
   const chromeContents = compactChrome?.isEnabled() ? compactChrome.getContents() : null;
@@ -6259,9 +6392,13 @@ const showToast = (message: string, action?: { label: string; run: () => void })
   .toast-text { flex:1 1 auto; min-width:0; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; font-weight:700; }
   .toast a { flex:0 0 auto; color:inherit; text-decoration:none; }
   .toast-action { padding:7px 12px; border:2px solid var(--black); background:var(--black); color:var(--white)!important; font-size:11px; font-weight:700; letter-spacing:.1em; text-transform:uppercase; cursor:pointer; }
-  .toast-action:hover,.toast-action:focus-visible { outline:0; background:var(--accent); color:var(--mb-on-accent)!important; }
+  :root { ${INTERACTION_VARS_CSS} }
+  .toast-action:hover { background:var(--ctl-solid-hover); }
+  .toast-action:active { background:var(--ctl-solid-press); }
+  .toast-action:focus-visible { outline:2px solid var(--accent); outline-offset:2px; }
   .toast-close { width:28px; height:28px; display:grid; place-items:center; font-size:16px; cursor:pointer; }
-  .toast-close:hover { background:var(--mb-surface-2); }
+  .toast-close:hover { background:var(--ctl-hover-bg); }
+  .toast-close:active { background:var(--ctl-press-bg); }
 </style></head><body><div class="toast" role="status" aria-live="polite"><span class="toast-text" title="${escapeHtml(message)}">${escapeHtml(message)}</span>${action ? `<a class="toast-action" href="monobrowser-menu://toast-action">${escapeHtml(action.label)}</a>` : ""}<a class="toast-close" href="monobrowser-menu://toast-close" aria-label="${appLanguage === "pl" ? "Zamknij" : "Close"}">×</a></div>${POPUP_MOUSEDOWN_SCRIPT}</body></html>`;
   toastView = view;
   toastAction = action?.run ?? null;
@@ -8000,8 +8137,19 @@ const wireTabEvents = (tab: TabRecord, view: WebContentsView): void => {
     runBackgroundProbeIfStartPage(contents);
     void injectUserScriptsIntoContents(contents, "document-start");
     applyGlanceTriggerToContents(contents);
+    applySwipeTriggerToContents(contents);
   });
+  contents.on("did-navigate-in-page", () => applySwipeTriggerToContents(contents));
+  let lastSwipeAt = 0;
   contents.on("console-message", (event) => {
+    // Gest dwoma palcami w bok na touchpadzie: wstecz/dalej (jak w przeglądarkach).
+    // Reszta tego samego gestu trafia już do nowej strony: przez chwilę ignorujemy kolejne gesty.
+    const swipe = parseSwipeMessage((event as unknown as { message?: unknown }).message, glanceNonce);
+    if (swipe && Date.now() - lastSwipeAt < SWIPE_COOLDOWN_MS) return;
+    if (swipe) lastSwipeAt = Date.now();
+    if (swipe === "back" && contents.navigationHistory.canGoBack()) contents.navigationHistory.goBack();
+    if (swipe === "forward" && contents.navigationHistory.canGoForward()) contents.navigationHistory.goForward();
+    if (swipe) return;
     const url = parseGlanceMessage((event as unknown as { message?: unknown }).message, glanceNonce);
     if (url && glanceSettings.enabled && tab.id === activeTabId) {
       openGlance(url, tab);
@@ -8747,7 +8895,7 @@ const openWorkspaceSwitcher = async (anchorValue: unknown): Promise<boolean> => 
   const anchor = getMenuAnchor(anchorValue);
   if (!anchor) return false;
   const { html, height } = renderWorkspaceSwitcherHtml(workspacePopupContext(), workspaceViews(), currentWorkspaceId);
-  return openStyledPopup("workspaces", anchor, 300, height, html, (actionUrl) => handleWorkspacePopupAction(actionUrl, anchor));
+  return openStyledPopup("workspaces", anchor, 340, height, html, (actionUrl) => handleWorkspacePopupAction(actionUrl, anchor));
 };
 
 const getActiveTab = (): TabRecord | null => {
@@ -9293,6 +9441,7 @@ const registerIpc = (): void => {
     }
   });
 
+  onTrusted("settings:remember-tab", (_event, value: unknown) => { settingsActiveTab = normalizeSettingsTab(value); });
   handleTrusted("language:get", () => appLanguage);
   handleTrusted("language:set", async (_event, value: unknown) => {
     const language = normalizeLanguage(value);
@@ -9420,6 +9569,12 @@ const registerIpc = (): void => {
   handleTrusted("glance:close", () => { closeGlance(); return true; });
   handleTrusted("glance:expand", () => expandGlance(true));
   handleTrusted("glance:background", () => expandGlance(false));
+  handleTrusted("toolbar:get", () => buildToolbarPinsPayload());
+  handleTrusted("toolbar:run", (_event, id: unknown) => runToolbarAction(id));
+  handleTrusted("toolbar:set-pinned", async (_event, id: unknown, pinned: unknown) => {
+    await changeToolbarPin(id, pinned === true);
+    return buildToolbarPinsPayload();
+  });
   handleTrusted("layout:get", () => ({ ...layoutSettings }));
   handleTrusted("layout:set", (_event, patch: unknown) => setLayoutSettings(patch));
 
@@ -9531,6 +9686,31 @@ const startUpdateDownload = async (version: string): Promise<void> => {
   }
 };
 
+// Instalacja aktualizacji musi naprawdę zamknąć starą instancję: pozwalamy stronom z
+// beforeunload zamknąć się bez pytania (inaczej app.quit() zawisa na anulowanym zamknięciu okna),
+// zwalniamy blokadę instancji (nowa wersja uruchomiona przez instalator/AppImage inaczej przekaże
+// start do starej i się zamknie) oraz wymuszamy app.exit po krótkim czasie.
+const UPDATE_QUIT_FALLBACK_MS = 4000;
+let quittingForUpdate = false;
+const applyUpdateAndQuit = (): void => {
+  if (quittingForUpdate) return;
+  quittingForUpdate = true;
+  setUnloadGuardBypass(true);
+  try { flushSessionSync(); flushZoomSync(); } catch { /* best effort */ }
+  try { app.releaseSingleInstanceLock(); } catch { /* ignore */ }
+  setTimeout(() => {
+    if (!quittingForUpdate) return;
+    try { app.exit(0); } catch { process.exit(0); }
+  }, UPDATE_QUIT_FALLBACK_MS);
+  try {
+    autoUpdater.quitAndInstall(false, true);
+  } catch (error) {
+    console.error("quitAndInstall failed:", error);
+    quittingForUpdate = false;
+    setUnloadGuardBypass(false);
+  }
+};
+
 const registerAutoUpdater = (): void => {
   // Pobieranie uruchamiamy ręcznie (startUpdateDownload), żeby było widoczne i anulowalne.
   autoUpdater.autoDownload = false;
@@ -9549,6 +9729,7 @@ const registerAutoUpdater = (): void => {
 
   autoUpdater.on("error", (error) => {
     updateCheckInProgress = false;
+    if (quittingForUpdate) { quittingForUpdate = false; setUnloadGuardBypass(false); }
     if (updateStatus.state === "checking" || updateStatus.state === "downloading") setUpdateStatus({ state: "error" });
     console.error("Auto-update error:", error);
   });
@@ -9594,9 +9775,7 @@ const registerAutoUpdater = (): void => {
     });
 
     if (result.response === 0) {
-      setImmediate(() => {
-        autoUpdater.quitAndInstall();
-      });
+      setImmediate(() => applyUpdateAndQuit());
     }
   });
 };
@@ -9748,7 +9927,7 @@ const createMainWindow = async (
     minWidth: 900,
     minHeight: 600,
     show: false,
-    autoHideMenuBar: true,
+    autoHideMenuBar: false,
     backgroundColor: currentBackgroundColor,
     icon: path.join(app.getAppPath(), "assets", "icon.png"),
     webPreferences: {
@@ -10075,6 +10254,7 @@ const bootstrap = async (): Promise<void> => {
   onboardingFilePath = path.join(app.getPath("userData"), ONBOARDING_FILE);
   searchSettingsFilePath = path.join(app.getPath("userData"), "search-settings.json");
   layoutSettingsFilePath = path.join(app.getPath("userData"), "layout-settings.json");
+  toolbarPinsFilePath = path.join(app.getPath("userData"), "toolbar-pins.json");
   splitFilePath = path.join(app.getPath("userData"), "split-view.json");
   glanceSettingsFilePath = path.join(app.getPath("userData"), "glance-settings.json");
   adblockSettingsFilePath = path.join(app.getPath("userData"), "adblock-settings.json");
@@ -10092,7 +10272,7 @@ const bootstrap = async (): Promise<void> => {
   );
 
   await detectOnboarding();
-  await Promise.all([loadStartPageBackgroundColor(), loadLanguage(), loadSearchSettings(), loadLayoutSettings(), loadGlanceSettings(), loadAdblockSettings(), loadAdblockExceptions(), loadExperimentalSettings(), loadStartupSettings(), loadAnimationSettings(), loadZoomStore()]);
+  await Promise.all([loadStartPageBackgroundColor(), loadLanguage(), loadSearchSettings(), loadLayoutSettings(), loadToolbarPins(), loadGlanceSettings(), loadAdblockSettings(), loadAdblockExceptions(), loadExperimentalSettings(), loadStartupSettings(), loadAnimationSettings(), loadZoomStore()]);
   applyExperimentalSettings();
   startPageBackgroundColor = getThemeTokens().bg;
   applyStartPageBackgroundColor();

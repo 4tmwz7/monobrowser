@@ -200,13 +200,13 @@ export const renderAboutPageHtml = (options: RenderAboutOptions): string => {
   .actions { display:flex; align-items:center; gap:12px; flex-wrap:wrap; }
   #update-text { flex:1 1 220px; font-size:12px; }
   button { border:2px solid var(--black); background:var(--black); color:var(--white); border-radius:0; padding:9px 12px; font:inherit; font-size:11px; font-weight:700; letter-spacing:.08em; text-transform:uppercase; cursor:pointer; }
-  button:hover:not(:disabled), button:focus-visible { background:var(--accent); color:var(--mb-on-accent); outline:0; }
   button:disabled { opacity:.45; cursor:not-allowed; }
   a { color:var(--black); font-size:12px; font-weight:700; }
-  a:hover, a:focus-visible { background:var(--black); color:var(--white); outline:0; }
+  a:hover { background:var(--ctl-hover-bg); }
+  a:active { background:var(--ctl-press-bg); }
   .link-list { display:flex; gap:18px; flex-wrap:wrap; }
   button.secondary, button[aria-expanded="true"] { background:transparent; color:var(--black); }
-  button.secondary:hover:not(:disabled), button.secondary:focus-visible, button[aria-expanded="true"]:hover:not(:disabled), button[aria-expanded="true"]:focus-visible { background:var(--mb-surface-2,var(--white)); color:var(--black); box-shadow:inset 0 0 0 1px var(--black); }
+  button[aria-expanded="true"]:hover:not(:disabled) { background:var(--ctl-hover-bg); color:var(--black); }
   .licenses { max-height:380px; overflow:auto; padding:14px 16px; border:2px solid var(--black); background:var(--mb-surface,var(--white)); color:var(--black); font-size:12px; line-height:1.6; overflow-wrap:anywhere; scrollbar-width:thin; scrollbar-color:var(--mb-muted,var(--grey)) var(--mb-surface-2,var(--white)); }
   .licenses[hidden] { display:none; }
   .licenses > :first-child { margin-top:0; }

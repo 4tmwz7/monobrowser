@@ -42,6 +42,10 @@ const EXTRA_STYLES = `
   .menu-item.selected .ws-badge { background:transparent; color:inherit; }
   .menu-item.selected:hover { background:var(--accent); color:var(--mb-on-accent); }
   .menu-item.disabled { cursor:default; }
+  .ws-row { display:flex; }
+  .ws-row > .menu-item:first-child { flex:1; min-width:0; }
+  .ws-row > .ws-remove { flex:none; width:44px; justify-content:center; padding:0; font-size:18px; border-left:1px solid var(--line); }
+  .ws-row > .ws-remove:hover, .ws-row > .ws-remove:focus-visible { background:var(--danger); color:var(--white); }
   .ws-form { position:relative; z-index:1; padding:12px; display:grid; gap:12px; }
   .ws-form label { display:grid; gap:5px; font-size:10px; font-weight:700; letter-spacing:.1em; text-transform:uppercase; }
   .ws-form input[type=text] { height:34px; padding:0 9px; border:2px solid var(--black); border-radius:0; background:var(--white); color:var(--black); font:inherit; font-size:12px; }
@@ -76,14 +80,20 @@ export const renderWorkspaceSwitcherHtml = (
 ): { html: string; height: number } => {
   const pl = ctx.language === "pl";
   const title = pl ? "Przestrzenie" : "Spaces";
-  const rows = workspaces.map((workspace, index) =>
-    action(
+  const deleteLabel = pl ? "Usuń przestrzeń…" : "Delete space…";
+  const rows = workspaces.map((workspace, index) => {
+    const row = action(
       "ws-switch",
       { id: workspace.id },
       `${iconBadge(workspace)}<span class="ws-name">${escapeHtml(workspaceDisplayName(workspace, ctx.language))}</span>`,
       workspace.id === currentId ? "selected" : "",
       index < 9 ? `${SHORTCUT_HINT}${index + 1}` : "",
-    ));
+    );
+    // Główna przestrzeń nie może zostać usunięta; pozostałe mają × (z potwierdzeniem) jak karty.
+    if (workspace.id === MAIN_WORKSPACE_ID) return row;
+    const query = new URLSearchParams({ id: workspace.id }).toString();
+    return `<div class="ws-row">${row}<a class="menu-item ws-remove" href="monobrowser-menu://ws-delete?${query}" title="${deleteLabel}" aria-label="${deleteLabel}">×</a></div>`;
+  });
   const manage = [
     action("ws-new", {}, `+ ${pl ? "Nowa przestrzeń" : "New space"}`),
     action("ws-edit", { id: currentId }, pl ? "Edytuj bieżącą…" : "Edit current…"),

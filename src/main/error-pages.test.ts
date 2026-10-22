@@ -76,7 +76,7 @@ test("renderErrorPageHtml styles itself with the theme contract variables only",
   const style = /<style>([\s\S]*?)<\/style>/.exec(html)?.[1] ?? "";
   assert.match(style, /var\(--mb-bg, #f0efe9\)/);
   assert.match(style, /var\(--mb-fg, #0a0a0a\)/);
-  assert.ok(!/var\(--(?!mb-|font)/.test(style), "no non-contract custom properties");
+  assert.ok(!/var\(--(?!mb-|font|ctl-)/.test(style), "no non-contract custom properties");
   assert.ok(!/var\(--mb-[a-z-]+\)/.test(style), "every theme variable has a fallback");
 });
 

@@ -19,6 +19,9 @@
         --tab-active-fg: var(--mb-fg, #f0efe9);
         --tab-active-border: var(--mb-fg, #f0efe9);
         --tab-hover-bg: color-mix(in srgb, var(--mb-surface-2, #242421) 55%, var(--mb-surface, #161614));
+        /* One interaction language for every toolbar control: quiet hover fill, stronger pressed fill, accent outline for keyboard focus only. */
+        --ctl-hover-bg: color-mix(in srgb, var(--mb-fg, #f0efe9) 16%, var(--tabbar-bg));
+        --ctl-press-bg: color-mix(in srgb, var(--mb-fg, #f0efe9) 26%, var(--tabbar-bg));
         --toolbar-input-bg: var(--mb-bg, #0a0a0a);
         --toolbar-input-fg: var(--mb-fg, #f0efe9);
         --accent: var(--mb-accent, #9c9b95);
@@ -78,6 +81,11 @@
         z-index: 10;
       }
 
+      /* Menu functions pinned by the user; the buttons are flex items of #chrome-actions. */
+      #toolbar-pins {
+        display: contents;
+      }
+
       #nav-buttons,
       #chrome-actions {
         display: flex;
@@ -101,16 +109,39 @@
         transition: background-color var(--mb-dur, 160ms) var(--mb-ease, ease), border-color var(--mb-dur, 160ms) var(--mb-ease, ease), color var(--mb-dur, 160ms) var(--mb-ease, ease), opacity var(--mb-dur, 160ms) var(--mb-ease, ease), transform var(--mb-dur, 160ms) var(--mb-ease, ease);
       }
 
+      /* Shared states: hover = quiet fill, pressed = stronger fill, keyboard focus = accent outline. */
       .nav-btn:hover:not(:disabled),
-      .nav-btn:focus-visible {
-        background: var(--tab-hover-bg);
+      #new-tab:hover,
+      #zoom-pill:hover,
+      .tab-btn:hover,
+      #ws-switch:hover,
+      .ws-btn:hover,
+      #ws-add:hover {
+        background: var(--ctl-hover-bg);
+        color: var(--tabbar-fg);
+      }
+
+      .nav-btn:focus-visible,
+      #new-tab:focus-visible,
+      #zoom-pill:focus-visible,
+      .tab-btn:focus-visible,
+      #ws-switch:focus-visible,
+      .ws-btn:focus-visible,
+      #ws-add:focus-visible,
+      .address-icon:focus-visible {
+        background: var(--ctl-hover-bg);
         outline: 2px solid var(--accent);
         outline-offset: -2px;
       }
 
       .nav-btn:active:not(:disabled),
+      #new-tab:active,
+      #zoom-pill:active,
       .tab-btn:active,
-      #new-tab:active {
+      #ws-switch:active,
+      .ws-btn:active,
+      #ws-add:active {
+        background: var(--ctl-press-bg);
         transform: scale(var(--mb-press, 0.98));
       }
 
@@ -143,6 +174,10 @@
         gap: 4px;
       }
 
+      #address-form:hover {
+        border-color: color-mix(in srgb, var(--toolbar-input-fg) 60%, var(--toolbar-input-bg));
+      }
+
       #address-form:focus-within {
         border-color: var(--toolbar-input-fg);
         box-shadow: inset 0 0 0 1px var(--toolbar-input-fg);
@@ -161,12 +196,13 @@
         cursor: pointer;
       }
 
-      .address-icon:hover,
-      .address-icon:focus-visible {
-        background: var(--toolbar-input-fg);
-        color: var(--toolbar-input-bg);
-        outline: 2px solid var(--accent);
-        outline-offset: -2px;
+      .address-icon:hover {
+        background: color-mix(in srgb, var(--toolbar-input-fg) 16%, var(--toolbar-input-bg));
+        color: var(--toolbar-input-fg);
+      }
+
+      .address-icon:active {
+        background: color-mix(in srgb, var(--toolbar-input-fg) 28%, var(--toolbar-input-bg));
       }
 
       .address-icon svg {
@@ -264,10 +300,6 @@
         white-space: nowrap;
         position: relative;
         text-align: left;
-      }
-
-      .tab-btn:hover {
-        background: var(--tab-hover-bg);
       }
 
       .tab-btn.active {
@@ -384,13 +416,6 @@
         text-align: center;
         cursor: pointer;
         flex-shrink: 0;
-      }
-
-      #zoom-pill:hover,
-      #zoom-pill:focus-visible {
-        background: var(--tab-hover-bg);
-        outline: 2px solid var(--accent);
-        outline-offset: -2px;
       }
 
       #zoom-pill:not([hidden]) {
@@ -553,14 +578,6 @@
         transition: background-color var(--mb-dur, 160ms) var(--mb-ease, ease), border-color var(--mb-dur, 160ms) var(--mb-ease, ease), color var(--mb-dur, 160ms) var(--mb-ease, ease), opacity var(--mb-dur, 160ms) var(--mb-ease, ease), transform var(--mb-dur, 160ms) var(--mb-ease, ease);
       }
 
-      #new-tab:hover,
-      #new-tab:focus-visible {
-        background: var(--tab-hover-bg);
-        color: var(--tabbar-fg);
-        outline: 2px solid var(--accent);
-        outline-offset: -2px;
-      }
-
       #new-tab svg {
         width: 14px;
         height: 14px;
@@ -674,25 +691,11 @@
         background: var(--ws-color, transparent);
       }
 
-      /* Hover is a quiet background change; the outline is reserved for keyboard focus. */
-      #ws-switch:hover,
-      .ws-btn:hover,
-      #ws-add:hover {
-        background: var(--tab-hover-bg);
-        color: var(--tabbar-fg);
-      }
-
-      #ws-switch:focus-visible,
-      .ws-btn:focus-visible,
-      #ws-add:focus-visible {
-        background: var(--tab-hover-bg);
-        outline: 2px solid var(--accent);
-        outline-offset: -2px;
-      }
-
+      /* Hover/pressed/focus states for these live in the shared block next to .nav-btn. */
       /* The one clear active style: accent fill on the current space only. */
       .ws-btn.active,
-      .ws-btn.active:hover {
+      .ws-btn.active:hover,
+      .ws-btn.active:active {
         background: var(--accent);
         color: var(--on-accent);
         border-color: var(--accent);
@@ -892,6 +895,7 @@
       }
 
       body.vertical #chrome-actions {
+        flex-wrap: wrap;
         justify-content: flex-start;
         padding-top: 4px;
         border-top: 1px solid var(--tabbar-line);
@@ -1111,6 +1115,7 @@
             <path d="M2.5 4h6.2a2 2 0 0 1 3.6 0h1.2a.75.75 0 0 1 0 1.5h-1.2a2 2 0 0 1-3.6 0H2.5a.75.75 0 0 1 0-1.5Zm0 6.5h1.2a2 2 0 0 1 3.6 0h6.2a.75.75 0 0 1 0 1.5H7.3a2 2 0 0 1-3.6 0H2.5a.75.75 0 0 1 0-1.5Z" />
           </svg>
         </button>
+        <div id="toolbar-pins"></div>
         <button id="zoom-pill" type="button" hidden aria-label="Zoom" title="Zoom"></button>
         <button id="menu-button" class="nav-btn" type="button" aria-haspopup="menu" aria-label="Menu" title="Menu">
           <svg viewBox="0 0 16 16" aria-hidden="true">

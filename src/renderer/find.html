@@ -7,6 +7,7 @@
     <title>MonoBrowser Find</title>
     <style>
       :root {
+        /*@mb-interaction-vars*/
         --black: var(--mb-fg, #0a0a0a);
         --white: var(--mb-bg, #f0efe9);
         --accent: var(--mb-accent, #9c9b95);
@@ -39,7 +40,7 @@
         font: inherit;
         font-size: 12px;
       }
-      #find-input:focus { box-shadow: 3px 3px 0 var(--accent); transform: translate(-1px, -1px); }
+      #find-input:focus-visible { outline: 2px solid var(--accent); outline-offset: 1px; }
       #find-result { min-width: 44px; color: var(--grey); font-size: 11px; text-align: center; font-variant-numeric: tabular-nums; }
       .find-btn {
         width: 30px;
@@ -54,7 +55,8 @@
         color: var(--black);
         cursor: pointer;
       }
-      .find-btn:hover:not(:disabled), .find-btn:focus-visible { background: var(--black); color: var(--white); }
+      .find-btn:hover:not(:disabled) { background: var(--ctl-hover-bg); }
+      .find-btn:active:not(:disabled) { background: var(--ctl-press-bg); }
       .find-btn:focus-visible { outline: 2px solid var(--accent); outline-offset: 1px; }
       .find-btn:disabled { opacity: .35; cursor: not-allowed; }
       .find-btn svg { width: 13px; height: 13px; fill: currentColor; }
