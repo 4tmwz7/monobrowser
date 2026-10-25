@@ -55,3 +55,26 @@ test("recoverEmbeddedUrl recovers a URL glued to the internal scheme and nothing
   assert.equal(shortUrlLabel("https://www.example.com/"), "example.com");
   assert.equal(shortUrlLabel("https://example.com/a/b?c=1"), "example.com/a/b?c=1");
 });
+
+test("hostInputToUrl opens local and LAN hosts over http", async () => {
+  const { hostInputToUrl, isLocalHost } = await import("./url-utils.js");
+  for (const value of ["localhost", "localhost:3000/api", "app.localhost:5173", "127.0.0.1:8080", "0.0.0.0:4000", "192.168.1.10", "10.0.0.2:3000", "172.20.0.5", "[::1]:8000/x", "raspberrypi.local"]) {
+    assert.equal(looksLikeHost(value), true, value);
+    assert.equal(isLocalHost(value), true, value);
+    assert.equal(hostInputToUrl(value), `http://${value}`, value);
+  }
+  for (const value of ["example.com", "172.32.0.1", "8.8.8.8", "localhost.example.com"]) {
+    assert.equal(isLocalHost(value), false, value);
+    assert.equal(hostInputToUrl(value), `https://${value}`, value);
+  }
+});
+
+test("isLoopbackHost akceptuje tylko loopback, nie LAN", async () => {
+  const { isLoopbackHost } = await import("./url-utils.js");
+  for (const value of ["localhost", "localhost:5173", "app.localhost", "127.0.0.1", "127.0.0.1:8443", "[::1]", "[::1]:3000", "[0:0:0:0:0:0:0:1]"]) {
+    assert.equal(isLoopbackHost(value), true, value);
+  }
+  for (const value of ["192.168.0.2", "10.0.0.1", "172.16.0.1", "0.0.0.0", "printer.local", "example.com", "localhost.evil.com", "evil-localhost", "[2001:db8::1]"]) {
+    assert.equal(isLoopbackHost(value), false, value);
+  }
+});

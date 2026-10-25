@@ -318,8 +318,8 @@ const browserApi = {
   triggerCloseTabShortcut: (): void => {
     ipcRenderer.send("tabs:close-shortcut");
   },
-  triggerReloadShortcut: (): void => {
-    ipcRenderer.send("nav:reload-shortcut");
+  triggerReloadShortcut: (hard = false): void => {
+    ipcRenderer.send("nav:reload-shortcut", hard);
   },
   toggleTabMute: (tabId: number): Promise<boolean> => ipcRenderer.invoke("tabs:toggle-mute", tabId),
   resetZoom: (): Promise<boolean> => ipcRenderer.invoke("tabs:reset-zoom"),

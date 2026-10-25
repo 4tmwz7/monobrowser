@@ -1,5 +1,23 @@
-const HOST_PATTERNS = [
-  /^localhost(?::\d+)?$/i,
+/** Hosty lokalne/LAN – serwery deweloperskie zwykle nie mają TLS, więc otwieramy je przez http://. */
+export const LOCAL_HOST_PATTERNS = [
+  /^(?:[a-z0-9-]+\.)*localhost(?::\d+)?$/i,
+  /^127(?:\.\d{1,3}){3}(?::\d+)?$/,
+  /^0\.0\.0\.0(?::\d+)?$/,
+  /^10(?:\.\d{1,3}){3}(?::\d+)?$/,
+  /^192\.168(?:\.\d{1,3}){2}(?::\d+)?$/,
+  /^172\.(?:1[6-9]|2\d|3[01])(?:\.\d{1,3}){2}(?::\d+)?$/,
+  /^\[[0-9a-f:.]+\](?::\d+)?$/i,
+  /^[a-z0-9-]+\.local(?::\d+)?$/i,
+];
+
+const LOOPBACK_HOST_PATTERNS = [
+  /^(?:[a-z0-9-]+\.)*localhost(?::\d+)?$/i,
+  /^127(?:\.\d{1,3}){3}(?::\d+)?$/,
+  /^\[(?:0*:)*0*1\](?::\d+)?$/,
+];
+
+export const HOST_PATTERNS = [
+  ...LOCAL_HOST_PATTERNS,
   /^(?:\d{1,3}\.){3}\d{1,3}(?::\d+)?$/,
   /^(?:[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?\.)+[a-z]{2,63}(?::\d+)?$/i,
 ];
@@ -15,9 +33,26 @@ export const looksLikeHost = (input: string): boolean => {
     return false;
   }
 
-  const host = trimmed.split("/")[0];
+  const host = hostOf(trimmed);
   return HOST_PATTERNS.some((pattern) => pattern.test(host));
 };
+
+const hostOf = (input: string): string => input.trim().split(/[/?#]/)[0];
+
+export const isLocalHost = (input: string): boolean => {
+  const host = hostOf(input);
+  return LOCAL_HOST_PATTERNS.some((pattern) => pattern.test(host));
+};
+
+/** Host loopback (localhost, *.localhost, 127.x, [::1]); bez zakresów LAN. Przyjmuje nazwę hosta (z portem lub bez). */
+export const isLoopbackHost = (hostname: string): boolean => {
+  const host = hostOf(hostname);
+  return LOOPBACK_HOST_PATTERNS.some((pattern) => pattern.test(host));
+};
+
+/** Adres do załadowania dla tekstu, który wygląda na host: lokalne przez http://, reszta przez https://. */
+export const hostInputToUrl = (input: string): string =>
+  `${isLocalHost(input) ? "http" : "https"}://${input.trim()}`;
 
 export const getErrorCode = (error: unknown): string | undefined =>
   typeof error === "object" && error !== null && "code" in error

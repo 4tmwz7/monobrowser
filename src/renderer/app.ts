@@ -90,7 +90,7 @@ type BrowserApi = {
   onTabsState: (callback: (payload: TabsStatePayload) => void) => () => void;
   triggerNewTabShortcut: (initialUrl?: string) => void;
   triggerCloseTabShortcut: () => void;
-  triggerReloadShortcut: () => void;
+  triggerReloadShortcut: (hard?: boolean) => void;
   toggleTabMute: (tabId: number) => Promise<boolean>;
   resetZoom: () => Promise<boolean>;
   getPathForFile: (file: File) => string;
@@ -866,7 +866,7 @@ const handleKeyboardShortcut = async (event: KeyboardEvent): Promise<void> => {
 
   if (key === "r") {
     event.preventDefault();
-    window.browserApi.triggerReloadShortcut();
+    window.browserApi.triggerReloadShortcut(event.shiftKey);
     return;
   }
 

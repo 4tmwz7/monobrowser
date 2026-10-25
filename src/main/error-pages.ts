@@ -9,6 +9,7 @@
 import { app, net } from "electron";
 import type { Certificate, WebContents } from "electron";
 import { hostOf, isCertErrorCode, parseErrorPageMessage, renderErrorPageHtml, shouldShowErrorPage } from "./error-page-html.js";
+import { isLoopbackHost } from "./url-utils.js";
 import type { CertInfo, ErrorLang } from "./error-page-html.js";
 
 export * from "./error-page-html.js";
@@ -55,11 +56,20 @@ const describeCertificate = (certificate: Certificate, errorName: string): CertI
  * Default: deny. Only hosts the user explicitly excepted from the interstitial are trusted,
  * and only until the app closes. isPrivateContents tells which exception set applies.
  */
-export const registerCertificateErrorHandler = (isPrivateContents: (contents: WebContents) => boolean): void => {
+export const registerCertificateErrorHandler = (
+  isPrivateContents: (contents: WebContents) => boolean,
+  /** Experimental: accept certificate errors silently for loopback hosts only (localhost, 127.x, [::1]). */
+  trustLoopback: () => boolean = () => false,
+): void => {
   app.on("certificate-error", (event, contents, url, error, certificate, callback) => {
     event.preventDefault();
     let host = "";
-    try { host = new URL(url).host; } catch { /* keep empty */ }
+    let hostname = "";
+    try { const parsed = new URL(url); host = parsed.host; hostname = parsed.hostname; } catch { /* keep empty */ }
+    if (hostname && isLoopbackHost(hostname) && trustLoopback()) {
+      callback(true);
+      return;
+    }
     if (host && contents && hasCertException(isPrivateContents(contents), host)) {
       callback(true);
       return;

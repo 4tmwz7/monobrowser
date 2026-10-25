@@ -1,4 +1,4 @@
-// Ustawienia eksperymentalne (ogranicznik RAM / CPU). Czysta logika bez zależności od Electrona.
+// Ustawienia eksperymentalne (ogranicznik RAM / CPU, wykrywanie lokalnych serwerów). Czysta logika bez zależności od Electrona.
 
 export type ExperimentalSettings = {
   ramLimiterEnabled: boolean;
@@ -8,6 +8,10 @@ export type ExperimentalSettings = {
   cpuLimiterEnabled: boolean;
   cpuThreads: number;
   cpuLowerBackgroundPriority: boolean;
+  /** Jednorazowe wykrywanie serwerów WWW na localhost przy starcie (localhost-scan.ts). */
+  detectLocalServers: boolean;
+  /** Akceptuj niezaufane certyfikaty TLS tylko dla hostów loopback (localhost, 127.x, [::1]). */
+  trustLocalhostCertificates: boolean;
 };
 
 export type SystemInfo = {
@@ -42,6 +46,8 @@ export const defaultExperimentalSettings = (system: SystemInfo): ExperimentalSet
   cpuLimiterEnabled: false,
   cpuThreads: clampThreads(Math.floor(system.maxThreads / 2), system.maxThreads),
   cpuLowerBackgroundPriority: false,
+  detectLocalServers: false,
+  trustLocalhostCertificates: false,
 });
 
 /** Merges a (possibly partial, untrusted) patch over the current settings, ignoring invalid fields. */
@@ -62,6 +68,8 @@ export const mergeExperimentalSettings = (
     cpuLimiterEnabled: bool("cpuLimiterEnabled", current.cpuLimiterEnabled),
     cpuThreads: clampThreads(threads ?? current.cpuThreads, system.maxThreads),
     cpuLowerBackgroundPriority: bool("cpuLowerBackgroundPriority", current.cpuLowerBackgroundPriority),
+    detectLocalServers: bool("detectLocalServers", current.detectLocalServers),
+    trustLocalhostCertificates: bool("trustLocalhostCertificates", current.trustLocalhostCertificates),
   };
 };
 

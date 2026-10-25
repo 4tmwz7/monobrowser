@@ -15,12 +15,13 @@ import path from "node:path";
 import { ElectronBlocker, fullLists } from "@ghostery/adblocker-electron";
 import { autoUpdater, CancellationToken } from "electron-updater";
 import { exportBookmarksHtml, exportBookmarksJson, parseBookmarksImport } from "./bookmarks-io.js";
-import { buildViewSourceUrl, getErrorCode, isAboutBlankUrl, isFileUrl, isHttpUrl, isInternalSchemeInput, isViewSourceUrl, looksLikeHost, recoverEmbeddedUrl, shortUrlLabel } from "./url-utils.js";
+import { HOST_PATTERNS, LOCAL_HOST_PATTERNS, buildViewSourceUrl, getErrorCode, hostInputToUrl, isAboutBlankUrl, isFileUrl, isHttpUrl, isInternalSchemeInput, isViewSourceUrl, looksLikeHost, recoverEmbeddedUrl, shortUrlLabel } from "./url-utils.js";
 import { DEFAULT_LAYOUT_SETTINGS, mergeLayoutSettings, normalizeLayoutSettings, type LayoutSettings } from "./layout-settings.js";
 import { PINNABLE_TOOLBAR_ACTIONS, isToolbarActionId, normalizeToolbarPins, setToolbarPinned, type ToolbarActionId } from "./toolbar-pins.js";
 import { DEFAULT_GLANCE_SETTINGS, mergeGlanceSettings, normalizeGlanceSettings, type GlanceSettings } from "./glance-settings.js";
 import { isHostExcepted, isUrlExcepted, normalizeExceptionHost, parseExceptionList } from "./adblock-exceptions.js";
 import { buildGlanceTriggerScript, parseGlanceMessage } from "./glance-trigger.js";
+import { SITE_CACHE_STORAGES, siteCacheOrigin } from "./site-cache.js";
 import { clearPrivateCertExceptions, getFailedUrlForErrorPage, registerCertificateErrorHandler, setErrorPageFontDataUrl, setErrorPageThemeCss, wireErrorPages } from "./error-pages.js";
 import { normalizeExperimentalSettings, mergeExperimentalSettings, type ExperimentalSettings } from "./experimental-settings.js";
 import { getActiveHardLimitMb, getSystemInfo, isSystemdRunAvailable, limitOwnScopeIfNeeded, relaunchUnderMemoryScope, ResourceLimiter, type TabSnapshot } from "./resource-limiter-runtime.js";
@@ -29,6 +30,7 @@ import { createCompactChrome, type CompactChrome } from "./compact-runtime.js";
 import { createSplitFrame, type SplitFrame, type SplitFrameState } from "./split-frame.js";
 import { computeSplitLayout, ratioFromPointer, type Rect as SplitRect, type SplitSide } from "./split-layout.js";
 import { createSplitRegistry, type SplitGroup } from "./split-state.js";
+import { computeEmulation, createPreviewRegistry, DEFAULT_PREVIEW_WIDTH, DEVICE_PRESETS, emulationKey, isMobileWidth, toMobileUserAgent, type EmulationParams } from "./responsive-preview.js";
 import { computePopupGeometry, resizePopupBounds, type PopupPlacement, type PopupRect } from "./popup-placement.js";
 import { buildStoredSplits, matchStoredSplits, normalizeStoredSplits } from "./split-session.js";
 import { buildSessionData, normalizeSessionData, pushClosedTab, type ClosedTab, type SessionData } from "./session-store.js";
@@ -61,6 +63,7 @@ import { initPortableSession, registerPortableIpc } from "./portable-runtime.js"
 import { renderPortableSettingsCard } from "./portable-settings-card.js";
 import { checkForNewerRelease, getUpdateMode } from "./portable-update-runtime.js";
 import { buildNewVersionNotice } from "./portable-update.js";
+import { buildLocalServersNotice, findLocalWebServers } from "./localhost-scan.js";
 
 type TabState = {
   id: number;
@@ -306,6 +309,10 @@ let viewportLeft = 0;
 let sidebarDragging = false;
 // Split view (two tabs side by side) and compact mode (chrome revealed from the screen edge).
 const splitRegistry = createSplitRegistry();
+// Responsive preview: the right tab of a split shows the left tab's page at a device width.
+const previewRegistry = createPreviewRegistry();
+const previewEmulation = new Map<number, { key: string; params: EmulationParams }>();
+const previewOriginalUa = new Map<number, string>();
 let splitFrame: SplitFrame | null = null;
 let compactChrome: CompactChrome | null = null;
 let splitDividerDragging = false;
@@ -1143,15 +1150,14 @@ const renderStartPageHtml = (): string => {
       const template = ${searchTemplateJson};
       const form = document.getElementById('search-form');
       const input = document.getElementById('query');
+      const localHostPatterns = [${LOCAL_HOST_PATTERNS.map(String).join(", ")}];
+      const hostPatterns = [${HOST_PATTERNS.map(String).join(", ")}];
+      const hostOf = value => value.split(/[/?#]/)[0];
+      const looksLikeHost = value => !/\\s/.test(value) && hostPatterns.some(pattern => pattern.test(hostOf(value)));
+      const hostInputToUrl = value => (localHostPatterns.some(pattern => pattern.test(hostOf(value))) ? 'http' : 'https') + '://' + value;
       const destinationFor = value => {
         if (/^https?:\\/\\//i.test(value)) return value;
-        const host = value.split('/')[0];
-        const looksLikeHost = /^localhost(?::\\d+)?$/i.test(host) ||
-          /^(?:\\d{1,3}\\.){3}\\d{1,3}(?::\\d+)?$/.test(host) ||
-          /^(?:[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?\\.)+[a-z]{2,63}(?::\\d+)?$/i.test(host);
-        return looksLikeHost && !/\\s/.test(value)
-          ? 'https://' + value
-          : template.replaceAll('{query}', encodeURIComponent(value));
+        return looksLikeHost(value) ? hostInputToUrl(value) : template.replaceAll('{query}', encodeURIComponent(value));
       };
       form.addEventListener('submit', event => {
         event.preventDefault();
@@ -1196,7 +1202,7 @@ const normalizeInputToUrl = (input: string): string => {
   }
 
   if (looksLikeHost(trimmed)) {
-    return `https://${trimmed}`;
+    return hostInputToUrl(trimmed);
   }
 
   return buildSearchUrl(trimmed);
@@ -3901,6 +3907,7 @@ const renderSettingsPageHtml = (): string => {
     ramHard: "Twardy limit (wymaga restartu)", ramHardHint: "Linux: przy następnym starcie aplikacja uruchomi się w zakresie systemd (MemoryMax, bez swapu); system może zabić proces po przekroczeniu limitu.", ramHardPending: "Zostanie zastosowany po restarcie aplikacji.", ramHardActive: "Aktywny w tej sesji", ramHardFailed: "Nie udało się uruchomić w zakresie systemd - aplikacja działa bez twardego limitu", ramSlept: "Uśpione kart przez ogranicznik",
     cpuHeading: "Ogranicznik CPU", cpuDescription: "Ogranicza przeglądarkę do wybranej liczby wątków procesora (powinowactwo procesora dla procesu głównego i wszystkich procesów potomnych).",
     cpuEnable: "Ogranicznik CPU", cpuThreadsDetected: "Wątki procesora", cpuThreadsLabel: "Dozwolone wątki", cpuLowPriority: "Niższy priorytet kart w tle",
+    localServersHeading: "Lokalne serwery", localServersDescription: "Po uruchomieniu przeglądarka jednorazowo sprawdza, czy na localhost działa serwer WWW (na dowolnym porcie), i pyta, czy otworzyć go w nowej karcie.", localServersEnable: "Wykrywaj lokalne serwery przy starcie", trustLocalHeading: "Certyfikaty localhost", trustLocalDescription: "Samopodpisane certyfikaty lokalnych serwerów deweloperskich (vite --https, mkcert) są akceptowane bez strony z ostrzeżeniem. Dotyczy wyłącznie hostów pętli zwrotnej: localhost, *.localhost, 127.x i [::1].", trustLocalEnable: "Akceptuj niezaufane certyfikaty na localhost",
     cpuStatusOff: "Wyłączony.", cpuStatusActive: "Aktywny — procesy ograniczone:", cpuStatusUnsupported: "Niedostępne na tym systemie.", cpuStatusNoTaskset: "Niedostępne: brak polecenia taskset (util-linux).", cpuStatusNoPowershell: "Niedostępne: brak PowerShell.", cpuStatusError: "Nie udało się ustawić powinowactwa procesora.",
     prioActive: "Priorytet kart w tle: obniżony dla procesów:", prioUnsupported: "Priorytet kart w tle niedostępny na tym systemie.", prioNeedsRlimit: "Priorytet kart w tle niedostępny: system nie pozwala przywrócić normalnego priorytetu (RLIMIT_NICE).", prioError: "Nie udało się zmienić priorytetu kart.", userscriptsTab: "Skrypty użytkownika",
     userscriptsHeading: "Skrypty użytkownika", userscriptsDescription: "Własne skrypty JavaScript uruchamiane na stronach zgodnych ze wzorcami adresów.",
@@ -3943,6 +3950,7 @@ const renderSettingsPageHtml = (): string => {
     ramHard: "Hard limit (requires restart)", ramHardHint: "Linux: on the next start the app launches inside a systemd scope (MemoryMax, no swap); the system may kill a process that exceeds the limit.", ramHardPending: "Will be applied after the app restarts.", ramHardActive: "Active in this session", ramHardFailed: "Could not start inside a systemd scope - running without the hard limit", ramSlept: "Tabs put to sleep by the limiter",
     cpuHeading: "CPU limiter", cpuDescription: "Restricts the browser to the chosen number of CPU threads (CPU affinity for the main process and all child processes).",
     cpuEnable: "CPU limiter", cpuThreadsDetected: "CPU threads", cpuThreadsLabel: "Allowed threads", cpuLowPriority: "Lower priority of background tabs",
+    localServersHeading: "Local servers", localServersDescription: "On startup the browser checks once whether a web server is running on localhost (on any port) and asks whether to open it in a new tab.", localServersEnable: "Detect local servers on startup", trustLocalHeading: "Localhost certificates", trustLocalDescription: "Self-signed certificates of local dev servers (vite --https, mkcert) are accepted without the warning page. Applies only to loopback hosts: localhost, *.localhost, 127.x and [::1].", trustLocalEnable: "Accept untrusted certificates on localhost",
     cpuStatusOff: "Off.", cpuStatusActive: "Active — processes limited:", cpuStatusUnsupported: "Not available on this system.", cpuStatusNoTaskset: "Unavailable: the taskset command (util-linux) was not found.", cpuStatusNoPowershell: "Unavailable: PowerShell was not found.", cpuStatusError: "Could not set CPU affinity.",
     prioActive: "Background tab priority: lowered for processes:", prioUnsupported: "Background tab priority is not available on this system.", prioNeedsRlimit: "Background tab priority unavailable: the system does not allow restoring normal priority (RLIMIT_NICE).", prioError: "Could not change tab priority.", userscriptsTab: "User scripts",
     userscriptsHeading: "User scripts", userscriptsDescription: "Custom JavaScript snippets injected into pages that match URL patterns.",
@@ -4148,6 +4156,14 @@ ${UI_BASE_END_CSS}
         <div class="limit-row"><input id="cpu-range" type="range" min="1" max="8" step="1" value="4"><input id="cpu-value" type="number" min="1" step="1" inputmode="numeric"></div></div>
       <div class="field"><label class="checkbox-row" for="cpu-lowprio"><input id="cpu-lowprio" type="checkbox">${copy.cpuLowPriority}</label></div>
       <p class="description" id="cpu-status" style="margin:0"></p>
+    </section>
+    <section class="card" id="local-servers-card">
+      <h2>${copy.localServersHeading}</h2><p class="description">${copy.localServersDescription}</p>
+      <div class="field"><label class="checkbox-row" for="local-servers-enabled"><input id="local-servers-enabled" type="checkbox">${copy.localServersEnable}</label></div>
+    </section>
+    <section class="card" id="trust-localhost-card">
+      <h2>${copy.trustLocalHeading}</h2><p class="description">${copy.trustLocalDescription}</p>
+      <div class="field"><label class="checkbox-row" for="trust-localhost-enabled"><input id="trust-localhost-enabled" type="checkbox">${copy.trustLocalEnable}</label></div>
     </section>
     <div id="panel-userscripts" style="display:grid;gap:16px">
     <section id="scripts-list-card" class="card">
@@ -4491,6 +4507,8 @@ ${UI_BASE_END_CSS}
   const ramEnabled = $('ram-enabled'), ramRange = $('ram-range'), ramValue = $('ram-value'), ramUnit = $('ram-unit'), ramInfo = $('ram-info');
   const ramHard = $('ram-hard'), ramHardField = $('ram-hard-field'), ramHardHint = $('ram-hard-hint');
   const cpuEnabled = $('cpu-enabled'), cpuRange = $('cpu-range'), cpuValue = $('cpu-value'), cpuLowprio = $('cpu-lowprio'), cpuInfo = $('cpu-info'), cpuStatus = $('cpu-status');
+  const localServersEnabled = $('local-servers-enabled');
+  const trustLocalhostEnabled = $('trust-localhost-enabled');
   const lang = document.documentElement.lang;
   const fmtMb = (mb) => mb >= 1024 ? (Math.round(mb / 102.4) / 10).toLocaleString(lang) + ' GB' : Math.round(mb) + ' MB';
   let exp = null;
@@ -4534,6 +4552,8 @@ ${UI_BASE_END_CSS}
     cpuRange.value = cpuValue.value = String(settings.cpuThreads);
     cpuRange.disabled = cpuValue.disabled = !settings.cpuLimiterEnabled;
     cpuLowprio.checked = settings.cpuLowerBackgroundPriority;
+    localServersEnabled.checked = settings.detectLocalServers;
+    trustLocalhostEnabled.checked = settings.trustLocalhostCertificates;
     renderExpStatus();
   };
   const saveExp = async (patch) => {
@@ -4544,6 +4564,8 @@ ${UI_BASE_END_CSS}
     try { exp = await window.browserApi.getExperimentalSettings(); renderExpControls(); } catch (error) { /* ignore */ }
   };
   ramEnabled.addEventListener('change', () => saveExp({ ramLimiterEnabled: ramEnabled.checked }));
+  localServersEnabled.addEventListener('change', () => saveExp({ detectLocalServers: localServersEnabled.checked }));
+  trustLocalhostEnabled.addEventListener('change', () => saveExp({ trustLocalhostCertificates: trustLocalhostEnabled.checked }));
   ramRange.addEventListener('input', () => { ramValue.value = ramUnit.value === 'GB' ? String(Math.round(Number(ramRange.value) / 256) / 4) : ramRange.value; });
   ramRange.addEventListener('change', () => saveExp({ ramLimitMb: Number(ramRange.value) }));
   ramValue.addEventListener('change', () => {
@@ -5811,6 +5833,7 @@ const openPageContextMenu = async (
   const copy = appLanguage === "pl" ? {
     title: "Menu strony", linkMenu: "Menu linku", imageMenu: "Menu obrazu", link: "Link", image: "Obraz", selection: "Zaznaczenie", editing: "Edycja", page: "Strona", navigation: "Nawigacja",
     openLinkSplit: "Otwórz link w podzielonym widoku",
+    responsivePreview: "Podgląd responsywny", responsivePreviewOff: "Wyłącz podgląd responsywny",
     openGlance: "Otwórz w Glance", openLinkHere: "Otwórz link w tej karcie", openLink: "Otwórz link w nowej karcie", openLinkBackground: "Otwórz w karcie w tle",
     copyLink: "Kopiuj adres linku", copyLinkText: "Kopiuj tekst linku", saveLink: "Zapisz link jako…",
     openImage: "Otwórz obraz w nowej karcie", copyImage: "Kopiuj adres obrazu", saveImage: "Zapisz obraz jako…",
@@ -5818,12 +5841,13 @@ const openPageContextMenu = async (
     undo: "Cofnij", redo: "Ponów", cut: "Wytnij", copy: "Kopiuj", paste: "Wklej", selectAll: "Zaznacz wszystko",
     addBookmark: "Dodaj stronę do zakładek", removeBookmark: "Usuń stronę z zakładek", copyPageAddress: "Kopiuj adres strony",
     savePage: "Zapisz stronę jako…", print: "Drukuj stronę…", inspect: "Zbadaj element",
-    back: "Wstecz", forward: "Dalej", reload: "Odśwież", forceReload: "Odśwież bez pamięci podręcznej",
+    back: "Wstecz", forward: "Dalej", reload: "Odśwież", forceReload: "Odśwież bez pamięci podręcznej", clearSiteCache: "Wyczyść pamięć podręczną strony i przeładuj",
     savePageTitle: "Zapisz stronę", htmlDocument: "Dokument HTML",
     viewSource: "Pokaż źródło strony", spelling: "Pisownia", addToDictionary: "Dodaj do słownika", noSuggestions: "Brak sugestii",
   } : {
     title: "Page menu", linkMenu: "Link menu", imageMenu: "Image menu", link: "Link", image: "Image", selection: "Selection", editing: "Editing", page: "Page", navigation: "Navigation",
     openLinkSplit: "Open link in split view",
+    responsivePreview: "Responsive preview", responsivePreviewOff: "Turn off responsive preview",
     openGlance: "Open in Glance", openLinkHere: "Open link in this tab", openLink: "Open link in new tab", openLinkBackground: "Open in background tab",
     copyLink: "Copy link address", copyLinkText: "Copy link text", saveLink: "Save link as…",
     openImage: "Open image in new tab", copyImage: "Copy image address", saveImage: "Save image as…",
@@ -5831,7 +5855,7 @@ const openPageContextMenu = async (
     undo: "Undo", redo: "Redo", cut: "Cut", copy: "Copy", paste: "Paste", selectAll: "Select all",
     addBookmark: "Bookmark this page", removeBookmark: "Remove page bookmark", copyPageAddress: "Copy page address",
     savePage: "Save page as…", print: "Print page…", inspect: "Inspect element",
-    back: "Back", forward: "Forward", reload: "Reload", forceReload: "Reload without cache",
+    back: "Back", forward: "Forward", reload: "Reload", forceReload: "Reload without cache", clearSiteCache: "Clear site cache and reload",
     savePageTitle: "Save page", htmlDocument: "HTML document",
     viewSource: "View page source", spelling: "Spelling", addToDictionary: "Add to dictionary", noSuggestions: "No suggestions",
   };
@@ -5893,6 +5917,8 @@ const openPageContextMenu = async (
   const pageUrl = getBookmarkableUrl(tab.url);
   const pageItems = [action("context-copy-page-address", copy.copyPageAddress)];
   if (pageUrl) pageItems.push(action("context-toggle-bookmark", findBookmarkByUrl(pageUrl) ? copy.removeBookmark : copy.addBookmark));
+  if (getPreviewIdFor(tab.id) !== null) pageItems.push(action("context-responsive-preview-off", copy.responsivePreviewOff));
+  else if (isPreviewableUrl(tab.url)) pageItems.push(action("context-responsive-preview", copy.responsivePreview));
   pageItems.push(
     action("context-save-page", copy.savePage),
     ...(isHttpUrl(tab.url) ? [action("context-view-source", copy.viewSource)] : []),
@@ -5906,6 +5932,7 @@ const openPageContextMenu = async (
   if (contents.navigationHistory.canGoBack()) navigationItems.push(action("context-back", copy.back));
   if (contents.navigationHistory.canGoForward()) navigationItems.push(action("context-forward", copy.forward));
   navigationItems.push(action("context-reload", copy.reload), action("context-force-reload", copy.forceReload));
+  if (siteCacheOrigin(tab.url)) navigationItems.push(action("context-clear-site-cache", copy.clearSiteCache));
   groups.push({ title: copy.navigation, items: navigationItems });
 
   const columns = Math.min(3, groups.length);
@@ -5933,6 +5960,8 @@ const openPageContextMenu = async (
       case "context-open-glance": openGlance(linkUrl!, tab); break;
       case "context-open-link": openNewTab(linkUrl!, tab.isPrivate); break;
       case "context-open-link-background": createTab(linkUrl!, false, tab.isPrivate); break;
+      case "context-responsive-preview": if (tab.id === activeTabId) startResponsivePreview(); break;
+      case "context-responsive-preview-off": if (tab.id === activeTabId || getPreviewIdFor(tab.id) !== null) { if (activeTabId !== tab.id) setActiveTab(tab.id); stopResponsivePreview(); } break;
       case "context-open-link-split": openSplitWithNewTab(tab.id, linkUrl!); break;
       case "context-copy-link": clipboard.writeText(linkUrl!); break;
       case "context-copy-link-text": clipboard.writeText(params.linkText.trim()); break;
@@ -5956,6 +5985,7 @@ const openPageContextMenu = async (
       case "context-forward": contents.navigationHistory.goForward(); break;
       case "context-reload": contents.reload(); break;
       case "context-force-reload": contents.reloadIgnoringCache(); break;
+      case "context-clear-site-cache": await clearSiteCacheAndReload(contents); break;
       case "context-spell-replace": {
         const suggestion = spellSuggestions[Number(actionUrl.searchParams.get("i"))];
         if (suggestion) contents.replaceMisspelling(suggestion);
@@ -6739,6 +6769,8 @@ const buildPaletteItems = (): PaletteItem[] => {
     { id: "new-private-tab", kind: "command", label: pl ? "Nowa karta prywatna" : "New private tab", hint: "Ctrl+Shift+N", keywords: "prywatna karta incognito private new tab nowa" },
     { id: "close-tab", kind: "command", label: pl ? "Zamknij kartę" : "Close tab", hint: "Ctrl+W", keywords: "zamknij karte close tab" },
     { id: "reload", kind: "command", label: pl ? "Przeładuj stronę" : "Reload page", hint: "Ctrl+R", keywords: "przeladuj reload odswiez refresh" },
+    { id: "hard-reload", kind: "command", label: pl ? "Twarde przeładowanie" : "Hard reload", hint: "Ctrl+Shift+R", keywords: "twarde przeladowanie hard reload bez cache pamiec podreczna ignoruj" },
+    { id: "clear-site-cache", kind: "command", label: pl ? "Wyczyść pamięć podręczną strony i przeładuj" : "Clear site cache and reload", keywords: "wyczysc pamiec podreczna strony przeladuj clear site cache service worker reload" },
     { id: "back", kind: "command", label: pl ? "Wstecz" : "Back", hint: "Alt+Left", keywords: "wstecz back historia" },
     { id: "forward", kind: "command", label: pl ? "Dalej" : "Forward", hint: "Alt+Right", keywords: "dalej forward" },
     { id: "clear-history", kind: "command", label: pl ? "Wyczyść historię przeglądania" : "Clear browsing history", keywords: "wyczysc historie clear history" },
@@ -6793,6 +6825,19 @@ const buildPaletteItems = (): PaletteItem[] => {
     });
   }
 
+  if (activeTabId !== null) {
+    const previewActive = getPreviewIdFor(activeTabId) !== null;
+    if (previewActive || isPreviewableUrl(tabs.get(activeTabId)?.url ?? "")) {
+      const kw = "podglad responsywny responsive preview device emulation urzadzenie telefon phone tablet laptop mobile";
+      if (!previewActive) items.push({ id: "responsive-preview", kind: "command", label: pl ? "Podgląd responsywny" : "Responsive preview", keywords: kw });
+      const names = { phone: pl ? "telefon" : "phone", tablet: "tablet", laptop: "laptop" };
+      for (const preset of DEVICE_PRESETS) {
+        items.push({ id: `responsive-preview:${preset.width}`, kind: "command", label: `${pl ? "Podgląd responsywny" : "Responsive preview"}: ${names[preset.id]} (${preset.width})`, keywords: kw });
+      }
+      if (previewActive) items.push({ id: "responsive-preview-off", kind: "command", label: pl ? "Wyłącz podgląd responsywny" : "Turn off responsive preview", keywords: kw });
+    }
+  }
+
   if (activeTabId !== null && splitRegistry.groupOf(activeTabId)) {
     items.push({ id: "split-close", kind: "command", label: pl ? "Zamknij podzielony widok" : "Close split view", keywords: "podziel widok split view zamknij close" });
   } else if (activeTabId !== null) {
@@ -6828,6 +6873,11 @@ const executePaletteCommand = async (id: string): Promise<void> => {
     if (Number.isInteger(tabId)) setActiveTab(tabId);
     return;
   }
+  if (id.startsWith("responsive-preview:")) {
+    const width = Number(id.slice("responsive-preview:".length));
+    if (DEVICE_PRESETS.some((preset) => preset.width === width)) startResponsivePreview(width);
+    return;
+  }
   if (id.startsWith("split-with:")) {
     const otherId = Number.parseInt(id.slice(11), 10);
     if (activeTabId !== null && Number.isInteger(otherId)) startSplit(activeTabId, otherId);
@@ -6845,6 +6895,8 @@ const executePaletteCommand = async (id: string): Promise<void> => {
     case "new-private-tab": openNewPrivateTab(); break;
     case "close-tab": closeCurrentTab(); break;
     case "reload": reloadActiveTabView(); break;
+    case "hard-reload": reloadActiveTabView(true); break;
+    case "clear-site-cache": await clearSiteCacheAndReload(getTabContents(getActiveTab())); break;
     case "back": {
       const contents = getTabContents(getActiveTab());
       if (contents?.navigationHistory.canGoBack()) contents.navigationHistory.goBack();
@@ -6875,6 +6927,8 @@ const executePaletteCommand = async (id: string): Promise<void> => {
     case "toggle-compact-mode": toggleCompactMode(); break;
     case "split-new": toggleSplitForActiveTab(); break;
     case "split-close": closeSplit(); break;
+    case "responsive-preview": startResponsivePreview(); break;
+    case "responsive-preview-off": stopResponsivePreview(); break;
     case "sleep-other-tabs": sleepOtherTabs(); break;
     case "toggle-content-blocking":
       await setAdblockEnabled(!adblockEnabled);
@@ -7233,9 +7287,10 @@ const handleGlanceShortcut = (event: Electron.Event, key: string, code: string, 
     closeGlance();
     return true;
   }
-  if ((commandPressed && !input.alt && !input.shift && (key === "r" || code === "keyr")) || (!commandPressed && !input.alt && key === "f5")) {
+  if ((commandPressed && !input.alt && (key === "r" || code === "keyr")) || (!commandPressed && !input.alt && key === "f5")) {
     event.preventDefault();
-    record.view.webContents.reload();
+    if (input.shift) record.view.webContents.reloadIgnoringCache();
+    else record.view.webContents.reload();
     return true;
   }
   return false;
@@ -7306,8 +7361,23 @@ const changeActiveTabZoom = (change: "in" | "out" | "reset"): void => {
   setTabZoom(tab, change === "reset" ? 1 : stepZoom(contents.getZoomFactor(), change));
 };
 
-const reloadActiveTabView = (): void => {
-  getTabContents(getActiveTab())?.reload();
+const reloadActiveTabView = (hard = false): void => {
+  const contents = getTabContents(getActiveTab());
+  if (hard) contents?.reloadIgnoringCache();
+  else contents?.reload();
+};
+
+/** Clears Cache Storage + service workers of the page's origin in the tab's own session (private tab -> private session), then hard-reloads. */
+const clearSiteCacheAndReload = async (contents: Electron.WebContents | null | undefined): Promise<void> => {
+  if (!contents || contents.isDestroyed()) return;
+  const origin = siteCacheOrigin(contents.getURL());
+  if (!origin) return;
+  try {
+    await contents.session.clearStorageData({ origin, storages: [...SITE_CACHE_STORAGES] });
+  } catch (error) {
+    console.warn("clearStorageData failed", error);
+  }
+  if (!contents.isDestroyed()) contents.reloadIgnoringCache();
 };
 
 const handleBeforeInputEvent = (
@@ -7329,7 +7399,7 @@ const handleBeforeInputEvent = (
 
   if (!commandPressed && !input.alt && (key === "f5" || key === "f11" || key === "f12")) {
     event.preventDefault();
-    if (key === "f5") reloadActiveTabView();
+    if (key === "f5") reloadActiveTabView(input.shift);
     if (key === "f11" && mainWindow) {
       if (htmlFullscreenTabId !== null) exitHtmlFullscreenInPage(tabs.get(htmlFullscreenTabId));
       else mainWindow.setFullScreen(!mainWindow.isFullScreen());
@@ -7401,7 +7471,7 @@ const handleBeforeInputEvent = (
   }
   if (key === "r" || code === "keyr") {
     event.preventDefault();
-    reloadActiveTabView();
+    reloadActiveTabView(input.shift);
     return;
   }
   if (!input.shift && (key === "p" || code === "keyp")) {
@@ -7570,6 +7640,8 @@ let splitDropMode = false;
 
 /** Positions/paints the frame for the current situation: split panes, tab-drop zones, or nothing. */
 const syncSplitFrame = (area: SplitRect | null, split: ActiveSplit | null): void => {
+  reconcileResponsivePreviews();
+  if (split) applyPreviewEmulation(split);
   if (!area) return;
   if (splitDropMode) {
     ensureSplitFrame()?.show(area, { mode: "drop", width: area.width, height: area.height, labels: getSplitLabels() }, true);
@@ -7851,6 +7923,7 @@ const closeSplit = (tabId: number | null = activeTabId): boolean => {
   if (tabId === null) return false;
   const group = splitRegistry.dissolve(tabId);
   if (!group) return false;
+  endResponsivePreview(group.right);
   for (const id of [group.left, group.right]) {
     if (id !== activeTabId) tabs.get(id)?.view?.setVisible(false);
   }
@@ -7875,6 +7948,119 @@ const toggleSplitForActiveTab = (): void => {
   if (activeTabId === null) return;
   if (splitRegistry.groupOf(activeTabId)) closeSplit(activeTabId);
   else openSplitWithNewTab(activeTabId);
+};
+
+const isPreviewableUrl = (url: string): boolean => isHttpUrl(url) || isFileUrl(url);
+
+/** The preview tab shown in the same split as `tabId` (either the preview itself or its source), if any. */
+const getPreviewIdFor = (tabId: number | null): number | null => {
+  if (tabId === null) return null;
+  const candidate = previewRegistry.get(tabId) ? tabId : previewRegistry.previewOfSource(tabId);
+  if (candidate === null) return null;
+  const entry = previewRegistry.get(candidate);
+  const group = splitRegistry.groupOf(candidate);
+  return entry && group && group.right === candidate && group.left === entry.sourceTabId && tabs.has(candidate) ? candidate : null;
+};
+
+/** Drops the emulation and the mobile user agent of a preview tab and forgets it (the tab itself stays). */
+const endResponsivePreview = (previewId: number): void => {
+  if (!previewRegistry.remove(previewId)) return;
+  previewEmulation.delete(previewId);
+  const originalUa = previewOriginalUa.get(previewId);
+  previewOriginalUa.delete(previewId);
+  const contents = getTabContents(tabs.get(previewId));
+  if (!contents) return;
+  try { contents.disableDeviceEmulation(); } catch { /* the page is gone */ }
+  if (originalUa) contents.setUserAgent(originalUa);
+};
+
+/** Ends previews whose split no longer has them as right pane of their source (dissolved, replaced, moved). */
+const reconcileResponsivePreviews = (): void => {
+  for (const previewId of previewRegistry.ids()) {
+    const entry = previewRegistry.get(previewId);
+    const group = splitRegistry.groupOf(previewId);
+    if (!entry || !tabs.has(previewId) || !group || group.right !== previewId || group.left !== entry.sourceTabId) endResponsivePreview(previewId);
+  }
+};
+
+const applyPreviewEmulation = (split: ActiveSplit): void => {
+  const previewId = split.group.right;
+  const entry = previewRegistry.get(previewId);
+  if (!entry || entry.sourceTabId !== split.group.left) return;
+  const contents = getTabContents(tabs.get(previewId));
+  if (!contents) return;
+  const params = computeEmulation(entry.width, split.layout.right.width, split.layout.right.height);
+  const key = emulationKey(params);
+  if (previewEmulation.get(previewId)?.key === key) return;
+  previewEmulation.set(previewId, { key, params });
+  contents.enableDeviceEmulation(params);
+};
+
+/** Mobile user agent on/off for the preview tab according to its width; true when it changed. */
+const syncPreviewUserAgent = (previewId: number): boolean => {
+  const entry = previewRegistry.get(previewId);
+  const contents = getTabContents(tabs.get(previewId));
+  if (!entry || !contents) return false;
+  const mobile = isMobileWidth(entry.width);
+  const original = previewOriginalUa.get(previewId);
+  if (mobile && original === undefined) {
+    const base = contents.getUserAgent();
+    previewOriginalUa.set(previewId, base);
+    contents.setUserAgent(toMobileUserAgent(base));
+    return true;
+  }
+  if (!mobile && original !== undefined) {
+    contents.setUserAgent(original);
+    previewOriginalUa.delete(previewId);
+    return true;
+  }
+  return false;
+};
+
+/** Creates the preview next to the active tab (or switches the width of the existing one). */
+const startResponsivePreview = (width: number = DEFAULT_PREVIEW_WIDTH): void => {
+  if (activeTabId === null) return;
+  reconcileResponsivePreviews();
+  const existingId = getPreviewIdFor(activeTabId);
+  if (existingId !== null) {
+    previewRegistry.setWidth(existingId, width);
+    previewEmulation.delete(existingId);
+    if (syncPreviewUserAgent(existingId)) getTabContents(tabs.get(existingId))?.reload();
+    applyActiveViewBounds();
+    return;
+  }
+  const source = tabs.get(activeTabId);
+  if (!source || !isPreviewableUrl(source.url)) return;
+  const url = getTabContents(source)?.getURL() || source.url;
+  const previewId = openSplitWithNewTab(source.id, isPreviewableUrl(url) ? url : source.url);
+  if (previewId === null) return;
+  previewRegistry.set(previewId, source.id, width);
+  if (syncPreviewUserAgent(previewId)) getTabContents(tabs.get(previewId))?.loadURL(source.url).catch(logNavigationError);
+  applyActiveViewBounds();
+};
+
+/** Turns the preview off: removes the emulation and closes the preview tab that the feature created. */
+const stopResponsivePreview = (): void => {
+  const previewId = getPreviewIdFor(activeTabId);
+  if (previewId === null) return;
+  endResponsivePreview(previewId);
+  closeTab(previewId);
+};
+
+/** The source tab started loading: a reload of the same address reloads the preview as well. */
+const previewSourceStartedNavigation = (tabId: number, targetUrl: string): void => {
+  const previewId = previewRegistry.previewOfSource(tabId);
+  if (previewId === null || !isPreviewableUrl(targetUrl)) return;
+  const preview = getTabContents(tabs.get(previewId));
+  if (preview && preview.getURL() === targetUrl) preview.reload();
+};
+
+/** The source tab committed a navigation: the preview follows it. */
+const followPreviewSource = (tabId: number, currentUrl: string): void => {
+  const previewId = previewRegistry.previewOfSource(tabId);
+  if (previewId === null || !isPreviewableUrl(currentUrl)) return;
+  const preview = getTabContents(tabs.get(previewId));
+  if (preview && preview.getURL() !== currentUrl) preview.loadURL(currentUrl).catch(logNavigationError);
 };
 
 // Pane focus: clicking into the partner pane makes it the active tab (address bar, navigation, find).
@@ -7972,6 +8158,9 @@ const closeTab = (id: number): boolean => {
   const tabToClose = tabs.get(id)!;
   // Closing one pane of a split leaves the other as a plain tab (and keeps it on screen).
   const closedSplit = splitRegistry.dissolve(id);
+  endResponsivePreview(id);
+  const followerId = previewRegistry.previewOfSource(id);
+  if (followerId !== null) endResponsivePreview(followerId);
   const splitPartnerAfterClose = closedSplit ? (closedSplit.left === id ? closedSplit.right : closedSplit.left) : null;
   leaveHtmlFullscreen(id);
   // New-tab pages are recorded too (as in Chrome), so Ctrl+Shift+T restores them whichever way they were closed.
@@ -8192,7 +8381,10 @@ const wireTabEvents = (tab: TabRecord, view: WebContentsView): void => {
   });
   contents.on("did-start-navigation", (details) => {
     // A new page starts with a clean "blocked on this tab" count.
-    if (details.isMainFrame && !details.isSameDocument) tab.blockedCount = 0;
+    if (details.isMainFrame && !details.isSameDocument) {
+      tab.blockedCount = 0;
+      previewSourceStartedNavigation(tab.id, details.url);
+    }
   });
   contents.on("did-start-loading", () => {
     updateTabFromWebContents(tab);
@@ -8232,8 +8424,13 @@ const wireTabEvents = (tab: TabRecord, view: WebContentsView): void => {
       recordVisit(contents.getURL());
     }
     executedUserScriptKeys.delete(contents);
+    // The emulation may be dropped by a cross-process navigation: re-apply the stored one.
+    const emulation = previewEmulation.get(tab.id);
+    if (emulation) contents.enableDeviceEmulation(emulation.params);
+    followPreviewSource(tab.id, contents.getURL());
   });
   contents.on("did-navigate-in-page", () => {
+    followPreviewSource(tab.id, contents.getURL());
     updateTabFromWebContents(tab);
     void injectUserScriptsIntoContents(contents, "document-idle");
   });
@@ -9351,8 +9548,8 @@ const registerIpc = (): void => {
     return true;
   });
 
-  onTrusted("nav:reload-shortcut", () => {
-    reloadActiveTabView();
+  onTrusted("nav:reload-shortcut", (_event, hard) => {
+    reloadActiveTabView(hard === true);
   });
 
   handleTrusted("history:get", () => {
@@ -9818,6 +10015,26 @@ const showNewVersionNotice = async (version: string, url: string): Promise<void>
   }
 };
 
+// Jednorazowo na uruchomienie: wykryj lokalne serwery HTTP na localhost i zapytaj, czy otworzyć je w nowej karcie.
+let localServersChecked = false;
+const checkLocalServersOnStartup = async (): Promise<void> => {
+  if (localServersChecked || !promptOverlay || !experimentalSettings.detectLocalServers) return;
+  localServersChecked = true;
+  try {
+    const found = await findLocalWebServers();
+    const openOrigins = new Set([...tabs.values()].map((tab) => {
+      try { return new URL(tab.url).origin; } catch { return ""; }
+    }));
+    const urls = found.filter((url) => !openOrigins.has(new URL(url).origin));
+    if (!urls.length || !promptOverlay) return;
+    const result = await promptOverlay.request(buildLocalServersNotice(appLanguage === "pl" ? "pl" : "en", urls));
+    if (result.action !== "primary") return;
+    for (const url of urls.length === 1 ? urls : urls.filter((url) => result.selected?.includes(url))) openNewTab(url);
+  } catch (error) {
+    console.error("Local server check failed:", error);
+  }
+};
+
 const runUpdateCheck = async (): Promise<UpdateStatus> => {
   if (updateCheckInProgress) {
     return updateStatus;
@@ -9889,6 +10106,7 @@ const runUpdateCheck = async (): Promise<UpdateStatus> => {
 };
 
 const scheduleAutoUpdateChecks = (): void => {
+  setTimeout(() => { void checkLocalServersOnStartup(); }, 2000);
   setUpdateStatus({});
   // Dev: tylko ręczne sprawdzanie. Wersje przenośne ("notify") sprawdzają wydania, ale tylko powiadamiają;
   // zainstalowane buildy i AppImage (także w trybie przenośnym) używają electron-updater.
@@ -10028,6 +10246,9 @@ const createMainWindow = async (
     splitFrame?.dispose();
     splitFrame = null;
     splitRegistry.clear();
+    previewRegistry.clear();
+    previewEmulation.clear();
+    previewOriginalUa.clear();
     splitDropMode = false;
     destroyHudViews();
     htmlFullscreenTabId = null;
@@ -10300,7 +10521,7 @@ const bootstrap = async (): Promise<void> => {
   }
 
   setupPermissionHandlers(session.defaultSession);
-  registerCertificateErrorHandler((contents) => resolveTabByWebContentsId(contents.id)?.isPrivate ?? false);
+  registerCertificateErrorHandler((contents) => resolveTabByWebContentsId(contents.id)?.isPrivate ?? false, () => experimentalSettings.trustLocalhostCertificates);
   registerAuthHandler();
   applySpellcheckLanguages();
   registerIpc();

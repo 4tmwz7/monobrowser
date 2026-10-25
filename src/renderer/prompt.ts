@@ -5,6 +5,7 @@ type PromptPayload = {
   title: string;
   lines: PromptLine[];
   fields?: { username: string; password: string };
+  choices?: { id: string; label: string; checked?: boolean }[];
   primary: string;
   secondary: string;
   danger?: boolean;
@@ -13,7 +14,7 @@ type PromptPayload = {
 
 type PromptApi = {
   onShow: (callback: (payload: PromptPayload) => void) => () => void;
-  submit: (id: number, result: { action: "primary" | "secondary"; username?: string; password?: string }) => void;
+  submit: (id: number, result: { action: "primary" | "secondary"; username?: string; password?: string; selected?: string[] }) => void;
   reportHeight: (height: number) => void;
 };
 
@@ -28,6 +29,7 @@ const titleEl = document.getElementById("title") as HTMLDivElement;
 const linesEl = document.getElementById("lines") as HTMLDivElement;
 const form = document.getElementById("body") as HTMLFormElement;
 const fieldsEl = document.getElementById("fields") as HTMLDivElement;
+const choicesEl = document.getElementById("choices") as HTMLDivElement;
 const userLabel = document.getElementById("user-label") as HTMLSpanElement;
 const passLabel = document.getElementById("pass-label") as HTMLSpanElement;
 const usernameInput = document.getElementById("username") as HTMLInputElement;
@@ -37,6 +39,12 @@ const secondaryButton = document.getElementById("secondary") as HTMLButtonElemen
 
 let currentId = -1;
 let hasFields = false;
+let hasChoices = false;
+
+const choiceBoxes = (): HTMLInputElement[] => Array.from(choicesEl.querySelectorAll("input"));
+const syncPrimary = (): void => {
+  primaryButton.disabled = hasChoices && !choiceBoxes().some((box) => box.checked);
+};
 let done = false;
 
 const reportHeight = (): void => window.promptApi.reportHeight(Math.ceil(wrap.getBoundingClientRect().height));
@@ -44,6 +52,10 @@ const reportHeight = (): void => window.promptApi.reportHeight(Math.ceil(wrap.ge
 const finish = (action: "primary" | "secondary"): void => {
   if (done) return;
   done = true;
+  if (hasChoices && action === "primary") {
+    window.promptApi.submit(currentId, { action, selected: choiceBoxes().filter((box) => box.checked).map((box) => box.value) });
+    return;
+  }
   window.promptApi.submit(currentId, hasFields && action === "primary"
     ? { action, username: usernameInput.value, password: passwordInput.value }
     : { action });
@@ -70,6 +82,21 @@ const show = (payload: PromptPayload): void => {
     userLabel.textContent = payload.fields.username;
     passLabel.textContent = payload.fields.password;
   }
+  hasChoices = Boolean(payload.choices?.length);
+  choicesEl.hidden = !hasChoices;
+  choicesEl.replaceChildren(...(payload.choices ?? []).map((choice) => {
+    const row = document.createElement("label");
+    const box = document.createElement("input");
+    box.type = "checkbox";
+    box.value = choice.id;
+    box.checked = choice.checked !== false;
+    box.addEventListener("change", syncPrimary);
+    const text = document.createElement("span");
+    text.textContent = choice.label;
+    row.append(box, text);
+    return row;
+  }));
+  syncPrimary();
   usernameInput.value = "";
   passwordInput.value = "";
   primaryButton.textContent = payload.primary;

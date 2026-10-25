@@ -142,3 +142,17 @@ test("shouldRelaunchUnderScope guards against loops and other platforms", () => 
   assert.equal(shouldRelaunchUnderScope({ ...base, hard: false }), false);
   assert.equal(shouldRelaunchUnderScope({ ...base, enabled: false }), false);
 });
+
+test("local server detection is an experimental opt-in", () => {
+  assert.equal(defaultExperimentalSettings(SYSTEM).detectLocalServers, false);
+  const on = mergeExperimentalSettings(defaultExperimentalSettings(SYSTEM), { detectLocalServers: true }, SYSTEM);
+  assert.equal(on.detectLocalServers, true);
+  assert.equal(mergeExperimentalSettings(on, { detectLocalServers: "no" }, SYSTEM).detectLocalServers, true);
+});
+
+test("trustLocalhostCertificates: domyślnie wyłączone, scala tylko wartości logiczne", () => {
+  assert.equal(defaultExperimentalSettings(SYSTEM).trustLocalhostCertificates, false);
+  const on = mergeExperimentalSettings(defaultExperimentalSettings(SYSTEM), { trustLocalhostCertificates: true }, SYSTEM);
+  assert.equal(on.trustLocalhostCertificates, true);
+  assert.equal(mergeExperimentalSettings(on, { trustLocalhostCertificates: "no" }, SYSTEM).trustLocalhostCertificates, true);
+});

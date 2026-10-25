@@ -10,6 +10,9 @@ export type PromptKind = "permission" | "auth" | "confirm";
 
 export type PromptLine = { text: string; style?: "strong" | "muted" | "warn" };
 
+/** A checkbox row; the primary result lists the ids of the checked ones. */
+export type PromptChoice = { id: string; label: string; checked?: boolean };
+
 export type PromptRequest = {
   kind: PromptKind;
   /** The tab this prompt belongs to; null = always visible. */
@@ -17,13 +20,14 @@ export type PromptRequest = {
   title: string;
   lines: PromptLine[];
   fields?: { username: string; password: string };
+  choices?: PromptChoice[];
   primary: string;
   secondary: string;
   danger?: boolean;
 };
 
 export type PromptResult =
-  | { action: "primary"; username?: string; password?: string }
+  | { action: "primary"; username?: string; password?: string; selected?: string[] }
   | { action: "secondary" }
   | { action: "dismiss" };
 
@@ -104,6 +108,7 @@ export const createPromptOverlay = (deps: PromptOverlayDeps): PromptOverlay => {
       title: entry.request.title,
       lines: entry.request.lines,
       fields: entry.request.fields,
+      choices: entry.request.choices,
       primary: entry.request.primary,
       secondary: entry.request.secondary,
       danger: entry.request.danger,
@@ -175,8 +180,14 @@ export const createPromptOverlay = (deps: PromptOverlayDeps): PromptOverlay => {
     if (!viewAlive() || event.sender !== view!.webContents || !(event.senderFrame?.url ?? "").startsWith("file:")) return;
     const entry = queue.find((candidate) => candidate.id === id);
     if (!entry || typeof result !== "object" || result === null) return;
-    const data = result as { action?: unknown; username?: unknown; password?: unknown };
+    const data = result as { action?: unknown; username?: unknown; password?: unknown; selected?: unknown };
     if (data.action === "primary") {
+      if (entry.request.choices) {
+        const known = new Set(entry.request.choices.map((choice) => choice.id));
+        const selected = Array.isArray(data.selected) ? data.selected.filter((id): id is string => typeof id === "string" && known.has(id)) : [];
+        settle(entry, { action: "primary", selected: [...new Set(selected)] });
+        return;
+      }
       settle(entry, entry.request.fields
         ? { action: "primary", username: String(data.username ?? ""), password: String(data.password ?? "") }
         : { action: "primary" });

@@ -1,6 +1,6 @@
 import { contextBridge, ipcRenderer } from "electron";
 
-type PromptResult = { action: "primary" | "secondary"; username?: string; password?: string };
+type PromptResult = { action: "primary" | "secondary"; username?: string; password?: string; selected?: string[] };
 
 // Bridge of the in-window prompt overlay (permissions, HTTP auth, confirmations).
 contextBridge.exposeInMainWorld("promptApi", {
