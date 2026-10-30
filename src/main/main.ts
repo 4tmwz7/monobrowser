@@ -5206,12 +5206,14 @@ const POPUP_MENU_STYLES = `
   .info-action:active { background:var(--ctl-solid-press); }
   .info-action:focus-visible { outline:2px solid var(--accent); outline-offset:-4px; }
   .context-popup { overflow:hidden; }
-  .context-groups { padding:8px; display:grid; grid-template-columns:repeat(3,minmax(0,1fr)); align-items:start; gap:8px; }
-  .context-group { min-width:0; border:2px solid var(--black); background:var(--white); }
-  .context-group h2 { margin:0; min-height:30px; padding:8px 9px 6px; background:var(--mb-surface); color:var(--black); border-bottom:2px solid var(--black); font-size:11px; letter-spacing:.1em; text-transform:uppercase; }
-  .context-group .menu-item { min-height:34px; padding:5px 9px; font-size:12px; line-height:1.25; }
-  .context-group .menu-item:last-child { border-bottom:0; }
-  @media(max-width:700px) { .context-groups { grid-template-columns:repeat(2,minmax(0,1fr)); } }
+  /* Page context menu: one compact column. Heights below are mirrored by openPageContextMenu (28px items, 32px nav row, 9px dividers, 24px header). */
+  .ctx-head { position:relative; z-index:1; height:24px; padding:0 10px; display:flex; align-items:center; border-bottom:1px solid var(--black); background:var(--mb-surface); color:var(--grey); font-size:11px; font-weight:400; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
+  .ctx-menu { position:relative; z-index:1; padding:4px 0; }
+  .ctx-menu .menu-item { height:28px; min-height:0; padding:0 10px; border:0; font-size:12px; font-weight:600; letter-spacing:.02em; line-height:1; }
+  .ctx-nav { display:flex; height:32px; }
+  .ctx-nav .menu-item { flex:1 1 0; justify-content:center; height:32px; padding:0; font-size:17px; font-weight:400; letter-spacing:0; }
+  .ctx-nav .menu-item.disabled { opacity:.3; }
+  .ctx-sep { height:1px; margin:4px 8px; background:var(--black); }
   /* Show/hide animation: the main process adds mb-in right after the view becomes visible and mb-out before hiding it. */
   @keyframes mb-popup-in { from { opacity:0; transform:translateY(-4px) scale(.98); } }
   body:not(.mb-in) .popup { opacity:0; }
@@ -5831,7 +5833,7 @@ const openPageContextMenu = async (
   if (!mainWindow || mainWindow.isDestroyed() || !tab.view || tab.view.webContents.isDestroyed()) return false;
 
   const copy = appLanguage === "pl" ? {
-    title: "Menu strony", linkMenu: "Menu linku", imageMenu: "Menu obrazu", link: "Link", image: "Obraz", selection: "Zaznaczenie", editing: "Edycja", page: "Strona", navigation: "Nawigacja",
+    title: "Menu strony", linkMenu: "Menu linku", imageMenu: "Menu obrazu",
     openLinkSplit: "Otwórz link w podzielonym widoku",
     responsivePreview: "Podgląd responsywny", responsivePreviewOff: "Wyłącz podgląd responsywny",
     openGlance: "Otwórz w Glance", openLinkHere: "Otwórz link w tej karcie", openLink: "Otwórz link w nowej karcie", openLinkBackground: "Otwórz w karcie w tle",
@@ -5841,11 +5843,11 @@ const openPageContextMenu = async (
     undo: "Cofnij", redo: "Ponów", cut: "Wytnij", copy: "Kopiuj", paste: "Wklej", selectAll: "Zaznacz wszystko",
     addBookmark: "Dodaj stronę do zakładek", removeBookmark: "Usuń stronę z zakładek", copyPageAddress: "Kopiuj adres strony",
     savePage: "Zapisz stronę jako…", print: "Drukuj stronę…", inspect: "Zbadaj element",
-    back: "Wstecz", forward: "Dalej", reload: "Odśwież", forceReload: "Odśwież bez pamięci podręcznej", clearSiteCache: "Wyczyść pamięć podręczną strony i przeładuj",
+    back: "Wstecz", forward: "Dalej", reload: "Odśwież", forceReload: "Odśwież bez pamięci podręcznej", clearSiteCache: "Wyczyść cache strony i przeładuj",
     savePageTitle: "Zapisz stronę", htmlDocument: "Dokument HTML",
     viewSource: "Pokaż źródło strony", spelling: "Pisownia", addToDictionary: "Dodaj do słownika", noSuggestions: "Brak sugestii",
   } : {
-    title: "Page menu", linkMenu: "Link menu", imageMenu: "Image menu", link: "Link", image: "Image", selection: "Selection", editing: "Editing", page: "Page", navigation: "Navigation",
+    title: "Page menu", linkMenu: "Link menu", imageMenu: "Image menu",
     openLinkSplit: "Open link in split view",
     responsivePreview: "Responsive preview", responsivePreviewOff: "Turn off responsive preview",
     openGlance: "Open in Glance", openLinkHere: "Open link in this tab", openLink: "Open link in new tab", openLinkBackground: "Open in background tab",
@@ -5859,17 +5861,17 @@ const openPageContextMenu = async (
     savePageTitle: "Save page", htmlDocument: "HTML document",
     viewSource: "View page source", spelling: "Spelling", addToDictionary: "Add to dictionary", noSuggestions: "No suggestions",
   };
-  type ContextGroup = { title: string; items: string[] };
-  const action = (name: string, label: string): string =>
-    `<a class="menu-item" href="monobrowser-menu://${name}">${escapeHtml(label)}</a>`;
-  const groups: ContextGroup[] = [];
+  const action = (name: string, label: string, shortcut = ""): string =>
+    `<a class="menu-item" href="monobrowser-menu://${name}"><span class="menu-label">${escapeHtml(label)}</span>${shortcut ? `<span class="shortcut">${shortcut}</span>` : ""}</a>`;
+  // Sections are separated by thin dividers; the order conveys meaning (no per-section headings).
+  const sections: string[][] = [];
   const misspelledWord = params.isEditable ? params.misspelledWord.trim() : "";
   const spellSuggestions = misspelledWord ? params.dictionarySuggestions.slice(0, 5) : [];
   if (misspelledWord) {
     const suggestionItems = spellSuggestions.length
-      ? spellSuggestions.map((suggestion, index) => `<a class="menu-item" href="monobrowser-menu://context-spell-replace?i=${index}">${escapeHtml(suggestion)}</a>`)
-      : [`<span class="menu-item disabled" aria-disabled="true">${escapeHtml(copy.noSuggestions)}</span>`];
-    groups.push({ title: copy.spelling, items: [...suggestionItems, action("context-spell-add", copy.addToDictionary)] });
+      ? spellSuggestions.map((suggestion, index) => `<a class="menu-item" href="monobrowser-menu://context-spell-replace?i=${index}"><span class="menu-label">${escapeHtml(suggestion)}</span></a>`)
+      : [`<span class="menu-item disabled" aria-disabled="true"><span class="menu-label">${escapeHtml(copy.noSuggestions)}</span></span>`];
+    sections.push([...suggestionItems, action("context-spell-add", copy.addToDictionary)]);
   }
   const linkUrl = getBookmarkableUrl(params.linkURL);
   if (linkUrl) {
@@ -5883,72 +5885,72 @@ const openPageContextMenu = async (
     ];
     if (params.linkText.trim()) items.push(action("context-copy-link-text", copy.copyLinkText));
     items.push(action("context-save-link", copy.saveLink));
-    groups.push({ title: copy.link, items });
+    sections.push(items);
   }
 
   const imageUrl = params.mediaType === "image" ? getBookmarkableUrl(params.srcURL) : null;
   if (imageUrl) {
-    groups.push({ title: copy.image, items: [
+    sections.push([
       action("context-open-image", copy.openImage),
       action("context-copy-image", copy.copyImage),
       action("context-save-image", copy.saveImage),
-    ] });
+    ]);
   }
 
   const selection = params.selectionText.trim();
   if (selection) {
-    groups.push({ title: copy.selection, items: [
+    sections.push([
       action("context-search-selection", copy.searchSelection),
-      action("context-copy-selection", copy.copySelection),
-    ] });
+      action("context-copy-selection", copy.copySelection, "Ctrl+C"),
+    ]);
   }
 
   if (params.isEditable) {
     const items: string[] = [];
-    if (params.editFlags.canUndo) items.push(action("context-undo", copy.undo));
-    if (params.editFlags.canRedo) items.push(action("context-redo", copy.redo));
-    if (params.editFlags.canCut) items.push(action("context-cut", copy.cut));
-    if (params.editFlags.canCopy) items.push(action("context-copy", copy.copy));
-    if (params.editFlags.canPaste) items.push(action("context-paste", copy.paste));
-    if (params.editFlags.canSelectAll) items.push(action("context-select-all", copy.selectAll));
-    if (items.length) groups.push({ title: copy.editing, items });
+    if (params.editFlags.canUndo) items.push(action("context-undo", copy.undo, "Ctrl+Z"));
+    if (params.editFlags.canRedo) items.push(action("context-redo", copy.redo, "Ctrl+Shift+Z"));
+    if (params.editFlags.canCut) items.push(action("context-cut", copy.cut, "Ctrl+X"));
+    if (params.editFlags.canCopy) items.push(action("context-copy", copy.copy, "Ctrl+C"));
+    if (params.editFlags.canPaste) items.push(action("context-paste", copy.paste, "Ctrl+V"));
+    if (params.editFlags.canSelectAll) items.push(action("context-select-all", copy.selectAll, "Ctrl+A"));
+    if (items.length) sections.push(items);
   }
 
   const pageUrl = getBookmarkableUrl(tab.url);
-  const pageItems = [action("context-copy-page-address", copy.copyPageAddress)];
-  if (pageUrl) pageItems.push(action("context-toggle-bookmark", findBookmarkByUrl(pageUrl) ? copy.removeBookmark : copy.addBookmark));
+  const pageItems: string[] = [];
+  if (pageUrl) pageItems.push(action("context-toggle-bookmark", findBookmarkByUrl(pageUrl) ? copy.removeBookmark : copy.addBookmark, "Ctrl+D"));
+  pageItems.push(action("context-copy-page-address", copy.copyPageAddress));
   if (getPreviewIdFor(tab.id) !== null) pageItems.push(action("context-responsive-preview-off", copy.responsivePreviewOff));
   else if (isPreviewableUrl(tab.url)) pageItems.push(action("context-responsive-preview", copy.responsivePreview));
-  pageItems.push(
-    action("context-save-page", copy.savePage),
-    ...(isHttpUrl(tab.url) ? [action("context-view-source", copy.viewSource)] : []),
-    action("context-print", copy.print),
-    action("context-inspect", copy.inspect),
-  );
-  groups.push({ title: copy.page, items: pageItems });
+  pageItems.push(action("context-save-page", copy.savePage, "Ctrl+S"));
+  if (isHttpUrl(tab.url)) pageItems.push(action("context-view-source", copy.viewSource, "Ctrl+U"));
+  pageItems.push(action("context-print", copy.print, "Ctrl+P"));
+  sections.push(pageItems);
 
-  const navigationItems: string[] = [];
+  const reloadItems = [action("context-force-reload", copy.forceReload)];
+  if (siteCacheOrigin(tab.url)) reloadItems.push(action("context-clear-site-cache", copy.clearSiteCache));
+  sections.push(reloadItems);
+  sections.push([action("context-inspect", copy.inspect, "F12")]);
+
+  // Navigation: a compact icon row at the top (back / forward are dimmed when there is no history in that direction).
   const contents = tab.view.webContents;
-  if (contents.navigationHistory.canGoBack()) navigationItems.push(action("context-back", copy.back));
-  if (contents.navigationHistory.canGoForward()) navigationItems.push(action("context-forward", copy.forward));
-  navigationItems.push(action("context-reload", copy.reload), action("context-force-reload", copy.forceReload));
-  if (siteCacheOrigin(tab.url)) navigationItems.push(action("context-clear-site-cache", copy.clearSiteCache));
-  groups.push({ title: copy.navigation, items: navigationItems });
+  const navButton = (name: string, glyph: string, label: string, enabled: boolean): string => enabled
+    ? `<a class="menu-item" href="monobrowser-menu://${name}" title="${escapeHtml(label)}" aria-label="${escapeHtml(label)}">${glyph}</a>`
+    : `<span class="menu-item disabled" aria-disabled="true" title="${escapeHtml(label)}" aria-label="${escapeHtml(label)}">${glyph}</span>`;
+  const navRow = `<div class="ctx-nav">${navButton("context-back", "←", copy.back, contents.navigationHistory.canGoBack())}${navButton("context-forward", "→", copy.forward, contents.navigationHistory.canGoForward())}${navButton("context-reload", "↻", copy.reload, true)}</div>`;
 
-  const columns = Math.min(3, groups.length);
-  const rows: ContextGroup[][] = [];
-  for (let index = 0; index < groups.length; index += columns) rows.push(groups.slice(index, index + columns));
-  const groupsHeight = rows.reduce((height, row) => height + 32 + Math.max(...row.map((group) => group.items.length)) * 34, 0);
-  // The header names what was clicked: link menu / image menu with its (shortened) address; plain page menu otherwise.
+  // Link / image menus get a slim one-line header with the (shortened) subject address; the plain page menu has none.
   const subjectUrl = linkUrl ?? imageUrl ?? "";
   const menuTitle = linkUrl ? copy.linkMenu : imageUrl ? copy.imageMenu : copy.title;
   const subjectText = subjectUrl.length > 90 ? `${subjectUrl.slice(0, 89)}…` : subjectUrl;
-  const preferredHeight = 86 + groupsHeight + Math.max(0, rows.length - 1) * 8 + (subjectUrl ? 20 : 0);
-  const popupWidth = columns * 260 + 24;
-  const groupsHtml = groups.map((group) => `<section class="context-group"><h2>${escapeHtml(group.title)}</h2>${group.items.join("")}</section>`).join("");
+  // Height = body padding 16 + popup border 6 + menu padding 8 + header 24 + nav row 32 + 28px items + 9px dividers.
+  const itemCount = sections.reduce((sum, section) => sum + section.length, 0);
+  const preferredHeight = 16 + 6 + 8 + (subjectUrl ? 24 : 0) + 32 + itemCount * 28 + sections.length * 9;
+  const popupWidth = (subjectUrl ? 280 : 260) + 16;
+  const bodyHtml = [navRow, ...sections.map((section) => section.join(""))].join(`<div class="ctx-sep" role="separator"></div>`);
   const html = `<!doctype html><html lang="${appLanguage}"><head><meta charset="UTF-8"><meta name="viewport" content="width=device-width,initial-scale=1">
 <meta http-equiv="Content-Security-Policy" content="default-src 'none'; style-src 'unsafe-inline'; script-src 'unsafe-inline'"><title>${menuTitle}</title><style id="mb-theme">${themeCss(getThemeTokens())}</style><style>${POPUP_MENU_STYLES}</style></head><body>
-<nav class="popup context-popup" aria-label="${menuTitle}"><h1 class="popup-title">${menuTitle}${subjectUrl ? `<span class="popup-sub" title="${escapeHtml(subjectUrl)}">${escapeHtml(subjectText)}</span>` : ""}</h1><div class="context-groups" style="grid-template-columns:repeat(${columns},minmax(0,1fr))">${groupsHtml}</div></nav></body></html>`;
+<nav class="popup context-popup" aria-label="${menuTitle}">${subjectUrl ? `<div class="ctx-head" title="${escapeHtml(subjectUrl)}">${escapeHtml(subjectText)}</div>` : ""}<div class="ctx-menu">${bodyHtml}</div></nav></body></html>`;
   // Coordinates are relative to the page view, which is offset in the window (sidebar, second split pane).
   const viewOrigin = tab.view.getBounds();
   const anchor = { x: viewOrigin.x + params.x, y: viewOrigin.y + params.y };
