@@ -86,7 +86,7 @@ export const createCompactChrome = (deps: CompactDeps): CompactChrome => {
     if (!win || win.isDestroyed()) return null;
     const [contentWidth, contentHeight] = win.getContentSize();
     const layout = deps.getLayout();
-    return { kind: layout.tabBarLayout, contentWidth, contentHeight, sidebarWidth: sidebarWidthFor(layout) };
+    return { kind: layout.tabBarLayout, contentWidth, contentHeight, sidebarWidth: sidebarWidthFor(layout), side: layout.verticalTabBarSide };
   };
 
   const keepOpen = (now: number): boolean =>
@@ -102,7 +102,7 @@ export const createCompactChrome = (deps: CompactDeps): CompactChrome => {
         const rect = chromeOverlayRect(geo);
         // While the sidebar edge is dragged the overlay spans the window (transparent beyond the
         // sidebar) so the shell keeps receiving the pointer.
-        view!.setBounds(deps.isSidebarDragging() && geo.kind === "vertical" ? { ...rect, width: geo.contentWidth } : rect);
+        view!.setBounds(deps.isSidebarDragging() && geo.kind === "vertical" ? { ...rect, x: 0, width: geo.contentWidth } : rect);
       }
     }
     if (stripAlive()) {

@@ -773,6 +773,19 @@
         border-right: 1px solid var(--tabbar-line);
       }
 
+      /* Sidebar on the right edge: mirrors the left-hand layout. */
+      body.vertical.sidebar-right #chrome {
+        left: auto;
+        right: 0;
+        border-right: 0;
+        border-left: 1px solid var(--tabbar-line);
+      }
+
+      body.vertical.sidebar-right #sidebar-resizer {
+        right: auto;
+        left: 0;
+      }
+
       body.vertical .vertical-only {
         display: flex;
       }

@@ -1,7 +1,7 @@
 // Placement of styled popups (menus, switchers) relative to the element that opened them.
 // Pure geometry, no Electron imports. Coordinates are window content pixels.
 
-export type PopupPlacement = "below" | "above" | "right";
+export type PopupPlacement = "below" | "above" | "right" | "left";
 export type PopupRect = { x: number; y: number; width: number; height: number };
 
 export type PopupGeometryInput = {
@@ -61,6 +61,13 @@ export const computePopupGeometry = (input: PopupGeometryInput): PopupGeometry =
     const rightX = Math.max(MARGIN, Math.min(rect.x + rect.width + MARGIN, contentWidth - popupWidth - MARGIN));
     const y = Math.max(MARGIN, Math.min(rect.y, contentHeight - height - MARGIN));
     return { bounds: { x: Math.round(rightX), y: Math.round(y), width: Math.round(popupWidth), height: Math.round(height) }, fixedEdge: "top", edgeY: Math.round(y) };
+  }
+
+  if (placement === "left") {
+    const height = Math.min(preferredHeight, Math.max(MIN_HEIGHT, contentHeight - 2 * MARGIN));
+    const leftX = Math.max(MARGIN, Math.min(rect.x - popupWidth - MARGIN, contentWidth - popupWidth - MARGIN));
+    const y = Math.max(MARGIN, Math.min(rect.y, contentHeight - height - MARGIN));
+    return { bounds: { x: Math.round(leftX), y: Math.round(y), width: Math.round(popupWidth), height: Math.round(height) }, fixedEdge: "top", edgeY: Math.round(y) };
   }
 
   if (placement === "above") {

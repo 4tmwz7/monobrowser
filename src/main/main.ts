@@ -306,6 +306,8 @@ let searchSettingsFilePath = "";
 // (below the compact toolbar in horizontal layout, right of the sidebar in vertical layout).
 let viewportTop = 36;
 let viewportLeft = 0;
+// Width of the sidebar when it sits on the right edge (the page area then ends this far before the window edge).
+let viewportRight = 0;
 let sidebarDragging = false;
 // Split view (two tabs side by side) and compact mode (chrome revealed from the screen edge).
 const splitRegistry = createSplitRegistry();
@@ -320,6 +322,7 @@ let splitTabDragId: number | null = null;
 // Where the shell says the page area starts (before compact mode zeroes it).
 let reportedViewportLeft = 0;
 let reportedViewportTop = 36;
+let reportedViewportRight = 0;
 // In-window prompts (permissions, HTTP auth, "Leave site?"); one per main window.
 let promptOverlay: PromptOverlay | null = null;
 // While the sidebar edge is dragged, the page view trails the edge by this
@@ -2572,7 +2575,7 @@ const positionDownloadProgressView = (): void => {
   const height = 92;
   const margin = 16;
   downloadProgressView.setBounds({
-    x: Math.max(viewportLeft, contentWidth - width - margin),
+    x: Math.max(viewportLeft, contentWidth - viewportRight - width - margin),
     y: Math.max(viewportTop, contentHeight - height - margin),
     width,
     height,
@@ -3924,8 +3927,9 @@ const renderSettingsPageHtml = (): string => {
     removeConfirm: "Usunąć ten skrypt?", loadedCountPrefix: "Wczytane skrypty:",
     layoutHeading: "Układ paska kart", layoutDescription: "Wybierz, czy karty mają być w jednym poziomym pasku u góry, czy w panelu bocznym. Zmiana działa od razu.",
     layoutHorizontal: "Poziomy", layoutHorizontalDescription: "Kompaktowy pasek z nawigacją, adresem i kartami w jednym rzędzie.",
+    sidebarSideHeading: "Strona paska kart", sidebarSideLeft: "Lewa", sidebarSideLeftDescription: "Panel boczny przy lewej krawędzi okna.", sidebarSideRight: "Prawa", sidebarSideRightDescription: "Panel boczny przy prawej krawędzi okna.",
     layoutVertical: "Pionowy", layoutVerticalDescription: "Panel boczny z adresem, przypiętymi kartami i listą kart.",
-    compactEnable: "Tryb kompaktowy", compactHint: "Ukrywa pasek (lub panel boczny), a strona wypełnia okno. Najedź kursorem na górną (lub lewą) krawędź, aby go pokazać. Skrót: Ctrl+Shift+C.",
+    compactEnable: "Tryb kompaktowy", compactHint: "Ukrywa pasek (lub panel boczny), a strona wypełnia okno. Najedź kursorem na górną (lub boczną) krawędź, aby go pokazać. Skrót: Ctrl+Shift+C.",
     glanceHeading: "Glance", glanceDescription: "Szybki podgląd linków bez otwierania ich w nowej karcie", glanceEnable: "Włącz Glance",
     glanceTriggerLabel: "Sposób wywołania", glanceAlt: "Alt + klik", glanceCtrl: "Ctrl + klik", glanceShift: "Shift + klik", glanceLongPress: "Długie przytrzymanie",
     animHeading: "Animacje", animDescription: "Płynne przejścia menu, kart i paneli. Wyłączane też automatycznie, gdy system prosi o ograniczenie ruchu.", animOn: "Włączone", animOff: "Wyłączone", animOnHint: "Płynne przejścia menu i kart.", animOffHint: "Zmiany natychmiast, bez ruchu.",
@@ -3967,8 +3971,9 @@ const renderSettingsPageHtml = (): string => {
     removeConfirm: "Remove this script?", loadedCountPrefix: "Loaded scripts:",
     layoutHeading: "Tab bar layout", layoutDescription: "Choose whether tabs live in a single horizontal bar at the top or in a side panel. The change applies immediately.",
     layoutHorizontal: "Horizontal", layoutHorizontalDescription: "Compact bar with navigation, address and tabs in one row.",
+    sidebarSideHeading: "Tab bar side", sidebarSideLeft: "Left", sidebarSideLeftDescription: "Side panel on the left edge of the window.", sidebarSideRight: "Right", sidebarSideRightDescription: "Side panel on the right edge of the window.",
     layoutVertical: "Vertical", layoutVerticalDescription: "Side panel with the address bar, pinned tabs and a tab list.",
-    compactEnable: "Compact mode", compactHint: "Hides the toolbar (or sidebar) so the page fills the window. Move the pointer to the top (or left) edge to reveal it. Shortcut: Ctrl+Shift+C.",
+    compactEnable: "Compact mode", compactHint: "Hides the toolbar (or sidebar) so the page fills the window. Move the pointer to the top (or side) edge to reveal it. Shortcut: Ctrl+Shift+C.",
     glanceHeading: "Glance", glanceDescription: "Get a quick overview of your links without opening them in a new tab", glanceEnable: "Enable Glance",
     glanceTriggerLabel: "Trigger method", glanceAlt: "Alt + click", glanceCtrl: "Ctrl + click", glanceShift: "Shift + click", glanceLongPress: "Long press",
     animHeading: "Animations", animDescription: "Smooth transitions for menus, tabs and panels. Also turned off automatically when the system asks for reduced motion.", animOn: "On", animOff: "Off", animOnHint: "Smooth menu and tab transitions.", animOffHint: "Instant changes, no motion.",
@@ -4000,7 +4005,7 @@ const renderSettingsPageHtml = (): string => {
   .tabs { width:min(760px,100%); margin:0 auto; padding:16px 24px 0; display:flex; flex-wrap:wrap; row-gap:8px; }
   .tab { border:2px solid var(--black); border-radius:0; background:var(--white); color:var(--black); padding:10px 18px; font-size:11px; font-weight:700; letter-spacing:.08em; text-transform:uppercase; cursor:pointer; margin-right:-2px; }
   main { width:min(760px,100%); margin:0 auto; padding:24px; display:grid; gap:16px; }
-  .panel[hidden] { display:none; }
+  .panel[hidden], #sidebar-side-group[hidden] { display:none; }
   .card { border:3px solid var(--black); border-radius:0; background:var(--white); padding:20px; box-shadow:none; }
   h2 { margin:0 0 5px; font-family:Impact,Haettenschweiler,"Arial Narrow Bold",sans-serif; font-size:22px; letter-spacing:.05em; text-transform:uppercase; } .description { margin:0 0 16px; color:var(--grey); font-size:12px; line-height:1.6; }
   .engines { display:grid; grid-template-columns:repeat(3,1fr); gap:9px; }
@@ -4116,6 +4121,12 @@ ${UI_BASE_END_CSS}
       <div class="engines" style="grid-template-columns:repeat(2,1fr)">
         <label class="engine"><input type="radio" name="tab-bar-layout" value="horizontal"><span class="engine-body"><span class="engine-name"><i class="engine-mark"></i>${copy.layoutHorizontal}</span><span class="engine-copy">${copy.layoutHorizontalDescription}</span></span></label>
         <label class="engine"><input type="radio" name="tab-bar-layout" value="vertical"><span class="engine-body"><span class="engine-name"><i class="engine-mark"></i>${copy.layoutVertical}</span><span class="engine-copy">${copy.layoutVerticalDescription}</span></span></label>
+      </div>
+      <div id="sidebar-side-group" class="field" style="margin-top:12px" hidden><label>${copy.sidebarSideHeading}</label>
+        <div class="engines" style="grid-template-columns:repeat(2,1fr)">
+          <label class="engine"><input type="radio" name="sidebar-side" value="left"><span class="engine-body"><span class="engine-name"><i class="engine-mark"></i>${copy.sidebarSideLeft}</span><span class="engine-copy">${copy.sidebarSideLeftDescription}</span></span></label>
+          <label class="engine"><input type="radio" name="sidebar-side" value="right"><span class="engine-body"><span class="engine-name"><i class="engine-mark"></i>${copy.sidebarSideRight}</span><span class="engine-copy">${copy.sidebarSideRightDescription}</span></span></label>
+        </div>
       </div>
       <div class="field" style="margin-top:12px"><label class="checkbox-row" for="compact-mode"><input id="compact-mode" type="checkbox">${copy.compactEnable}</label><span class="hint">${copy.compactHint}</span></div>
     </section>
@@ -4351,7 +4362,15 @@ ${UI_BASE_END_CSS}
   });
 
   const layoutInputs = Array.from(document.querySelectorAll('input[name=tab-bar-layout]'));
-  const showLayout = (value) => layoutInputs.forEach((input) => { input.checked = input.value === value; });
+  const showLayout = (value) => {
+    layoutInputs.forEach((input) => { input.checked = input.value === value; });
+    document.getElementById('sidebar-side-group').hidden = value !== 'vertical';
+  };
+  const sideInputs = Array.from(document.querySelectorAll('input[name=sidebar-side]'));
+  const showSide = (value) => sideInputs.forEach((input) => { input.checked = input.value === value; });
+  sideInputs.forEach((input) => input.addEventListener('change', async () => {
+    if (input.checked) showSide((await window.browserApi.setLayoutSettings({ verticalTabBarSide: input.value })).verticalTabBarSide);
+  }));
   layoutInputs.forEach((input) => input.addEventListener('change', async () => {
     if (input.checked) showLayout((await window.browserApi.setLayoutSettings({ tabBarLayout: input.value })).tabBarLayout);
   }));
@@ -4360,8 +4379,8 @@ ${UI_BASE_END_CSS}
   compactInput.addEventListener('change', async () => {
     showCompact(await window.browserApi.setLayoutSettings({ compactMode: compactInput.checked }));
   });
-  window.browserApi.getLayoutSettings().then((layout) => { showLayout(layout.tabBarLayout); showCompact(layout); }).catch(() => undefined);
-  window.browserApi.onLayoutChanged((layout) => { showLayout(layout.tabBarLayout); showCompact(layout); });
+  window.browserApi.getLayoutSettings().then((layout) => { showLayout(layout.tabBarLayout); showSide(layout.verticalTabBarSide); showCompact(layout); }).catch(() => undefined);
+  window.browserApi.onLayoutChanged((layout) => { showLayout(layout.tabBarLayout); showSide(layout.verticalTabBarSide); showCompact(layout); });
 
   const animInputs = Array.from(document.querySelectorAll('input[name=animations]'));
   const showAnim = (enabled) => animInputs.forEach((input) => { input.checked = (input.value === 'on') === enabled; });
@@ -4913,7 +4932,7 @@ const getMenuAnchor = (anchor: unknown): PopupAnchor | null => {
   if (typeof rect === "object" && rect !== null && finiteNumber(rect.x) && finiteNumber(rect.y) && finiteNumber(rect.width) && finiteNumber(rect.height)) {
     result.rect = { x: Math.floor(rect.x), y: Math.floor(rect.y), width: Math.max(0, Math.floor(rect.width)), height: Math.max(0, Math.floor(rect.height)) };
   }
-  if (raw.placement === "below" || raw.placement === "above" || raw.placement === "right") result.placement = raw.placement;
+  if (raw.placement === "below" || raw.placement === "above" || raw.placement === "right" || raw.placement === "left") result.placement = raw.placement;
   return result;
 };
 
@@ -6246,7 +6265,7 @@ const positionFindView = (): void => {
   const [contentWidth, contentHeight] = mainWindow.getContentSize();
   const margin = 12;
   // Anchored to the active pane (the whole page area when the view is not split).
-  const pane = getActivePaneRect() ?? { x: viewportLeft, y: viewportTop, width: contentWidth - viewportLeft, height: contentHeight - viewportTop };
+  const pane = getActivePaneRect() ?? { x: viewportLeft, y: viewportTop, width: contentWidth - viewportLeft - viewportRight, height: contentHeight - viewportTop };
   const width = Math.min(560, Math.max(320, pane.width - margin * 2));
   const height = 48;
   findView.setBounds({
@@ -6530,7 +6549,7 @@ const getHudPageArea = (): { x: number; width: number; bottom: number; top: numb
   const pane = htmlFullscreen ? null : getActivePaneRect();
   if (pane) return { x: pane.x, width: pane.width, bottom: pane.y + pane.height, top: pane.y };
   const x = htmlFullscreen ? 0 : viewportLeft;
-  return { x, width: Math.max(0, contentWidth - x), bottom: contentHeight, top: htmlFullscreen ? 0 : viewportTop };
+  return { x, width: Math.max(0, contentWidth - x - (htmlFullscreen ? 0 : viewportRight)), bottom: contentHeight, top: htmlFullscreen ? 0 : viewportTop };
 };
 
 const positionHudViews = (): void => {
@@ -6670,7 +6689,7 @@ const positionPaletteView = (): void => {
   if (!mainWindow || mainWindow.isDestroyed() || !paletteView || paletteView.webContents.isDestroyed()) return;
   const [contentWidth, contentHeight] = mainWindow.getContentSize();
   const margin = 16;
-  const areaWidth = contentWidth - viewportLeft;
+  const areaWidth = contentWidth - viewportLeft - viewportRight;
   const width = Math.min(520, Math.max(300, areaWidth - margin * 2));
   const maxHeight = Math.max(120, contentHeight - viewportTop - margin * 2);
   const height = Math.max(96, Math.min(paletteViewHeight, maxHeight));
@@ -6946,10 +6965,10 @@ const executePaletteCommand = async (id: string): Promise<void> => {
 const positionNotesView = (): void => {
   if (!mainWindow || mainWindow.isDestroyed() || !notesView || notesView.webContents.isDestroyed()) return;
   const [contentWidth, contentHeight] = mainWindow.getContentSize();
-  const width = Math.min(NOTES_WIDTH, Math.max(240, contentWidth - viewportLeft - 40 - NOTES_SCROLLBAR_INSET));
+  const width = Math.min(NOTES_WIDTH, Math.max(240, contentWidth - viewportLeft - viewportRight - 40 - NOTES_SCROLLBAR_INSET));
   const height = Math.max(120, contentHeight - viewportTop);
   notesView.setBounds({
-    x: Math.max(0, contentWidth - width - NOTES_SCROLLBAR_INSET),
+    x: Math.max(0, contentWidth - viewportRight - width - NOTES_SCROLLBAR_INSET),
     y: viewportTop,
     width,
     height,
@@ -7103,7 +7122,7 @@ const computeGlanceLayout = (): { area: Electron.Rectangle; frame: Electron.Rect
   const y = pane ? pane.y : Math.max(0, Math.min(viewportTop, contentHeight));
   const area = pane
     ? { ...pane }
-    : { x, y, width: Math.max(0, contentWidth - x), height: Math.max(0, contentHeight - y) };
+    : { x, y, width: Math.max(0, contentWidth - viewportRight - x), height: Math.max(0, contentHeight - y) };
   const width = Math.min(area.width, Math.max(320, Math.round(area.width * 0.85)));
   const height = Math.min(area.height, Math.max(240, Math.round(area.height * 0.85)));
   const frame = {
@@ -7547,6 +7566,7 @@ const isCompactMode = (): boolean => Boolean(compactChrome?.isEnabled());
 const applyEffectiveViewport = (): void => {
   viewportLeft = isCompactMode() ? 0 : reportedViewportLeft;
   viewportTop = isCompactMode() ? 0 : reportedViewportTop;
+  viewportRight = isCompactMode() ? 0 : reportedViewportRight;
 };
 
 const relayoutViews = (): void => {
@@ -7567,8 +7587,11 @@ const getPageArea = (): SplitRect | null => {
   const [contentWidth, height] = mainWindow.getContentSize();
   const safeTop = Math.max(0, Math.min(viewportTop, Math.max(0, height - 100)));
   const margin = sidebarDragging && !isCompactMode() ? SIDEBAR_DRAG_MARGIN : 0;
-  const safeLeft = Math.max(0, Math.min(viewportLeft + margin, Math.max(0, contentWidth - 200)));
-  return { x: safeLeft, y: safeTop, width: Math.max(contentWidth - safeLeft, 0), height: Math.max(height - safeTop, 0) };
+  // Left sidebar: the page trails its edge by the drag margin; right sidebar: the page ends that much before it.
+  const rightInset = viewportRight > 0 ? viewportRight + margin : 0;
+  const safeLeft = Math.max(0, Math.min(viewportLeft + (viewportRight > 0 ? 0 : margin), Math.max(0, contentWidth - 200)));
+  const safeRight = Math.max(0, Math.min(rightInset, Math.max(0, contentWidth - safeLeft - 200)));
+  return { x: safeLeft, y: safeTop, width: Math.max(contentWidth - safeLeft - safeRight, 0), height: Math.max(height - safeTop, 0) };
 };
 
 type ActiveSplit = {
@@ -9724,7 +9747,7 @@ const registerIpc = (): void => {
   handleTrusted("notes:save", async (_event, value: unknown) => saveNotesContent(value));
 
   handleTrusted("layout:set-viewport", (event, rect: unknown) => {
-    const { x, y } = (typeof rect === "object" && rect !== null ? rect : {}) as { x?: unknown; y?: unknown };
+    const { x, y, right } = (typeof rect === "object" && rect !== null ? rect : {}) as { x?: unknown; y?: unknown; right?: unknown };
     if (typeof x !== "number" || typeof y !== "number" || !Number.isFinite(x) || !Number.isFinite(y)) {
       return false;
     }
@@ -9733,6 +9756,7 @@ const registerIpc = (): void => {
 
     reportedViewportLeft = Math.max(0, Math.floor(x));
     reportedViewportTop = Math.max(0, Math.floor(y));
+    reportedViewportRight = typeof right === "number" && Number.isFinite(right) ? Math.max(0, Math.floor(right)) : 0;
     applyEffectiveViewport();
     relayoutViews();
     return true;

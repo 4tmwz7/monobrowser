@@ -16,21 +16,31 @@ export type CompactGeometry = {
   contentHeight: number;
   /** Current sidebar width (vertical layout only). */
   sidebarWidth: number;
+  /** Window edge the sidebar sits on (vertical layout only); defaults to the left edge. */
+  side?: "left" | "right";
 };
 
 export const sidebarWidthFor = (layout: { verticalTabBarWidth: number; verticalTabBarCollapsed: boolean }): number =>
   layout.verticalTabBarCollapsed ? COLLAPSED_SIDEBAR_WIDTH : layout.verticalTabBarWidth;
 
+/** A full-height strip of the given width flush with the sidebar's window edge. */
+const sidebarEdgeRect = (geometry: CompactGeometry, width: number): Rect => ({
+  x: geometry.side === "right" ? geometry.contentWidth - width : 0,
+  y: 0,
+  width,
+  height: geometry.contentHeight,
+});
+
 /** Bounds of the revealed chrome overlay in window content coordinates. */
 export const chromeOverlayRect = (geometry: CompactGeometry): Rect =>
   geometry.kind === "vertical"
-    ? { x: 0, y: 0, width: Math.min(geometry.sidebarWidth, geometry.contentWidth), height: geometry.contentHeight }
+    ? sidebarEdgeRect(geometry, Math.min(geometry.sidebarWidth, geometry.contentWidth))
     : { x: 0, y: 0, width: geometry.contentWidth, height: Math.min(HORIZONTAL_CHROME_HEIGHT, geometry.contentHeight) };
 
-/** The invisible hot-zone strip at the top (horizontal layout) or left (vertical layout) edge. */
+/** The invisible hot-zone strip at the top (horizontal layout) or left/right (vertical layout) edge. */
 export const hotStripRect = (geometry: CompactGeometry): Rect =>
   geometry.kind === "vertical"
-    ? { x: 0, y: 0, width: Math.min(COMPACT_HOT_ZONE, geometry.contentWidth), height: geometry.contentHeight }
+    ? sidebarEdgeRect(geometry, Math.min(COMPACT_HOT_ZONE, geometry.contentWidth))
     : { x: 0, y: 0, width: geometry.contentWidth, height: Math.min(COMPACT_HOT_ZONE, geometry.contentHeight) };
 
 export type CompactState = { revealed: boolean; hideAt: number | null };

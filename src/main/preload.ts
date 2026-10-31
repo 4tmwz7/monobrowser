@@ -60,6 +60,7 @@ type LayoutSettings = {
   tabBarLayout: "horizontal" | "vertical";
   verticalTabBarWidth: number;
   verticalTabBarCollapsed: boolean;
+  verticalTabBarSide: "left" | "right";
   compactMode: boolean;
 };
 type StartupSettings = { startupMode: "restore" | "newtab" };
@@ -130,7 +131,7 @@ const browserApi = {
     ipcRenderer.invoke("tabs:get-state"),
   getWorkspaces: (): Promise<WorkspacesPayload> => ipcRenderer.invoke("workspaces:get"),
   switchWorkspace: (id: string): Promise<boolean> => ipcRenderer.invoke("workspaces:switch", id),
-  createWorkspace: (anchor?: { x: number; y: number; rect?: { x: number; y: number; width: number; height: number }; placement?: "below" | "above" | "right" }): Promise<string | null> =>
+  createWorkspace: (anchor?: { x: number; y: number; rect?: { x: number; y: number; width: number; height: number }; placement?: "below" | "above" | "right" | "left" }): Promise<string | null> =>
     ipcRenderer.invoke("workspaces:create", anchor),
   updateWorkspace: (id: string, patch: { name?: string; icon?: string; color?: string | null }): Promise<boolean> =>
     ipcRenderer.invoke("workspaces:update", id, patch),
@@ -138,9 +139,9 @@ const browserApi = {
   deleteWorkspace: (id: string): Promise<boolean> => ipcRenderer.invoke("workspaces:delete", id),
   moveTabToWorkspace: (tabId: number, workspaceId: string): Promise<boolean> =>
     ipcRenderer.invoke("workspaces:move-tab", tabId, workspaceId),
-  openWorkspaceSwitcher: (anchor: { x: number; y: number; rect?: { x: number; y: number; width: number; height: number }; placement?: "below" | "above" | "right" }): Promise<boolean> =>
+  openWorkspaceSwitcher: (anchor: { x: number; y: number; rect?: { x: number; y: number; width: number; height: number }; placement?: "below" | "above" | "right" | "left" }): Promise<boolean> =>
     ipcRenderer.invoke("workspaces:open-switcher", anchor),
-  openWorkspaceMenu: (id: string, anchor: { x: number; y: number; rect?: { x: number; y: number; width: number; height: number }; placement?: "below" | "above" | "right" }): Promise<boolean> =>
+  openWorkspaceMenu: (id: string, anchor: { x: number; y: number; rect?: { x: number; y: number; width: number; height: number }; placement?: "below" | "above" | "right" | "left" }): Promise<boolean> =>
     ipcRenderer.invoke("workspaces:open-menu", id, anchor),
   openTabContextMenu: (tabId: number, anchor: { x: number; y: number }): Promise<boolean> =>
     ipcRenderer.invoke("tabs:open-context-menu", tabId, anchor),
@@ -200,11 +201,11 @@ const browserApi = {
   removeUserScript: (id: string): Promise<boolean> => ipcRenderer.invoke("userscripts:remove", id),
   importUserScriptFromFile: (): Promise<UserScriptImportResult> =>
     ipcRenderer.invoke("userscripts:import-file"),
-  openNavigationMenu: (anchor: { x: number; y: number; rect?: { x: number; y: number; width: number; height: number }; placement?: "below" | "above" | "right" }): Promise<boolean> =>
+  openNavigationMenu: (anchor: { x: number; y: number; rect?: { x: number; y: number; width: number; height: number }; placement?: "below" | "above" | "right" | "left" }): Promise<boolean> =>
     ipcRenderer.invoke("navigation-menu:open", anchor),
-  openSiteInfoMenu: (anchor: { x: number; y: number; rect?: { x: number; y: number; width: number; height: number }; placement?: "below" | "above" | "right" }): Promise<boolean> =>
+  openSiteInfoMenu: (anchor: { x: number; y: number; rect?: { x: number; y: number; width: number; height: number }; placement?: "below" | "above" | "right" | "left" }): Promise<boolean> =>
     ipcRenderer.invoke("site-info-menu:open", anchor),
-  setViewport: (rect: { x: number; y: number }): Promise<boolean> =>
+  setViewport: (rect: { x: number; y: number; right?: number }): Promise<boolean> =>
     ipcRenderer.invoke("layout:set-viewport", rect),
   setSidebarDragging: (dragging: boolean): Promise<boolean> =>
     ipcRenderer.invoke("layout:sidebar-dragging", dragging),

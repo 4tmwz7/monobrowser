@@ -43,6 +43,7 @@ type LayoutSettings = {
   tabBarLayout: TabBarLayout;
   verticalTabBarWidth: number;
   verticalTabBarCollapsed: boolean;
+  verticalTabBarSide: "left" | "right";
   compactMode: boolean;
 };
 type BrowserApi = {
@@ -75,7 +76,7 @@ type BrowserApi = {
   onLanguageChanged: (callback: (language: AppLanguage) => void) => () => void;
   onFocusAddress: (callback: () => void) => () => void;
   onBlurAddress: (callback: () => void) => () => void;
-  setViewport: (rect: { x: number; y: number }) => Promise<boolean>;
+  setViewport: (rect: { x: number; y: number; right?: number }) => Promise<boolean>;
   setSidebarDragging: (dragging: boolean) => Promise<boolean>;
   setCompactKeep: (flags: { address: boolean }) => void;
   setCompactPointer: (inside: boolean) => void;
@@ -165,6 +166,7 @@ const layout: LayoutSettings = {
   tabBarLayout: "horizontal",
   verticalTabBarWidth: 240,
   verticalTabBarCollapsed: false,
+  verticalTabBarSide: "left",
   compactMode: false,
 };
 
@@ -236,6 +238,7 @@ const applyLanguage = (language: AppLanguage): void => {
 };
 
 const isVertical = (): boolean => layout.tabBarLayout === "vertical";
+const isSidebarRight = (): boolean => isVertical() && layout.verticalTabBarSide === "right";
 const isCollapsed = (): boolean => isVertical() && layout.verticalTabBarCollapsed;
 const currentSidebarWidth = (): number => (isCollapsed() ? COLLAPSED_SIDEBAR_WIDTH : layout.verticalTabBarWidth);
 
@@ -249,10 +252,11 @@ const renderSidebarToggle = (): void => {
 // Tells the main process where web content starts (below the toolbar or right of the sidebar).
 const syncViewport = async (): Promise<void> => {
   const rect = isVertical()
-    ? { x: currentSidebarWidth(), y: 0 }
-    : { x: 0, y: HORIZONTAL_CHROME_HEIGHT };
+    ? (isSidebarRight() ? { x: 0, y: 0, right: currentSidebarWidth() } : { x: currentSidebarWidth(), y: 0, right: 0 })
+    : { x: 0, y: HORIZONTAL_CHROME_HEIGHT, right: 0 };
   placeholder.style.top = `${rect.y}px`;
   placeholder.style.left = `${rect.x}px`;
+  placeholder.style.right = `${rect.right}px`;
   // Only the window's own shell positions the page area; the overlay instance is just a copy of the chrome.
   if (isChromeOverlay) return;
   await window.browserApi.setViewport(rect);
@@ -261,13 +265,14 @@ const syncViewport = async (): Promise<void> => {
 let lastViewportX = 0;
 const applyLayout = (): void => {
   document.body.classList.toggle("vertical", isVertical());
+  document.body.classList.toggle("sidebar-right", isSidebarRight());
   document.body.classList.toggle("collapsed", isCollapsed());
   document.documentElement.style.setProperty("--sidebar-width", `${currentSidebarWidth()}px`);
   renderSidebarToggle();
   updateNewTabTitle();
   render();
   // A shrinking sidebar keeps the old page bounds until its width animation ends; a growing one claims its room at once.
-  const nextX = isVertical() ? currentSidebarWidth() : 0;
+  const nextX = isVertical() ? currentSidebarWidth() : 0; // inset of the page from its window edge
   if (isVertical() && animationsOn() && nextX < lastViewportX) {
     window.setTimeout(() => void syncViewport(), animDurations().slow + 40);
   } else {
@@ -398,7 +403,7 @@ const initTabDragDrop = (): void => {
 
 // Strony wewnętrzne dostają od procesu głównego znacznik "mb-icon:<rodzaj>" zamiast favicony;
 // powłoka rysuje monochromatyczną ikonę w kolorze karty (stroke: currentColor).
-type PopupAnchorArg = { x: number; y: number; rect?: { x: number; y: number; width: number; height: number }; placement?: "below" | "above" | "right" };
+type PopupAnchorArg = { x: number; y: number; rect?: { x: number; y: number; width: number; height: number }; placement?: "below" | "above" | "right" | "left" };
 const rectOf = (rect: DOMRect): { x: number; y: number; width: number; height: number } => ({
   x: Math.round(rect.left), y: Math.round(rect.top), width: Math.round(rect.width), height: Math.round(rect.height),
 });
@@ -690,7 +695,7 @@ const renderTabs = (): void => {
     if (animate && enteredAt !== undefined) {
       const elapsed = now - enteredAt;
       if (elapsed < dur) {
-        const from = isVertical() && !tab.isPinned ? "translateX(-8px)" : "translateY(-4px) scale(.96)";
+        const from = isVertical() && !tab.isPinned ? (isSidebarRight() ? "translateX(8px)" : "translateX(-8px)") : "translateY(-4px) scale(.96)";
         button.animate([{ opacity: 0, transform: from }, { opacity: 1, transform: "none" }], { duration: dur, delay: -elapsed, easing: EASE, fill: "backwards" });
       } else {
         enterStarted.delete(tab.id);
@@ -741,7 +746,9 @@ const workspacePopupAnchor = (element: HTMLElement, event?: MouseEvent): PopupAn
   if (isVertical()) {
     const bar = chromeBar.getBoundingClientRect();
     const side = { x: Math.round(bar.left), y: Math.round(rect.top), width: Math.round(bar.width), height: Math.round(rect.height) };
-    return { x: side.x + side.width, y: side.y, rect: side, placement: "right" };
+    return isSidebarRight()
+      ? { x: side.x, y: side.y, rect: side, placement: "left" }
+      : { x: side.x + side.width, y: side.y, rect: side, placement: "right" };
   }
   return { x: Math.round(event?.clientX ?? rect.left), y: Math.round(rect.bottom), rect: rectOf(rect), placement: "below" };
 };
@@ -1101,7 +1108,7 @@ const wireEvents = (): void => {
   sidebarResizer.addEventListener("pointermove", (event) => {
     if (!resizingSidebar) return;
     if (event.buttons === 0) { releaseDrag(); return; }
-    layout.verticalTabBarWidth = Math.min(MAX_SIDEBAR_WIDTH, Math.max(MIN_SIDEBAR_WIDTH, Math.round(event.clientX)));
+    layout.verticalTabBarWidth = Math.min(MAX_SIDEBAR_WIDTH, Math.max(MIN_SIDEBAR_WIDTH, Math.round(isSidebarRight() ? window.innerWidth - event.clientX : event.clientX)));
     document.documentElement.style.setProperty("--sidebar-width", `${layout.verticalTabBarWidth}px`);
     if (sidebarSyncFrame === null) {
       sidebarSyncFrame = window.requestAnimationFrame(() => {

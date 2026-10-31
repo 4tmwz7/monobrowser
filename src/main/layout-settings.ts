@@ -1,9 +1,13 @@
 export type TabBarLayout = "horizontal" | "vertical";
 
+export type VerticalTabBarSide = "left" | "right";
+
 export type LayoutSettings = {
   tabBarLayout: TabBarLayout;
   verticalTabBarWidth: number;
   verticalTabBarCollapsed: boolean;
+  /** Which window edge the vertical tab bar (sidebar) sits on. */
+  verticalTabBarSide: VerticalTabBarSide;
   /** Compact mode: the chrome (toolbar / sidebar) is hidden and revealed from the screen edge. */
   compactMode: boolean;
 };
@@ -15,6 +19,7 @@ export const DEFAULT_LAYOUT_SETTINGS: LayoutSettings = {
   tabBarLayout: "horizontal",
   verticalTabBarWidth: 240,
   verticalTabBarCollapsed: false,
+  verticalTabBarSide: "left",
   compactMode: false,
 };
 
@@ -41,6 +46,9 @@ export const mergeLayoutSettings = (current: LayoutSettings, patch: unknown): La
     verticalTabBarCollapsed: typeof raw.verticalTabBarCollapsed === "boolean"
       ? raw.verticalTabBarCollapsed
       : current.verticalTabBarCollapsed,
+    verticalTabBarSide: raw.verticalTabBarSide === "left" || raw.verticalTabBarSide === "right"
+      ? raw.verticalTabBarSide
+      : current.verticalTabBarSide,
     compactMode: typeof raw.compactMode === "boolean" ? raw.compactMode : current.compactMode,
   };
 };

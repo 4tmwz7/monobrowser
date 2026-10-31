@@ -49,3 +49,11 @@ test("stepCompact reveals on the hot strip, hides after the delay and keeps open
   state = stepCompact(state, { hot: false, inside: false, keepOpen: false, now: 9100 });
   assert.equal(state.hideAt, 9100 + COMPACT_HIDE_DELAY_MS);
 });
+
+test("a right-hand sidebar puts the overlay and hot strip on the right edge", () => {
+  const right: CompactGeometry = { ...vertical, side: "right" };
+  assert.deepEqual(chromeOverlayRect(right), { x: 960, y: 0, width: 240, height: 800 });
+  assert.deepEqual(hotStripRect(right), { x: 1200 - COMPACT_HOT_ZONE, y: 0, width: COMPACT_HOT_ZONE, height: 800 });
+  assert.deepEqual(chromeOverlayRect({ ...right, side: "left" }), chromeOverlayRect(vertical));
+  assert.deepEqual(chromeOverlayRect({ ...right, sidebarWidth: 5000 }), { x: 0, y: 0, width: 1200, height: 800 });
+});

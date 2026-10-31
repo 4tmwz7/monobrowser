@@ -53,3 +53,10 @@ test("clampInside keeps context popups inside the window", () => {
   assert.ok(g.bounds.x + g.bounds.width <= 1196);
   assert.ok(g.bounds.y + g.bounds.height <= 796);
 });
+
+test("left placement sits beside the element on its left and stays inside the window", () => {
+  const rect = { x: 976, y: 700, width: 220, height: 36 };
+  const g = computePopupGeometry({ ...base, anchor: { x: 976, y: 700 }, rect, placement: "left" });
+  assert.equal(g.bounds.x + g.bounds.width, 976 - 4);
+  assert.ok(g.bounds.y + g.bounds.height <= 800 - 4);
+});

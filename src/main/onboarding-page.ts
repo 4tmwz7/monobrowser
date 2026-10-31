@@ -23,7 +23,7 @@ const COPY = {
     welcomePitch: "Minimalistyczna przeglądarka w stylu mono. Kilka szybkich ustawień i gotowe.", language: "Język", languageHint: "Zmiana działa od razu.",
     lookHeading: "Wygląd", lookText: "Wybierz motyw. Podgląd stosuje się natychmiast w całej przeglądarce.", themeDefault: "Domyślny", themeDefaultHint: "jasny lub ciemny jak system",
     animations: "Animacje interfejsu", animationsHint: "Delikatne przejścia i efekty najechania.",
-    layoutHeading: "Układ", layoutText: "Gdzie mają być karty i pasek adresu?", horizontal: "Pasek poziomy", horizontalHint: "Kompaktowy pasek na górze", vertical: "Panel boczny", verticalHint: "Karty w pionie po lewej",
+    layoutHeading: "Układ", layoutText: "Gdzie mają być karty i pasek adresu?", horizontal: "Pasek poziomy", horizontalHint: "Kompaktowy pasek na górze", vertical: "Panel boczny", verticalHint: "Karty w pionie z boku okna", sideText: "Po której stronie ma być panel boczny?", sideLeft: "Lewa strona", sideLeftHint: "Panel przy lewej krawędzi", sideRight: "Prawa strona", sideRightHint: "Panel przy prawej krawędzi",
     compact: "Tryb kompaktowy", compactHint: "Chowa pasek i pokazuje go po najechaniu na krawędź ekranu (Ctrl+Shift+C).",
     spaces: "Przestrzenie to osobne zestawy kart (jak w Arc/Zen). Dodasz je i przełączysz później w menu lub palecie poleceń.",
     privacyHeading: "Prywatność i wyszukiwanie", privacyText: "Wszystko zmienisz później w Ustawieniach.", blocking: "Blokowanie treści", blockingHint: "Wbudowana ochrona przed reklamami i śledzeniem.",
@@ -37,7 +37,7 @@ const COPY = {
     welcomePitch: "A minimalist monochrome browser. A few quick choices and you are set.", language: "Language", languageHint: "Applies immediately.",
     lookHeading: "Look", lookText: "Pick a theme. The preview applies instantly across the whole browser.", themeDefault: "Default", themeDefaultHint: "light or dark like the system",
     animations: "Interface animations", animationsHint: "Subtle transitions and hover effects.",
-    layoutHeading: "Layout", layoutText: "Where should tabs and the address bar live?", horizontal: "Horizontal bar", horizontalHint: "Compact bar on top", vertical: "Vertical sidebar", verticalHint: "Tabs stacked on the left",
+    layoutHeading: "Layout", layoutText: "Where should tabs and the address bar live?", horizontal: "Horizontal bar", horizontalHint: "Compact bar on top", vertical: "Vertical sidebar", verticalHint: "Tabs stacked at the side", sideText: "Which side should the sidebar be on?", sideLeft: "Left side", sideLeftHint: "Sidebar on the left edge", sideRight: "Right side", sideRightHint: "Sidebar on the right edge",
     compact: "Compact mode", compactHint: "Hides the bar and reveals it when you touch the screen edge (Ctrl+Shift+C).",
     spaces: "Spaces are separate sets of tabs (like Arc/Zen). Add and switch them later from the menu or the command palette.",
     privacyHeading: "Privacy & search", privacyText: "You can change all of this later in Settings.", blocking: "Content blocking", blockingHint: "Built-in protection against ads and trackers.",
@@ -111,6 +111,8 @@ select{max-width:280px;border:2px solid var(--mb-border,#b3b2ab);background:var(
 .mock .bar{display:flex;gap:4px;align-items:center;padding:0 6px;background:var(--mb-surface-2,#d8d7d1)}
 .mock.h .bar{height:16px;border-bottom:1px solid var(--mb-border,#b3b2ab)}
 .mock.v .bar{width:30px;flex-direction:column;align-items:stretch;justify-content:flex-start;padding:6px 4px;border-right:1px solid var(--mb-border,#b3b2ab)}
+.mock.vr{flex-direction:row-reverse}
+.mock.vr .bar{border-right:0;border-left:1px solid var(--mb-border,#b3b2ab)}
 .mock .bar u{display:block;background:var(--mb-muted,#5c5b57);opacity:.6}
 .mock .bar u:first-child{background:var(--mb-fg,#0a0a0a);opacity:1}
 .mock.h .bar u{width:26px;height:6px}
@@ -189,7 +191,7 @@ const toggle = (label, hint, checked, onChange) => {
   l.append(i, s);
   return l;
 };
-const mock = (kind) => el("span", "mock " + (kind === "horizontal" ? "h" : "v"), '<span class="bar"><u></u><u></u><u></u></span><span class="page"></span>');
+const mock = (kind) => el("span", "mock " + (kind === "horizontal" ? "h" : kind === "right" ? "v vr" : "v"), '<span class="bar"><u></u><u></u><u></u></span><span class="page"></span>');
 const panels = [];
 const safe = (p) => Promise.resolve(p).catch(() => undefined);
 
@@ -225,10 +227,19 @@ const build = async () => {
   const t3 = el("h1", "h"); t3.textContent = C.layoutHeading; const x3 = el("p"); x3.textContent = C.layoutText;
   const lr = el("div", "row");
   const curLayout = layout && layout.tabBarLayout === "vertical" ? "vertical" : "horizontal";
-  const setLayout = (v) => safe(api.setLayoutSettings({ tabBarLayout: v }));
+  const setLayout = (v) => { sideBox.hidden = v !== "vertical"; return safe(api.setLayoutSettings({ tabBarLayout: v })); };
   lr.append(radio("layout", "horizontal", C.horizontal, C.horizontalHint, curLayout === "horizontal", setLayout, mock("horizontal")), radio("layout", "vertical", C.vertical, C.verticalHint, curLayout === "vertical", setLayout, mock("vertical")));
   lr.querySelectorAll(".opt").forEach((o) => { o.style.flex = "1 1 200px"; });
-  p3.append(t3, x3, lr);
+  // Sidebar side: only meaningful for the vertical layout.
+  const sideBox = el("div"); sideBox.hidden = curLayout !== "vertical";
+  const sx = el("p"); sx.textContent = C.sideText;
+  const sideRow = el("div", "row");
+  const curSide = layout && layout.verticalTabBarSide === "right" ? "right" : "left";
+  const setSide = (v) => safe(api.setLayoutSettings({ verticalTabBarSide: v }));
+  sideRow.append(radio("side", "left", C.sideLeft, C.sideLeftHint, curSide === "left", setSide, mock("vertical")), radio("side", "right", C.sideRight, C.sideRightHint, curSide === "right", setSide, mock("right")));
+  sideRow.querySelectorAll(".opt").forEach((o) => { o.style.flex = "1 1 200px"; });
+  sideBox.append(sx, sideRow);
+  p3.append(t3, x3, lr, sideBox);
   if (layout && typeof layout.compactMode === "boolean") p3.append(toggle(C.compact, C.compactHint, layout.compactMode, (v) => safe(api.setLayoutSettings({ compactMode: v }))));
   if (layout && typeof layout.compactMode === "boolean") { const sp = el("p"); sp.textContent = C.spaces; p3.append(sp); }
 
