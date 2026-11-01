@@ -19,7 +19,7 @@ export const extensionsPageCopy = (language: ExtensionsPageLanguage) => language
   openStore: "Chrome Web Store", loadUnpacked: "Wczytaj rozpakowane…", openFolder: "Otwórz folder rozszerzeń",
   installed: "Zainstalowane", empty: "Brak zainstalowanych rozszerzeń.",
   enabled: "Włączone", disabled: "Wyłączone", enable: "Włącz", disable: "Wyłącz", remove: "Usuń", options: "Opcje",
-  allowPrivate: "Zezwól w trybie prywatnym",
+  allowPrivate: "Zezwól w trybie prywatnym", showInToolbar: "Przypnij do paska narzędzi",
   version: "Wersja",
   sourceStore: "Chrome Web Store", sourceUnpacked: "Rozpakowane (folder rozszerzeń)", sourceExternal: "Rozpakowane (własny folder)",
   blockerBadge: "Bloker treści",
@@ -38,7 +38,7 @@ export const extensionsPageCopy = (language: ExtensionsPageLanguage) => language
   openStore: "Chrome Web Store", loadUnpacked: "Load unpacked…", openFolder: "Open extensions folder",
   installed: "Installed", empty: "No extensions installed.",
   enabled: "Enabled", disabled: "Disabled", enable: "Enable", disable: "Disable", remove: "Remove", options: "Options",
-  allowPrivate: "Allow in private mode",
+  allowPrivate: "Allow in private mode", showInToolbar: "Pin to toolbar",
   version: "Version",
   sourceStore: "Chrome Web Store", sourceUnpacked: "Unpacked (extensions folder)", sourceExternal: "Unpacked (custom folder)",
   blockerBadge: "Content blocker",
@@ -180,6 +180,13 @@ export const renderExtensionsPageHtml = (options: RenderExtensionsPageOptions): 
     box.addEventListener('change', () => run(() => api.setExtensionPrivate(item.key, box.checked)));
     label.append(box, document.createTextNode(L.allowPrivate));
     actions.appendChild(label);
+    if (item.hasAction && item.enabled) {
+      const pinLabel = make('label', 'check');
+      const pinBox = document.createElement('input'); pinBox.type = 'checkbox'; pinBox.checked = item.pinned;
+      pinBox.addEventListener('change', () => run(() => api.setExtensionPinned(item.key, pinBox.checked)));
+      pinLabel.append(pinBox, document.createTextNode(L.showInToolbar));
+      actions.appendChild(pinLabel);
+    }
     actions.appendChild(make('span', 'spacer'));
     actions.appendChild(button(L.remove, () => run(() => api.removeExtension(item.key)), 'danger'));
     body.appendChild(actions);

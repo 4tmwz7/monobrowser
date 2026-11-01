@@ -6,7 +6,7 @@ import {
 import { findHighlightCss, UI_BASE_END_CSS, UI_BASE_START_CSS } from "./ui-base-css.js";
 import { INTERACTION_VARS_CSS } from "./interaction-css.js";
 import { normalizeSettingsTab, type SettingsTab } from "./settings-tabs.js";
-import { app, BrowserWindow, clipboard, dialog, ipcMain, nativeTheme, systemPreferences, session, Menu, webContents, shell, WebContentsView, MenuItemConstructorOptions } from "electron";
+import { app, BrowserWindow, clipboard, dialog, ipcMain, nativeTheme, screen, systemPreferences, session, Menu, webContents, shell, WebContentsView, MenuItemConstructorOptions } from "electron";
 import type { DownloadItem, IpcMainEvent, IpcMainInvokeEvent, WebContents } from "electron";
 import crypto from "node:crypto";
 import fsSync from "node:fs";
@@ -16,7 +16,10 @@ import {
   attachPrivateSession, extensionsAddTab, extensionsRemoveTab, extensionsSelectTab, getExtensionContextMenu, getPausingBlocker,
   isExtensionPopupOpen, listExtensions, loadUnpackedExtension, openExtensionOptions, openExtensionsFolder, privateExtensionsReady,
   privatePartitionFor, removeInstalledExtension, setExtensionAllowedInPrivate, setExtensionEnabled, startExtensions,
+  getExtensionMenuItems, getExtensionToolbarInfo, setExtensionPinned,
 } from "./extensions.js";
+import { closeInWindowPopupFromOutside, closeInWindowPopup } from "./extension-popup.js";
+import { isExtensionId, type ExtensionToolbarInfo } from "./extension-toolbar.js";
 import { renderExtensionsPageHtml } from "./extensions-page.js";
 import { ElectronBlocker, fullLists } from "@ghostery/adblocker-electron";
 import { autoUpdater, CancellationToken } from "electron-updater";
@@ -37,6 +40,7 @@ import { createSplitFrame, type SplitFrame, type SplitFrameState } from "./split
 import { computeSplitLayout, ratioFromPointer, type Rect as SplitRect, type SplitSide } from "./split-layout.js";
 import { createSplitRegistry, type SplitGroup } from "./split-state.js";
 import { computeEmulation, createPreviewRegistry, DEFAULT_PREVIEW_WIDTH, DEVICE_PRESETS, emulationKey, isMobileWidth, toMobileUserAgent, type EmulationParams } from "./responsive-preview.js";
+import { compactViewportTop, titleBarOverlayFor, usesNativeControlsOverlay, windowControlsRect } from "./titlebar.js";
 import { computePopupGeometry, resizePopupBounds, type PopupPlacement, type PopupRect } from "./popup-placement.js";
 import { buildStoredSplits, matchStoredSplits, normalizeStoredSplits } from "./split-session.js";
 import { buildSessionData, normalizeSessionData, pushClosedTab, type ClosedTab, type SessionData } from "./session-store.js";
@@ -1076,6 +1080,7 @@ const applyThemeEverywhere = (): void => {
     if (isThemedTabPage(tab)) pushThemeTo(tab.view.webContents);
     else if (!tab.internalKind) applySwipeTriggerToContents(tab.view.webContents);
   }
+  updateTitleBarOverlay();
   const payload = getThemeState();
   if (mainWindow && !mainWindow.isDestroyed()) mainWindow.webContents.send("theme:changed", payload);
   compactChrome?.getContents()?.send("theme:changed", payload);
@@ -1403,6 +1408,7 @@ const dismissOverlaysOnOutsideClick = (): void => {
   // an outside click and must not close an overlay that is just opening.
   if (now - overlayOpenedAt < 500 || now < programmaticFocusUntil) return;
   dismissPopupOnForeignFocus();
+  closeInWindowPopupFromOutside();
   if (paletteVisible) hidePalette();
   if (notesVisible) hideNotesView();
 };
@@ -4900,6 +4906,20 @@ const notifySettingsPage = (topic: "adblock-exceptions" | "adblock-status" | "wo
   }
 };
 
+/** Pinned extension buttons + whether the Extensions button is needed, plus the private session's partition. */
+const buildExtensionToolbarInfo = (): ExtensionToolbarInfo => ({
+  ...getExtensionToolbarInfo(),
+  privatePartition: privateExtensionsReady() ? privatePartitionFor(PRIVATE_PARTITION) : null,
+});
+
+/** Pushes the toolbar state to both shell instances (window and compact-mode overlay). */
+const broadcastExtensionToolbar = (): void => {
+  const info = buildExtensionToolbarInfo();
+  for (const target of [mainWindow?.webContents, compactChrome?.getContents()]) {
+    if (target && !target.isDestroyed()) target.send("extensions:toolbar-changed", info);
+  }
+};
+
 /** Tells the open Extensions page (and the toolbar-independent parts of the UI) that the extension list changed. */
 const notifyExtensionsChanged = (): void => {
   for (const tab of getInternalTabs("extensions")) {
@@ -5338,7 +5358,7 @@ const POPUP_HEIGHT_REPORT_SCRIPT = `<script>
 })();
 </script>`;
 
-type PopupKind = "navigation" | "site-info" | "context" | "message" | "workspaces";
+type PopupKind = "navigation" | "site-info" | "context" | "message" | "workspaces" | "extensions";
 
 interface ActivePopup {
   kind: PopupKind;
@@ -5346,6 +5366,8 @@ interface ActivePopup {
   bounds: Electron.Rectangle;
   fixedEdge: "top" | "bottom";
   edgeY: number;
+  /** Lowest top edge when the popup keeps clear of the native window controls (Windows). */
+  minTop?: number;
   preferredHeight: number;
   // Only a popup that is on screen can be dismissed by focus loss: the hidden
   // view emits stray focus/blur events while it loads, which used to dismiss
@@ -5497,7 +5519,7 @@ const ensurePopupView = (): WebContentsView | null => {
     if (parsed.hostname === "resize") {
       const requestedHeight = Number(parsed.searchParams.get("height"));
       if (Number.isFinite(requestedHeight) && mainWindow && !mainWindow.isDestroyed()) {
-        const resized = resizePopupBounds(active.bounds, active.fixedEdge, active.edgeY, requestedHeight, mainWindow.getContentSize()[1]);
+        const resized = resizePopupBounds(active.bounds, active.fixedEdge, active.edgeY, requestedHeight, mainWindow.getContentSize()[1], active.minTop);
         const heightLimited = resized.heightLimited;
         active.bounds = resized.bounds;
         view.setBounds(active.bounds);
@@ -5560,6 +5582,7 @@ const openStyledPopup = async (
     return true;
   }
 
+  closeInWindowPopup();
   closePopup(false, false);
   const view = ensurePopupView();
   if (!view) return false;
@@ -5570,6 +5593,7 @@ const openStyledPopup = async (
     anchor, rect: anchor.rect, placement: anchor.placement, width, preferredHeight, contentWidth, contentHeight,
     // Context popups opened by a control (they bring a rect) follow the placement logic; the rest hang from the pointer.
     clampInside: kind === "context" && !anchor.rect,
+    avoid: windowControlsRect(process.platform, contentWidth, isCompactMode(), mainWindow.isFullScreen()),
   });
 
   const token = ++popupToken;
@@ -5577,7 +5601,7 @@ const openStyledPopup = async (
   popupActionHandler = onAction;
   // Claim the slot synchronously so a quickly repeated open toggles/replaces
   // instead of racing the async load below. The view stays hidden until loaded.
-  activePopup = { kind, token, bounds, fixedEdge: geometry.fixedEdge, edgeY: geometry.edgeY, preferredHeight, shown: false, shownAt: 0, restoreFocusTo };
+  activePopup = { kind, token, bounds, fixedEdge: geometry.fixedEdge, edgeY: geometry.edgeY, minTop: geometry.minTop, preferredHeight, shown: false, shownAt: 0, restoreFocusTo };
   view.setBounds(bounds);
 
   try {
@@ -5788,6 +5812,81 @@ ${POPUP_HEIGHT_REPORT_SCRIPT}</body></html>`;
     if (!bookmark) return;
     if (action === "bookmark-open") openNewTab(bookmark.url);
     if (action === "bookmark-remove") await removeBookmark(bookmark.id);
+  });
+};
+
+// ── Extensions menu (toolbar button): every extension with an action, pin/unpin, link to the management page ──
+const EXTENSIONS_MENU_STYLES = `
+  .ext-row { display:grid; grid-template-columns:minmax(0,1fr) 40px; border-bottom:1px solid var(--black); }
+  .ext-row .menu-item { border-bottom:0; min-width:0; }
+  .ext-row .ext-run { gap:10px; }
+  .ext-row .menu-item.disabled { opacity:.4; cursor:not-allowed; text-decoration:line-through; text-decoration-thickness:1px; }
+  .ext-row .menu-item.disabled .ext-ico { opacity:.7; text-decoration:none; }
+  .ext-ico { flex:0 0 auto; width:22px; height:22px; padding:2px; background:#d9d8d2; filter:grayscale(1); object-fit:contain; display:flex; align-items:center; justify-content:center; color:#0a0a0a; font-size:12px; font-weight:700; text-transform:uppercase; }
+  .ext-pin { justify-content:center; padding:0; border-left:1px solid var(--black); }
+  .ext-pin svg { width:15px; height:15px; fill:none; stroke:currentColor; stroke-width:1.4; stroke-linejoin:miter; }
+  .ext-pin.on svg { fill:currentColor; }
+  .ext-pin.on { background:var(--mb-surface-2); }
+  .ext-empty { padding:12px 14px; font-size:12px; color:var(--grey); line-height:1.5; border-bottom:1px solid var(--black); }
+`;
+const EXTENSION_PIN_PATH = "M5.5 2h5l-.6 4.2 2.1 2.3v.9H8.75V14h-1.5V9.4H4v-.9l2.1-2.3L5.5 2Z";
+
+const openExtensionsMenu = async (anchor: unknown, shell: WebContents): Promise<boolean> => {
+  const position = getMenuAnchor(anchor);
+  if (!mainWindow || mainWindow.isDestroyed() || !position) return false;
+  const pl = appLanguage === "pl";
+  const copy = pl ? {
+    title: "Rozszerzenia", manage: "Zarządzaj rozszerzeniami", pin: "Przypnij do paska narzędzi", unpin: "Odepnij od paska narzędzi",
+    empty: "Brak włączonych rozszerzeń z przyciskiem na pasku.", unavailable: "Rozszerzenia nie działają na tej stronie.", notPrivate: "Niedozwolone w trybie prywatnym",
+  } : {
+    title: "Extensions", manage: "Manage extensions", pin: "Pin to toolbar", unpin: "Unpin from toolbar",
+    empty: "No enabled extensions with a toolbar button.", unavailable: "Extensions are not available on this page.", notPrivate: "Not allowed in private mode",
+  };
+  const items = getExtensionMenuItems();
+  const tab = getActiveTab();
+  const pageUsable = Boolean(tab && !tab.internalKind && tab.view && !tab.view.webContents.isDestroyed());
+  const canRun = (item: { allowedInPrivate: boolean }): boolean => pageUsable && (!tab?.isPrivate || (privateExtensionsReady() && item.allowedInPrivate));
+  const pinLabel = (pinned: boolean): string => (pinned ? copy.unpin : copy.pin);
+  const rows = items.map((item) => {
+    const icon = item.iconDataUrl
+      ? `<img class="ext-ico" alt="" src="${item.iconDataUrl}">`
+      : `<span class="ext-ico">${escapeHtml(item.name.charAt(0))}</span>`;
+    const run = canRun(item)
+      ? `<a class="menu-item ext-run" href="monobrowser-menu://ext-run?id=${item.id}" title="${escapeHtml(item.name)}">${icon}<span class="menu-label">${escapeHtml(item.name)}</span></a>`
+      : `<span class="menu-item ext-run disabled" title="${escapeHtml(pageUsable ? copy.notPrivate : copy.unavailable)}">${icon}<span class="menu-label">${escapeHtml(item.name)}</span></span>`;
+    return `<div class="ext-row">${run}<a class="menu-item ext-pin${item.pinned ? " on" : ""}" id="pin-${item.id}" href="monobrowser-menu://ext-pin?id=${item.id}&keep=1" title="${escapeHtml(pinLabel(item.pinned))}" aria-label="${escapeHtml(pinLabel(item.pinned))}" aria-pressed="${item.pinned}"><svg viewBox="0 0 16 16" aria-hidden="true"><path d="${EXTENSION_PIN_PATH}"/></svg></a></div>`;
+  }).join("");
+  const html = `<!doctype html><html lang="${appLanguage}"><head><meta charset="UTF-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+<meta http-equiv="Content-Security-Policy" content="default-src 'none'; style-src 'unsafe-inline'; script-src 'unsafe-inline'; img-src data:"><title>${copy.title}</title><style id="mb-theme">${themeCss(getThemeTokens())}</style><style>${POPUP_MENU_STYLES}${EXTENSIONS_MENU_STYLES}</style></head><body>
+<nav class="popup nav-popup nav-menu" aria-label="${copy.title}">
+  <h1 class="popup-title">${copy.title}</h1>
+  ${items.length > 0 && !pageUsable ? `<div class="ext-empty">${copy.unavailable}</div>` : ""}
+  ${rows || `<div class="ext-empty">${copy.empty}</div>`}
+  <a class="menu-item" href="monobrowser-menu://ext-manage">${copy.manage}</a>
+</nav>
+${POPUP_HEIGHT_REPORT_SCRIPT}</body></html>`;
+  const refreshPin = (token: number, id: string, pinned: boolean): void => {
+    if (activePopup?.token !== token || !popupView || popupView.webContents.isDestroyed()) return;
+    const label = JSON.stringify(pinLabel(pinned));
+    void popupView.webContents.executeJavaScript(
+      `(() => { const pin = document.getElementById(${JSON.stringify(`pin-${id}`)}); if (!pin) return; pin.classList.toggle('on', ${pinned}); pin.title = ${label}; pin.setAttribute('aria-label', ${label}); pin.setAttribute('aria-pressed', '${pinned}'); })()`,
+      true,
+    ).catch(() => undefined);
+  };
+  return openStyledPopup("extensions", position, 340, Math.min(620, 150 + items.length * 44), html, async (actionUrl) => {
+    const action = actionUrl.hostname;
+    if (action === "ext-manage") { await openInternalPage("extensions"); return; }
+    const id = actionUrl.searchParams.get("id") ?? "";
+    const item = isExtensionId(id) ? getExtensionMenuItems().find((entry) => entry.id === id) : undefined;
+    if (!item) return;
+    if (action === "ext-pin") {
+      const token = activePopup?.token ?? -1;
+      await setExtensionPinned(item.key, !item.pinned);
+      refreshPin(token, id, !item.pinned);
+      return;
+    }
+    // Activation goes through the shell that owns the button: it anchors the extension's popup to the Extensions button.
+    if (action === "ext-run" && canRun(item) && !shell.isDestroyed()) shell.send("extensions:activate", { id });
   });
 };
 
@@ -7675,10 +7774,22 @@ const registerWindowShortcuts = (windowRef: BrowserWindow): void => {
 const isCompactMode = (): boolean => Boolean(compactChrome?.isEnabled());
 
 // In compact mode the page fills the window; the chrome is an overlay and does not take space.
+// Windows: native window controls (titleBarOverlay) on the tab strip, in the chrome's colors; the strip is shorter in compact mode.
+const updateTitleBarOverlay = (): void => {
+  if (!usesNativeControlsOverlay(process.platform) || !mainWindow || mainWindow.isDestroyed()) return;
+  try {
+    mainWindow.setTitleBarOverlay(titleBarOverlayFor(getThemeTokens(), isCompactMode()));
+  } catch (error) {
+    console.warn("[titlebar] could not update the window controls:", error);
+  }
+};
+
 const applyEffectiveViewport = (): void => {
   viewportLeft = isCompactMode() ? 0 : reportedViewportLeft;
-  viewportTop = isCompactMode() ? 0 : reportedViewportTop;
+  // Compact mode: the page fills the window, except under the thin title strip kept for the native controls (Windows).
+  viewportTop = isCompactMode() ? compactViewportTop(process.platform) : reportedViewportTop;
   viewportRight = isCompactMode() ? 0 : reportedViewportRight;
+  updateTitleBarOverlay();
 };
 
 const relayoutViews = (): void => {
@@ -9857,7 +9968,10 @@ const registerIpc = (): void => {
     return true;
   });
   // The toolbar's <browser-action-list> asks which partition shows the actions of private tabs (null: none).
-  handleTrusted("extensions:actions-info", () => ({ privatePartition: privateExtensionsReady() ? privatePartitionFor(PRIVATE_PARTITION) : null }));
+  handleTrusted("window:is-fullscreen", () => Boolean(mainWindow && !mainWindow.isDestroyed() && mainWindow.isFullScreen()));
+  handleTrusted("extensions:actions-info", () => buildExtensionToolbarInfo());
+  handleTrusted("extensions:set-pinned", (_event, key: unknown, pinned: unknown) => setExtensionPinned(key, pinned === true));
+  handleTrusted("extensions-menu:open", (event, anchor: unknown) => openExtensionsMenu(anchor, event.sender));
   handleTrusted("navigation-menu:open", (_event, anchor: unknown) => openNavigationMenu(anchor));
   handleTrusted("site-info-menu:open", async (_event, anchor: unknown) => openSiteInfoMenu(anchor));
 
@@ -10331,6 +10445,10 @@ const createMainWindow = async (
     autoHideMenuBar: false,
     backgroundColor: currentBackgroundColor,
     icon: path.join(app.getAppPath(), "assets", "icon.png"),
+    // Windows: no title bar of its own; the native controls are drawn over the tab strip (see titlebar.ts).
+    ...(usesNativeControlsOverlay(process.platform)
+      ? { titleBarStyle: "hidden" as const, titleBarOverlay: titleBarOverlayFor(getThemeTokens(), layoutSettings.compactMode) }
+      : {}),
     webPreferences: {
       // The shell preload = preload.js + the <browser-action-list> bridge of electron-chrome-extensions (bundled).
       preload: path.join(__dirname, "shell-preload.js"),
@@ -10387,7 +10505,27 @@ const createMainWindow = async (
     },
     isSidebarDragging: () => sidebarDragging,
     restoreFocus: focusActiveTabView,
+    getTopInset: () => (isCompactMode() ? compactViewportTop(process.platform) : 0),
+    // Windows: the title strip is a window drag region and swallows pointer events: track the pointer by polling.
+    getCursor: usesNativeControlsOverlay(process.platform) ? () => {
+      const win = mainWindow;
+      if (!win || win.isDestroyed() || !win.isVisible() || win.isMinimized() || !win.isFocused()) return null;
+      const point = screen.getCursorScreenPoint();
+      const bounds = win.getContentBounds();
+      const x = point.x - bounds.x;
+      const y = point.y - bounds.y;
+      return x >= 0 && y >= 0 && x < bounds.width && y < bounds.height ? { x, y } : null;
+    } : undefined,
   });
+
+  // The native window controls are not drawn in fullscreen: the shell stops reserving room for them.
+  const sendFullscreen = (fullscreen: boolean): void => {
+    for (const target of [mainWindow?.webContents, compactChrome?.getContents()]) {
+      if (target && !target.isDestroyed()) target.send("window:fullscreen", fullscreen);
+    }
+  };
+  mainWindow.on("enter-full-screen", () => sendFullscreen(true));
+  mainWindow.on("leave-full-screen", () => sendFullscreen(false));
 
   mainWindow.on("resize", () => {
     closePopup(false, false);
@@ -10732,9 +10870,11 @@ const bootstrap = async (): Promise<void> => {
     },
     getLanguage: () => (appLanguage === "pl" ? "pl" : "en"),
     getShellOrigin: () => (compactChrome?.isEnabled() ? compactChrome.getOrigin() : { x: 0, y: 0 }),
+    getAvoidRect: (contentWidth) => windowControlsRect(process.platform, contentWidth, isCompactMode(), Boolean(mainWindow?.isFullScreen())),
     onChanged: () => {
       syncAdblockWithExtensions();
       notifyExtensionsChanged();
+      broadcastExtensionToolbar();
     },
   });
   startStatsTimer();

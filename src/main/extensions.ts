@@ -4,10 +4,13 @@ import { ElectronChromeExtensions } from "electron-chrome-extensions";
 import { installChromeWebStore, uninstallExtension, updateExtensions } from "electron-chrome-web-store";
 import fs from "node:fs";
 import path from "node:path";
+import type { ExtensionToolbarInfo } from "./extension-toolbar.js";
+import { installInWindowPopups, isInWindowPopupOpen } from "./extension-popup.js";
 import {
   EMPTY_EXTENSIONS_STATE, PRIVATE_EXT_PARTITION, dirKey, discoverExtensionEntries, extensionPageUrl, extensionsDirFor,
   extensionsStateFileFor, externalKey, getOptionsPagePath, normalizeExtensionsState, pickIconPath, pickPausingBlocker,
-  canExtensionBlock, detectContentBlocker, findUnsupportedFeatures, planWindowCreate, privateExtensionsProfileDirFor, resolveManifestString, summarizePermissions,
+  canExtensionBlock, detectContentBlocker, findUnsupportedFeatures, hasToolbarAction, isPinned, migratePinned, planWindowCreate,
+  privateExtensionsProfileDirFor, resolvePinnedIds, resolveManifestString, summarizePermissions,
   withListEntry,
   type ExtensionEntry, type ExtensionSource, type ExtensionsState,
 } from "./extensions-logic.js";
@@ -35,6 +38,8 @@ export interface ExtensionsHost {
   getShellOrigin: () => { x: number; y: number };
   /** The set of installed/enabled extensions changed (toolbar, settings page, built-in blocker). */
   onChanged: () => void;
+  /** Area popups keep clear of (native window controls on Windows), in window content coordinates. */
+  getAvoidRect: (contentWidth: number) => { x: number; y: number; width: number; height: number } | null;
 }
 
 type Scope = "default" | "private";
@@ -50,6 +55,10 @@ export type ExtensionInfo = {
   enabled: boolean;
   allowedInPrivate: boolean;
   hasOptions: boolean;
+  /** The manifest declares a toolbar action (a button that can be pinned to the toolbar). */
+  hasAction: boolean;
+  /** Pinned to the toolbar (only meaningful when hasAction). */
+  pinned: boolean;
   path: string;
   /** Known content blocker this extension is (it pauses the built-in blocker while enabled and working). */
   contentBlocker: string | null;
@@ -103,7 +112,7 @@ const readState = (): ExtensionsState => {
   try {
     return normalizeExtensionsState(JSON.parse(fs.readFileSync(extensionsStateFileFor(userData()), "utf8")));
   } catch {
-    return { ...EMPTY_EXTENSIONS_STATE, disabled: [], privateAllowed: [], external: [] };
+    return { ...EMPTY_EXTENSIONS_STATE, disabled: [], privateAllowed: [], external: [], pinned: null };
   }
 };
 
@@ -219,6 +228,8 @@ const describeEntry = (entry: ExtensionEntry): ExtensionInfo => {
     enabled,
     allowedInPrivate: state.privateAllowed.includes(entry.key),
     hasOptions: Boolean(manifest && getOptionsPagePath(manifest)),
+    hasAction: hasToolbarAction(manifest),
+    pinned: isPinned(state, entry.key),
     path: entry.dir,
     contentBlocker: detectContentBlocker({ id, name }),
     blockerWorking: Boolean(manifest && enabled && loaded && detectContentBlocker({ id, name }) && canExtensionBlock(manifest, startedWorkers.default.has(loaded.id))),
@@ -272,6 +283,7 @@ const pruneState = (): void => {
     disabled: state.disabled.filter(keep),
     privateAllowed: state.privateAllowed.filter(keep),
     external: state.external.filter((folder) => fs.existsSync(path.join(folder, "manifest.json"))),
+    pinned: state.pinned === null ? null : state.pinned.filter(keep),
   };
   if (JSON.stringify(next) !== JSON.stringify(state)) setState(next);
 };
@@ -476,6 +488,13 @@ const createInstance = (scope: Scope, target: Session): ElectronChromeExtensions
   });
   registerBrowserAlias(target);
   trackWorkers(scope, target);
+  // Action popups live inside the window (the library's child window cannot be positioned on Wayland).
+  installInWindowPopups(instance, target, scope === "private", {
+    getWindow: () => host?.getWindow() ?? null,
+    getShellOrigin: () => host?.getShellOrigin() ?? { x: 0, y: 0 },
+    getAvoidRect: (width) => host?.getAvoidRect(width) ?? null,
+    openLink: (url, isPrivate) => { host?.createTab(url, true, isPrivate); },
+  });
   instance.on("browser-action-popup-created", (popup: ActionPopup) => {
     actionPopups.add(popup);
     // The library anchors popups to window coordinates; the compact-mode overlay is offset inside the window.
@@ -492,6 +511,7 @@ const createInstance = (scope: Scope, target: Session): ElectronChromeExtensions
 };
 
 export const isExtensionPopupOpen = (): boolean => {
+  if (isInWindowPopupOpen()) return true;
   for (const popup of actionPopups) {
     if (popup.isDestroyed()) actionPopups.delete(popup);
   }
@@ -567,6 +587,8 @@ export const startExtensions = async (extensionsHost: ExtensionsHost): Promise<v
   app.once("will-quit", wipePrivateProfile);
 
   const entries = discover();
+  // Pinning did not exist before: what is installed now stays on the toolbar, later installs start unpinned.
+  if (state.pinned === null) setState(migratePinned(state, entries.map((entry) => entry.key)));
   privateProfileWanted = entries.some((entry) => !state.disabled.includes(entry.key) && state.privateAllowed.includes(entry.key));
 
   // The Chrome Web Store only offers "Add to Chrome" to Chrome-like browsers: drop the Electron/app tokens from the UA.
@@ -689,6 +711,57 @@ export const setExtensionEnabled = async (key: unknown, enabled: boolean): Promi
   return listExtensions();
 };
 
+export const setExtensionPinned = async (key: unknown, pinned: boolean): Promise<ExtensionsSnapshot> => {
+  const entry = findEntry(key);
+  if (!entry) return listExtensions();
+  setState({ ...state, pinned: withListEntry(state.pinned ?? [], entry.key, pinned) });
+  host?.onChanged();
+  return listExtensions();
+};
+
+/** Enabled, loaded extensions that have a toolbar action, with what the Extensions menu shows. */
+export type ExtensionMenuItem = {
+  key: string;
+  id: string;
+  name: string;
+  iconDataUrl: string | null;
+  pinned: boolean;
+  allowedInPrivate: boolean;
+};
+
+const actionEntries = (): Array<{ entry: ExtensionEntry; loaded: Extension }> => {
+  const result: Array<{ entry: ExtensionEntry; loaded: Extension }> = [];
+  for (const entry of discover()) {
+    if (state.disabled.includes(entry.key)) continue;
+    const loaded = loadedExtensionFor(entry);
+    if (loaded && hasToolbarAction(readManifest(entry.dir))) result.push({ entry, loaded });
+  }
+  return result;
+};
+
+export const getExtensionMenuItems = (): ExtensionMenuItem[] =>
+  actionEntries().map(({ entry, loaded }) => {
+    const manifest = readManifest(entry.dir);
+    return {
+      key: entry.key,
+      id: loaded.id,
+      name: loaded.name || path.basename(entry.dir),
+      iconDataUrl: manifest ? readIconDataUrl(entry.dir, manifest) : null,
+      pinned: isPinned(state, entry.key),
+      allowedInPrivate: state.privateAllowed.includes(entry.key),
+    };
+  }).sort((a, b) => a.name.localeCompare(b.name));
+
+/** What the toolbar shows: which action buttons are pinned and whether the Extensions button is needed. */
+export const getExtensionToolbarInfo = (): ExtensionToolbarInfo => {
+  const items = actionEntries().map(({ entry, loaded }) => ({ key: entry.key, id: loaded.id, enabled: true }));
+  return {
+    privatePartition: null, // filled in by the caller (it owns the private partition name)
+    pinnedIds: resolvePinnedIds(items, state.pinned),
+    hasActions: items.length > 0,
+  };
+};
+
 export const setExtensionAllowedInPrivate = async (key: unknown, allowed: boolean): Promise<ExtensionsSnapshot> => {
   const entry = findEntry(key);
   if (!entry) return listExtensions();
@@ -732,6 +805,7 @@ export const removeInstalledExtension = async (key: unknown): Promise<Extensions
       disabled: withListEntry(state.disabled, entry.key, false),
       privateAllowed: withListEntry(state.privateAllowed, entry.key, false),
       external: entry.source === "external" ? state.external.filter((folder) => folder !== entry.dir) : state.external,
+      pinned: state.pinned === null ? null : withListEntry(state.pinned, entry.key, false),
     });
     loadedIds.delete(entry.key);
     loadErrors.delete(entry.key);

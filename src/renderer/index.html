@@ -143,6 +143,10 @@
         flex-direction: column;
       }
 
+      #extensions-button[hidden] {
+        display: none;
+      }
+
       #nav-buttons,
       #chrome-actions {
         display: flex;
@@ -1092,6 +1096,90 @@
         border-right-color: var(--accent);
       }
 
+      /* ── Windows: the tab strip is the title bar ─────────────────────────────────
+         The native window controls (Electron titleBarOverlay, same height as the strip) are drawn over the right
+         end of the top bar; --wco-right (set by app.ts from the real geometry) keeps that end free. The empty part
+         of the bar drags the window (double-click maximizes), everything interactive opts out. */
+      #titlebar-drag {
+        display: none;
+      }
+
+      html.platform-win32 {
+        --wco-right: 138px;
+      }
+
+      html.platform-win32.window-fullscreen {
+        --wco-right: 0px;
+      }
+
+      /* Horizontal layout: the single toolbar row is the title bar. */
+      html.platform-win32 body:not(.vertical) #chrome {
+        padding-right: calc(6px + var(--wco-right));
+        -webkit-app-region: drag;
+      }
+
+      html.platform-win32 #titlebar-drag {
+        -webkit-app-region: drag;
+      }
+
+      html.platform-win32 #chrome :is(button, input, form, a, select, textarea, browser-action-list, .tab-btn, #sidebar-resizer, #ext-actions) {
+        -webkit-app-region: no-drag;
+      }
+
+      /* Vertical layout: a full-width top bar (nav buttons + address bar, then the controls) above sidebar and page. */
+      html.platform-win32 body.top-row #titlebar-drag {
+        display: block;
+        position: fixed;
+        top: 0;
+        left: 0;
+        right: 0;
+        height: 36px;
+        background: var(--tabbar-bg);
+        border-bottom: 1px solid var(--tabbar-line);
+        z-index: 9;
+      }
+
+      html.platform-win32 body.top-row #chrome {
+        top: 36px;
+      }
+
+      html.platform-win32 body.top-row #nav-buttons {
+        position: fixed;
+        top: 0;
+        left: 6px;
+        height: 36px;
+        flex-direction: row;
+        justify-content: flex-start;
+      }
+
+      html.platform-win32 body.top-row #address-form {
+        display: flex;
+        position: fixed;
+        top: 5px;
+        left: 98px;
+        right: calc(var(--wco-right) + 8px);
+        width: auto;
+        max-width: 720px;
+        height: 26px;
+      }
+
+      /* Compact mode (the window's own shell): the page covers everything but a thin drag strip; the chrome comes back
+         as the overlay instance when the pointer touches the top / side edge. */
+      html.platform-win32 body.compact #chrome {
+        visibility: hidden;
+      }
+
+      html.platform-win32 body.compact #titlebar-drag {
+        display: block;
+        position: fixed;
+        top: 0;
+        left: 0;
+        right: 0;
+        height: 32px;
+        background: var(--tabbar-bg);
+        z-index: 9;
+      }
+
       /* ── Compact mode: this document is the chrome overlay (second shell instance) ── */
       html.chrome-overlay,
       html.chrome-overlay body {
@@ -1132,6 +1220,7 @@
     </style>
   </head>
   <body>
+    <div id="titlebar-drag" aria-hidden="true"></div>
     <div id="chrome">
       <div id="nav-buttons">
         <button id="back" class="nav-btn" type="button" aria-label="Wstecz" title="Wstecz (Alt+←)">
@@ -1193,6 +1282,11 @@
           </svg>
         </button>
         <div id="ext-actions" hidden></div>
+        <button id="extensions-button" class="nav-btn" type="button" hidden aria-haspopup="menu" aria-label="Rozszerzenia" title="Rozszerzenia">
+          <svg viewBox="0 0 16 16" aria-hidden="true">
+            <path d="M6.5 2.5a1.5 1.5 0 0 1 3 0V4h2.25c.41 0 .75.34.75.75V7h-1.5a1.5 1.5 0 0 0 0 3h1.5v2.25c0 .41-.34.75-.75.75H9.5v-1.5a1.5 1.5 0 0 0-3 0V13H4.25a.75.75 0 0 1-.75-.75V10H5a1.5 1.5 0 0 0 0-3H3.5V4.75c0-.41.34-.75.75-.75H6.5V2.5Z" />
+          </svg>
+        </button>
         <div id="toolbar-pins"></div>
         <button id="zoom-pill" type="button" hidden aria-label="Zoom" title="Zoom"></button>
         <button id="menu-button" class="nav-btn" type="button" aria-haspopup="menu" aria-label="Menu" title="Menu">

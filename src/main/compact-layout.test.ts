@@ -2,7 +2,7 @@ import assert from "node:assert/strict";
 import test from "node:test";
 import {
   COMPACT_HIDE_DELAY_MS, COMPACT_HOT_ZONE, HORIZONTAL_CHROME_HEIGHT, INITIAL_COMPACT_STATE, chromeOverlayRect, hotStripRect,
-  sidebarWidthFor, stepCompact, type CompactGeometry,
+  pollHotRect, rectContains, sidebarWidthFor, stepCompact, type CompactGeometry,
 } from "./compact-layout.js";
 
 const horizontal: CompactGeometry = { kind: "horizontal", contentWidth: 1200, contentHeight: 800, sidebarWidth: 240 };
@@ -56,4 +56,26 @@ test("a right-hand sidebar puts the overlay and hot strip on the right edge", ()
   assert.deepEqual(hotStripRect(right), { x: 1200 - COMPACT_HOT_ZONE, y: 0, width: COMPACT_HOT_ZONE, height: 800 });
   assert.deepEqual(chromeOverlayRect({ ...right, side: "left" }), chromeOverlayRect(vertical));
   assert.deepEqual(chromeOverlayRect({ ...right, sidebarWidth: 5000 }), { x: 0, y: 0, width: 1200, height: 800 });
+});
+
+test("a title strip (Windows) moves the sidebar overlay and its hot strip below it", () => {
+  const right: CompactGeometry = { ...vertical, side: "right", topInset: 32 };
+  assert.deepEqual(chromeOverlayRect({ ...vertical, topInset: 32 }), { x: 0, y: 32, width: 240, height: 768 });
+  assert.deepEqual(chromeOverlayRect(right), { x: 960, y: 32, width: 240, height: 768 });
+  assert.deepEqual(hotStripRect(right), { x: 1197, y: 32, width: 3, height: 768 });
+  // the horizontal chrome overlays the strip itself
+  assert.deepEqual(chromeOverlayRect({ ...horizontal, topInset: 32 }), { x: 0, y: 0, width: 1200, height: HORIZONTAL_CHROME_HEIGHT });
+});
+
+test("polled hot area: whole title strip when horizontal, the edge strip when vertical", () => {
+  assert.deepEqual(pollHotRect(horizontal), { x: 0, y: 0, width: 1200, height: COMPACT_HOT_ZONE });
+  assert.deepEqual(pollHotRect({ ...horizontal, topInset: 32 }), { x: 0, y: 0, width: 1200, height: 32 });
+  assert.deepEqual(pollHotRect({ ...vertical, topInset: 32 }), hotStripRect({ ...vertical, topInset: 32 }));
+});
+
+test("rectContains is half-open and ignores empty rects", () => {
+  const rect = { x: 10, y: 10, width: 5, height: 5 };
+  assert.equal(rectContains(rect, { x: 10, y: 10 }), true);
+  assert.equal(rectContains(rect, { x: 15, y: 10 }), false);
+  assert.equal(rectContains({ x: 0, y: 0, width: 0, height: 0 }, { x: 0, y: 0 }), false);
 });

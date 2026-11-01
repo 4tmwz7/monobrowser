@@ -357,7 +357,29 @@ const browserApi = {
   openExtensionsFolder: (): Promise<boolean> => ipcRenderer.invoke("extensions:open-folder"),
   loadUnpackedExtension: (): Promise<unknown> => ipcRenderer.invoke("extensions:load-unpacked"),
   openExtensionStore: (): Promise<boolean> => ipcRenderer.invoke("extensions:open-store"),
-  getExtensionActionsInfo: (): Promise<{ privatePartition: string | null }> => ipcRenderer.invoke("extensions:actions-info"),
+  setExtensionPinned: (key: string, pinned: boolean): Promise<unknown> => ipcRenderer.invoke("extensions:set-pinned", key, pinned),
+  getExtensionActionsInfo: (): Promise<unknown> => ipcRenderer.invoke("extensions:actions-info"),
+  openExtensionsMenu: (anchor: { x: number; y: number; rect?: { x: number; y: number; width: number; height: number }; placement?: "below" | "above" | "right" | "left" }): Promise<boolean> =>
+    ipcRenderer.invoke("extensions-menu:open", anchor),
+  onExtensionToolbarChanged: (callback: (info: unknown) => void): (() => void) => {
+    const listener = (_event: Electron.IpcRendererEvent, info: unknown) => callback(info);
+    ipcRenderer.on("extensions:toolbar-changed", listener);
+    return () => ipcRenderer.removeListener("extensions:toolbar-changed", listener);
+  },
+  /** The Extensions menu chose an extension: the shell activates its action, anchored to the Extensions button. */
+  onExtensionActivate: (callback: (payload: { id: string }) => void): (() => void) => {
+    const listener = (_event: Electron.IpcRendererEvent, payload: { id: string }) => callback(payload);
+    ipcRenderer.on("extensions:activate", listener);
+    return () => ipcRenderer.removeListener("extensions:activate", listener);
+  },
+  // Window chrome: "win32" gets native window controls overlaid on the tab strip (see titlebar.ts).
+  platform: process.platform,
+  onWindowFullscreen: (callback: (fullscreen: boolean) => void): (() => void) => {
+    const listener = (_event: Electron.IpcRendererEvent, fullscreen: boolean) => callback(fullscreen === true);
+    ipcRenderer.on("window:fullscreen", listener);
+    return () => ipcRenderer.removeListener("window:fullscreen", listener);
+  },
+  isWindowFullscreen: (): Promise<boolean> => ipcRenderer.invoke("window:is-fullscreen"),
   onExtensionsChanged: (callback: () => void): (() => void) => {
     const listener = () => callback();
     ipcRenderer.on("extensions:changed", listener);

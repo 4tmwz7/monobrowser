@@ -5,7 +5,7 @@ import {
   KNOWN_CONTENT_BLOCKERS, PRIVATE_EXT_PARTITION, compareVersionFolders, detectContentBlocker, discoverExtensionEntries, extensionPageUrl,
   extensionsDirFor, extensionsStateFileFor, getOptionsPagePath, isAllowedWindowUrl, isWebStoreExtensionId, normalizeExtensionsState,
   blockerMechanism, canExtensionBlock, findUnsupportedFeatures, usesServiceWorker, pickIconPath, pickLatestVersionFolder, pickPausingBlocker, planWindowCreate, privateExtensionsProfileDirFor, resolveManifestString,
-  summarizePermissions, withListEntry, type DirectoryReader,
+  summarizePermissions, withListEntry, hasToolbarAction, isPinned, migratePinned, resolvePinnedIds, type DirectoryReader,
 } from "./extensions-logic.js";
 
 const STORE_ID = "ddkjiahejlhfcafbddmgiahcphecmpfh";
@@ -19,12 +19,55 @@ test("paths live under the given userData (portable data folder included)", () =
 });
 
 test("state normalization drops junk, duplicates and relative external paths", () => {
-  assert.deepEqual(normalizeExtensionsState(null), { disabled: [], privateAllowed: [], external: [] });
+  assert.deepEqual(normalizeExtensionsState(null), { disabled: [], privateAllowed: [], external: [], pinned: null });
   assert.deepEqual(normalizeExtensionsState({
     disabled: ["a", "a", 3, "", "b"],
     privateAllowed: "nope",
     external: [path.resolve("/x/ext"), "relative/dir"],
-  }), { disabled: ["a", "b"], privateAllowed: [], external: [path.resolve("/x/ext")] });
+  }), { disabled: ["a", "b"], privateAllowed: [], external: [path.resolve("/x/ext")], pinned: null });
+});
+
+test("pinned state: absent in old files (null), a clean list otherwise", () => {
+  assert.equal(normalizeExtensionsState({ disabled: ["a"] }).pinned, null);
+  assert.equal(normalizeExtensionsState({ pinned: "nope" }).pinned, null);
+  assert.deepEqual(normalizeExtensionsState({ pinned: ["a", "a", 1, "", "b"] }).pinned, ["a", "b"]);
+  assert.deepEqual(normalizeExtensionsState({ pinned: [] }).pinned, []);
+});
+
+test("migration pins what is already installed once; later installs start unpinned", () => {
+  const old = normalizeExtensionsState({ disabled: ["x"] });
+  const migrated = migratePinned(old, ["x", "y", "y"]);
+  assert.deepEqual(migrated.pinned, ["x", "y"]);
+  // once recorded (even empty) nothing is pinned automatically
+  assert.deepEqual(migratePinned({ ...migrated, pinned: [] }, ["x", "y", "new"]).pinned, []);
+  assert.deepEqual(migratePinned(migrated, ["x", "y", "new"]).pinned, ["x", "y"]);
+  // a fresh profile without any extension also gets a recorded (empty) list
+  assert.deepEqual(migratePinned(normalizeExtensionsState(undefined), []).pinned, []);
+  assert.equal(isPinned(migrated, "x"), true);
+  assert.equal(isPinned(migrated, "new"), false);
+  assert.equal(isPinned({ pinned: null }, "x"), false);
+});
+
+test("pinned ids: only enabled, loaded and pinned extensions, in list order", () => {
+  const items = [
+    { key: "dir:a", id: "a".repeat(32), enabled: true },
+    { key: "dir:b", id: "b".repeat(32), enabled: true },
+    { key: "dir:c", id: null, enabled: true },
+    { key: "dir:d", id: "d".repeat(32), enabled: false },
+  ];
+  assert.deepEqual(resolvePinnedIds(items, ["dir:d", "dir:c", "dir:b", "dir:a"]), ["a".repeat(32), "b".repeat(32)]);
+  assert.deepEqual(resolvePinnedIds(items, []), []);
+  assert.deepEqual(resolvePinnedIds(items, null), []);
+});
+
+test("toolbar action detection follows the manifest version", () => {
+  assert.equal(hasToolbarAction({ manifest_version: 3, action: {} }), true);
+  assert.equal(hasToolbarAction({ manifest_version: 3, action: { default_popup: "p.html" } }), true);
+  assert.equal(hasToolbarAction({ manifest_version: 3, browser_action: {} }), false);
+  assert.equal(hasToolbarAction({ manifest_version: 2, browser_action: { default_title: "x" } }), true);
+  assert.equal(hasToolbarAction({ manifest_version: 2, page_action: {} }), false);
+  assert.equal(hasToolbarAction({ manifest_version: 3 }), false);
+  assert.equal(hasToolbarAction(null), false);
 });
 
 test("disabled state toggles without duplicates", () => {

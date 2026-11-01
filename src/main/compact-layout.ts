@@ -18,18 +18,23 @@ export type CompactGeometry = {
   sidebarWidth: number;
   /** Window edge the sidebar sits on (vertical layout only); defaults to the left edge. */
   side?: "left" | "right";
+  /** Height of a title strip that stays visible above the page (Windows: native window controls); 0 by default. */
+  topInset?: number;
 };
 
 export const sidebarWidthFor = (layout: { verticalTabBarWidth: number; verticalTabBarCollapsed: boolean }): number =>
   layout.verticalTabBarCollapsed ? COLLAPSED_SIDEBAR_WIDTH : layout.verticalTabBarWidth;
 
 /** A full-height strip of the given width flush with the sidebar's window edge. */
-const sidebarEdgeRect = (geometry: CompactGeometry, width: number): Rect => ({
-  x: geometry.side === "right" ? geometry.contentWidth - width : 0,
-  y: 0,
-  width,
-  height: geometry.contentHeight,
-});
+const sidebarEdgeRect = (geometry: CompactGeometry, width: number): Rect => {
+  const top = Math.min(Math.max(0, geometry.topInset ?? 0), geometry.contentHeight);
+  return {
+    x: geometry.side === "right" ? geometry.contentWidth - width : 0,
+    y: top,
+    width,
+    height: geometry.contentHeight - top,
+  };
+};
 
 /** Bounds of the revealed chrome overlay in window content coordinates. */
 export const chromeOverlayRect = (geometry: CompactGeometry): Rect =>
@@ -67,3 +72,15 @@ export const stepCompact = (state: CompactState, input: CompactInput): CompactSt
   if (input.now >= state.hideAt) return INITIAL_COMPACT_STATE;
   return state;
 };
+
+/**
+ * Area where the pointer reveals the chrome when it is tracked by polling (Windows): there the top strip is a
+ * window drag region, which swallows pointer events, so the invisible hot strip view cannot see the pointer.
+ */
+export const pollHotRect = (geometry: CompactGeometry): Rect =>
+  geometry.kind === "vertical"
+    ? hotStripRect(geometry)
+    : { x: 0, y: 0, width: geometry.contentWidth, height: Math.min(Math.max(COMPACT_HOT_ZONE, geometry.topInset ?? 0), geometry.contentHeight) };
+
+export const rectContains = (rect: Rect, point: { x: number; y: number }): boolean =>
+  rect.width > 0 && rect.height > 0 && point.x >= rect.x && point.x < rect.x + rect.width && point.y >= rect.y && point.y < rect.y + rect.height;

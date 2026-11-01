@@ -1,4 +1,6 @@
 import { displayUrl } from "../main/url-utils.js";
+import { shellViewport, windowControlsReserve } from "../main/titlebar.js";
+import { EMPTY_TOOLBAR_INFO, normalizeToolbarInfo, pinnedActionsCss, type ExtensionToolbarInfo } from "../main/extension-toolbar.js";
 type TabState = {
   id: number;
   title: string;
@@ -71,7 +73,13 @@ type BrowserApi = {
   getSearchSettings: () => Promise<SearchSettings>;
   setSearchSettings: (settings: SearchSettings) => Promise<SearchSettingsResult>;
   openSettingsWindow: () => Promise<boolean>;
-  getExtensionActionsInfo: () => Promise<{ privatePartition: string | null }>;
+  getExtensionActionsInfo: () => Promise<unknown>;
+  openExtensionsMenu: (anchor: PopupAnchorArg) => Promise<boolean>;
+  onExtensionToolbarChanged: (callback: (info: unknown) => void) => () => void;
+  onExtensionActivate: (callback: (payload: { id: string }) => void) => () => void;
+  platform: string;
+  onWindowFullscreen: (callback: (fullscreen: boolean) => void) => () => void;
+  isWindowFullscreen: () => Promise<boolean>;
   getAdblockStatus: () => Promise<AdblockerStatus>;
   toggleAdblock: () => Promise<AdblockerStatus>;
   toggleAdblockTabPause: () => Promise<AdblockerStatus>;
@@ -104,6 +112,11 @@ type BrowserApi = {
 declare global {
   interface Window {
     browserApi: BrowserApi;
+    /** Bridge of <browser-action-list> (electron-chrome-extensions), exposed by the shell preload. */
+    browserAction?: {
+      getState: (partition: string) => Promise<{ activeTabId?: number }>;
+      activate: (partition: string, details: Record<string, unknown>) => Promise<unknown>;
+    };
   }
 }
 
@@ -111,6 +124,31 @@ const DEFAULT_URL = "monobrowser://new-tab";
 // Compact mode shows the chrome in a second shell instance hosted in an overlay view.
 const isChromeOverlay = new URLSearchParams(window.location.search).get("chrome") === "overlay";
 if (isChromeOverlay) document.documentElement.classList.add("chrome-overlay");
+
+// Windows: the tab strip is the title bar and the native window controls are drawn over its right end (titlebar.ts).
+// The CSS (platform-win32) makes the empty strip a drag area and keeps --wco-right of room free for the controls.
+const isWindows = window.browserApi.platform === "win32";
+let windowFullscreen = false;
+if (isWindows) {
+  document.documentElement.classList.add("platform-win32");
+  type ControlsOverlay = { visible: boolean; getTitlebarAreaRect: () => DOMRect; addEventListener: (type: "geometrychange", listener: () => void) => void };
+  const updateControlsReserve = (): void => {
+    const overlay = (navigator as Navigator & { windowControlsOverlay?: ControlsOverlay }).windowControlsOverlay;
+    let titlebarArea: { x: number; width: number } | null = null;
+    if (overlay?.visible) {
+      const rect = overlay.getTitlebarAreaRect();
+      titlebarArea = { x: rect.x, width: rect.width };
+    }
+    const reserve = windowControlsReserve({ fullscreen: windowFullscreen, titlebarArea, viewportWidth: window.innerWidth });
+    document.documentElement.style.setProperty("--wco-right", `${reserve}px`);
+    document.documentElement.classList.toggle("window-fullscreen", windowFullscreen);
+  };
+  updateControlsReserve();
+  window.addEventListener("resize", updateControlsReserve);
+  (navigator as Navigator & { windowControlsOverlay?: ControlsOverlay }).windowControlsOverlay?.addEventListener("geometrychange", updateControlsReserve);
+  window.browserApi.onWindowFullscreen((fullscreen) => { windowFullscreen = fullscreen; updateControlsReserve(); });
+  void window.browserApi.isWindowFullscreen().then((fullscreen) => { windowFullscreen = fullscreen; updateControlsReserve(); }).catch(() => undefined);
+}
 
 const translations = {
   pl: {
@@ -127,6 +165,7 @@ const translations = {
     muteTab: "Wycisz kartę", unmuteTab: "Włącz dźwięk karty",
     zoomReset: "Powiększenie strony — kliknij, aby przywrócić 100% (Ctrl+0)",
     workspaces: "Przestrzenie", workspace: "Przestrzeń", newWorkspace: "Nowa przestrzeń",
+    extensions: "Rozszerzenia",
   },
   en: {
     tabs: "Tabs", newTab: "New tab", closeTab: "Close tab (Ctrl+W)",
@@ -142,6 +181,7 @@ const translations = {
     muteTab: "Mute tab", unmuteTab: "Unmute tab",
     zoomReset: "Page zoom — click to reset to 100% (Ctrl+0)",
     workspaces: "Spaces", workspace: "Space", newWorkspace: "New space",
+    extensions: "Extensions",
   },
 } as const;
 
@@ -233,6 +273,8 @@ const applyLanguage = (language: AppLanguage): void => {
   placeholderHint.textContent = copy.emptyHint;
   menuButton.title = copy.menu;
   menuButton.setAttribute("aria-label", copy.menu);
+  extensionsButton.title = copy.extensions;
+  extensionsButton.setAttribute("aria-label", copy.extensions);
   wsAdd.title = `${copy.newWorkspace}`;
   wsAdd.setAttribute("aria-label", copy.newWorkspace);
   renderSidebarToggle();
@@ -253,9 +295,7 @@ const renderSidebarToggle = (): void => {
 
 // Tells the main process where web content starts (below the toolbar or right of the sidebar).
 const syncViewport = async (): Promise<void> => {
-  const rect = isVertical()
-    ? (isSidebarRight() ? { x: 0, y: 0, right: currentSidebarWidth() } : { x: currentSidebarWidth(), y: 0, right: 0 })
-    : { x: 0, y: HORIZONTAL_CHROME_HEIGHT, right: 0 };
+  const rect = shellViewport({ platform: window.browserApi.platform, vertical: isVertical(), sidebarRight: isSidebarRight(), sidebarWidth: currentSidebarWidth() });
   placeholder.style.top = `${rect.y}px`;
   placeholder.style.left = `${rect.x}px`;
   placeholder.style.right = `${rect.right}px`;
@@ -269,6 +309,10 @@ const applyLayout = (): void => {
   document.body.classList.toggle("vertical", isVertical());
   document.body.classList.toggle("sidebar-right", isSidebarRight());
   document.body.classList.toggle("collapsed", isCollapsed());
+  // Windows: vertical layout puts the address row in a full-width top bar next to the native controls; in compact
+  // mode the window's own shell only shows a thin drag strip (the revealed chrome is the overlay instance).
+  document.body.classList.toggle("top-row", isWindows && isVertical() && !layout.compactMode);
+  document.body.classList.toggle("compact", isWindows && layout.compactMode && !isChromeOverlay);
   document.documentElement.style.setProperty("--sidebar-width", `${currentSidebarWidth()}px`);
   renderSidebarToggle();
   updateNewTabTitle();
@@ -298,10 +342,38 @@ const getActiveTab = (): TabState | undefined => {
 // One list at a time: normal tabs show the default session's extensions, private tabs the private partition's (only
 // when private extensions are enabled). Internal pages have no extensions. The element comes from the shell preload.
 const extActionsHost = document.getElementById("ext-actions") as HTMLDivElement;
+const extensionsButton = document.getElementById("extensions-button") as HTMLButtonElement;
 let extActionsKey = "";
 let extActionsObserver: MutationObserver | null = null;
+let extPinnedStyle: HTMLStyleElement | null = null;
 let extPrivatePartition: string | null | undefined; // undefined = not asked yet
 let extRefreshFlip = false;
+let extInfo: ExtensionToolbarInfo = EMPTY_TOOLBAR_INFO;
+
+// Popups open away from the window edge: above the button in the sidebar layouts (the actions sit at its bottom).
+const extAlignment = (): string => (isVertical() ? (isSidebarRight() ? "top left" : "top right") : "bottom left");
+
+// Only pinned extensions keep a button in the toolbar (the list element has no filter, so the unpinned buttons are
+// hidden through a stylesheet inside its shadow root); the others are reachable from the Extensions menu.
+const applyExtensionPins = (): void => {
+  extensionsButton.hidden = !(extInfo.hasActions && !!customElements.get("browser-action-list"));
+  const list = extActionsHost.firstElementChild;
+  const shadow = list?.shadowRoot;
+  if (!list || !shadow) return;
+  if (!extPinnedStyle || extPinnedStyle.getRootNode() !== shadow) {
+    extPinnedStyle = document.createElement("style");
+    shadow.appendChild(extPinnedStyle);
+  }
+  extPinnedStyle.textContent = pinnedActionsCss(extInfo.pinnedIds);
+  extActionsHost.hidden = !Array.from(shadow.querySelectorAll(".action")).some((node) => extInfo.pinnedIds.includes(node.id));
+};
+
+const setExtensionInfo = (value: unknown): void => {
+  extInfo = normalizeToolbarInfo(value);
+  extPrivatePartition = extInfo.privatePartition;
+  syncExtensionActions();
+  applyExtensionPins();
+};
 
 const syncExtensionActions = (): void => {
   const tab = getActiveTab();
@@ -311,7 +383,7 @@ const syncExtensionActions = (): void => {
   if (show && tab!.isPrivate) {
     if (extPrivatePartition === undefined) {
       show = false;
-      void window.browserApi.getExtensionActionsInfo().then((info) => { extPrivatePartition = info.privatePartition; syncExtensionActions(); }).catch(() => { extPrivatePartition = null; });
+      void window.browserApi.getExtensionActionsInfo().then(setExtensionInfo).catch(() => { extPrivatePartition = null; });
     } else if (extPrivatePartition === null) {
       show = false;
     } else {
@@ -320,15 +392,16 @@ const syncExtensionActions = (): void => {
   } else {
     extPrivatePartition = undefined; // re-check next time a private tab becomes active
   }
-  // Popups open away from the window edge: above the button in the sidebar layouts (the actions sit at its bottom).
-  const alignment = isVertical() ? (isSidebarRight() ? "top left" : "top right") : "bottom left";
+  const alignment = extAlignment();
   const key = show ? `${partition ?? "_self"}|${alignment}` : "";
   if (key === extActionsKey) return;
   extActionsKey = key;
   extActionsObserver?.disconnect();
   extActionsObserver = null;
+  extPinnedStyle = null;
   extActionsHost.replaceChildren();
   extActionsHost.hidden = true;
+  applyExtensionPins();
   if (!show) return;
   const list = document.createElement("browser-action-list");
   if (partition) list.setAttribute("partition", partition);
@@ -336,10 +409,9 @@ const syncExtensionActions = (): void => {
   extActionsHost.appendChild(list);
   const shadow = list.shadowRoot;
   if (!shadow) return;
-  const updateVisibility = (): void => { extActionsHost.hidden = shadow.querySelectorAll(".action").length === 0; };
-  extActionsObserver = new MutationObserver(updateVisibility);
+  extActionsObserver = new MutationObserver(applyExtensionPins);
   extActionsObserver.observe(shadow, { childList: true });
-  updateVisibility();
+  applyExtensionPins();
 };
 
 // The library resolves "the active tab" from the last focused window: refetch its state when this window regains focus
@@ -1001,6 +1073,37 @@ const wireEvents = (): void => {
     // The sidebar menu button sits at the bottom: the menu grows upward from it (auto-flips when there is no room).
     await window.browserApi.openNavigationMenu({ x: Math.round(rect.left), y: Math.round(rect.bottom), rect: rectOf(rect), placement: isVertical() ? "above" : "below" });
   });
+
+  // Extensions menu: all extensions with a toolbar action (run, pin/unpin) and a link to their management page.
+  onPress(extensionsButton, async () => {
+    const rect = extensionsButton.getBoundingClientRect();
+    await window.browserApi.openExtensionsMenu({ x: Math.round(rect.left), y: Math.round(rect.bottom), rect: rectOf(rect), placement: isVertical() ? "above" : "below" });
+  });
+  // The menu hands the chosen extension back: activate it through the same bridge <browser-action-list> uses, anchored
+  // to the Extensions button (the popup opens under it, whether or not the extension is pinned).
+  window.browserApi.onExtensionActivate(({ id }) => {
+    const bridge = window.browserAction;
+    if (!bridge || typeof id !== "string") return;
+    const tab = getActiveTab();
+    const partition = tab?.isPrivate && extPrivatePartition ? extPrivatePartition : "_self";
+    void (async () => {
+      let tabId = -1;
+      try {
+        const current = await bridge.getState(partition);
+        if (typeof current.activeTabId === "number") tabId = current.activeTabId;
+      } catch { /* the main process resolves the active tab itself when tabId is -1 */ }
+      const rect = extensionsButton.getBoundingClientRect();
+      await bridge.activate(partition, {
+        eventType: "click",
+        extensionId: id,
+        tabId,
+        alignment: extAlignment(),
+        anchorRect: { x: rect.left, y: rect.top, width: rect.width, height: rect.height },
+      });
+    })().catch((error) => console.error("extension activation failed:", error));
+  });
+  window.browserApi.onExtensionToolbarChanged(setExtensionInfo);
+  void window.browserApi.getExtensionActionsInfo().then(setExtensionInfo).catch(() => undefined);
 
   settingsButton.addEventListener("click", async () => {
     await window.browserApi.openSettingsWindow();
