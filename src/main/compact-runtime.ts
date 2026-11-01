@@ -53,6 +53,8 @@ export type CompactChrome = {
   /** Re-stack above page views (after a tab switch). */
   raise: () => void;
   getContents: () => WebContents | null;
+  /** Top-left of the overlay view in window content coordinates. */
+  getOrigin: () => { x: number; y: number };
   setKeep: (flags: { address?: boolean; tabDrag?: boolean }) => void;
   /** The overlay renderer reports the pointer entering/leaving it. */
   setPointerInside: (inside: boolean) => void;
@@ -268,6 +270,11 @@ export const createCompactChrome = (deps: CompactDeps): CompactChrome => {
       if (enabled) raiseAll();
     },
     getContents: () => (alive() && ready ? view!.webContents : null),
+    getOrigin: () => {
+      if (!alive()) return { x: 0, y: 0 };
+      const b = view!.getBounds();
+      return { x: b.x, y: b.y };
+    },
     setKeep: (flags) => {
       if (typeof flags.address === "boolean") addressFocused = flags.address;
       if (typeof flags.tabDrag === "boolean") tabDragging = flags.tabDrag;

@@ -781,6 +781,13 @@
         border-left: 1px solid var(--tabbar-line);
       }
 
+      /* Bottom rows (workspaces, actions) hug the window edge: mirrored order. */
+      body.vertical.sidebar-right:not(.collapsed) #ws-bar,
+      body.vertical.sidebar-right:not(.collapsed) #ws-list,
+      body.vertical.sidebar-right:not(.collapsed) #chrome-actions {
+        flex-direction: row-reverse;
+      }
+
       body.vertical.sidebar-right #sidebar-resizer {
         right: auto;
         left: 0;

@@ -9310,6 +9310,25 @@ const isTrustedIpcSender = (event: IpcMainEvent | IpcMainInvokeEvent): boolean =
   return frameUrl.startsWith("file:") || frameUrl.startsWith("data:");
 };
 
+// The compact-mode chrome lives in its own view (e.g. at the right edge for a right-hand sidebar):
+// popup anchors it sends are in that view's coordinates, so shift them into window coordinates.
+const offsetCompactAnchors = (event: IpcMainInvokeEvent, args: unknown[]): unknown[] => {
+  if (!compactChrome || compactChrome.getContents()?.id !== event.sender.id) return args;
+  const { x: dx, y: dy } = compactChrome.getOrigin();
+  if (dx === 0 && dy === 0) return args;
+  return args.map((arg) => {
+    if (typeof arg !== "object" || arg === null || Array.isArray(arg)) return arg;
+    const raw = arg as { x?: unknown; y?: unknown; rect?: unknown };
+    if (!finiteNumber(raw.x) || !finiteNumber(raw.y)) return arg;
+    const shifted: Record<string, unknown> = { ...raw, x: raw.x + dx, y: raw.y + dy };
+    const rect = raw.rect as { x?: unknown; y?: unknown } | null | undefined;
+    if (rect && typeof rect === "object" && finiteNumber(rect.x) && finiteNumber(rect.y)) {
+      shifted.rect = { ...rect, x: rect.x + dx, y: rect.y + dy };
+    }
+    return shifted;
+  });
+};
+
 const handleTrusted = (
   channel: string,
   listener: (event: IpcMainInvokeEvent, ...args: any[]) => unknown,
@@ -9319,7 +9338,7 @@ const handleTrusted = (
       console.warn(`Rejected IPC call on "${channel}" from untrusted sender`);
       return undefined;
     }
-    return listener(event, ...args);
+    return listener(event, ...offsetCompactAnchors(event, args));
   });
 };
 
