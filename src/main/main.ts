@@ -1241,7 +1241,7 @@ const logNavigationError = (error: unknown): void => {
   }
 };
 
-const openUrlInNewTab = (url: string, isPrivate: boolean = false): void => {
+const openUrlInNewTab = (url: string, isPrivate: boolean = false, background: boolean = false): void => {
   const trimmed = url.trim();
 
   if (!trimmed) {
@@ -1250,7 +1250,7 @@ const openUrlInNewTab = (url: string, isPrivate: boolean = false): void => {
   }
 
   if (isHttpUrl(trimmed) || isAboutBlankUrl(trimmed)) {
-    openNewTab(trimmed, isPrivate);
+    openNewTab(trimmed, isPrivate, !background);
   }
 };
 
@@ -1447,8 +1447,9 @@ const createTabView = (isPrivate: boolean = false, internal: boolean = false): W
     return view;
   }
 
-  view.webContents.setWindowOpenHandler(({ url }) => {
-    openUrlInNewTab(url, isPrivate);
+  view.webContents.setWindowOpenHandler(({ url, disposition }) => {
+    // Middle-click / Ctrl+click ("background-tab") must not steal focus from the current page.
+    openUrlInNewTab(url, isPrivate, disposition === "background-tab");
     return { action: "deny" };
   });
 
@@ -1949,7 +1950,9 @@ const resolveTabByWebContentsId = (webContentsId: number | undefined): TabRecord
     return tabs.get(glance.sourceTabId) ?? null;
   }
   for (const tab of tabs.values()) {
-    if (tab.view && !tab.view.webContents.isDestroyed() && tab.view.webContents.id === webContentsId) {
+    // `view.webContents` is undefined once the page is destroyed (e.g. mid-close).
+    const contents = tab.view?.webContents;
+    if (contents && !contents.isDestroyed() && contents.id === webContentsId) {
       return tab;
     }
   }
@@ -8311,9 +8314,11 @@ const closeTab = (id: number): boolean => {
   }
   tabs.delete(id);
   removeTabFromMruOrder(id);
-  if (tabToClose.view && !tabToClose.view.webContents.isDestroyed()) {
-    if (!tabToClose.internalKind) extensionsRemoveTab(tabToClose.view.webContents);
-    tabToClose.view.webContents.close();
+  // Already-destroyed pages (closed by the user/beforeunload path) have no webContents left.
+  const contentsToClose = tabToClose.view?.webContents;
+  if (contentsToClose && !contentsToClose.isDestroyed()) {
+    if (!tabToClose.internalKind) extensionsRemoveTab(contentsToClose);
+    contentsToClose.close();
   }
 
   if (tabToClose.isPrivate && !Array.from(tabs.values()).some((tab) => tab.isPrivate)) {
@@ -8933,14 +8938,14 @@ const relaunchWithHardMemoryLimitIfNeeded = async (): Promise<boolean> => {
   }
 };
 
-const openNewTab = (initialUrl?: string, isPrivate: boolean = false): number => {
+const openNewTab = (initialUrl?: string, isPrivate: boolean = false, makeActive: boolean = true): number => {
   const requestedUrl = initialUrl?.trim();
   const internalKind = requestedUrl ? parseInternalPageUrl(requestedUrl) : null;
   if (internalKind) {
     void openInternalPage(internalKind);
     return getInternalTab(internalKind)?.id ?? activeTabId ?? -1;
   }
-  return createTab(requestedUrl || DEFAULT_URL, true, isPrivate);
+  return createTab(requestedUrl || DEFAULT_URL, makeActive, isPrivate);
 };
 
 const openNewPrivateTab = (): number => openNewTab(undefined, true);
