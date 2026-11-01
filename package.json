@@ -10,9 +10,10 @@
     "clean": "rimraf dist",
     "gen:icon": "node scripts/generate-icon.mjs",
     "build:main": "tsc -p tsconfig.main.json",
+    "build:preload": "esbuild src/main/shell-preload.ts --bundle --platform=node --format=cjs --external:electron --outfile=dist/main/shell-preload.js",
     "build:renderer": "esbuild src/renderer/app.ts src/renderer/find.ts src/renderer/palette.ts src/renderer/notes.ts src/renderer/glance.ts src/renderer/prompt.ts src/renderer/split-frame.ts --bundle --platform=browser --format=iife --outdir=dist/renderer",
     "copy:html": "node scripts/copy-renderer-html.mjs",
-    "build": "npm run clean && npm run gen:icon && npm run build:main && npm run build:renderer && npm run copy:html",
+    "build": "npm run clean && npm run gen:icon && npm run build:main && npm run build:preload && npm run build:renderer && npm run copy:html",
     "test": "npm run build:main && node --test \"dist/main/**/*.test.js\"",
     "test:e2e": "npm run build && xvfb-run -a -s \"-screen 0 1400x900x24\" node scripts/e2e-smoke.mjs",
     "dev": "npm run build && electron .",
@@ -85,6 +86,8 @@
   },
   "dependencies": {
     "@ghostery/adblocker-electron": "^2.20.3",
+    "electron-chrome-extensions": "^4.10.0",
+    "electron-chrome-web-store": "^0.13.0",
     "electron-updater": "^6.8.11"
   },
   "devDependencies": {

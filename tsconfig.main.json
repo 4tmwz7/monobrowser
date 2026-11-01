@@ -13,5 +13,6 @@
     "types": ["node", "electron"],
     "resolveJsonModule": true
   },
-  "include": ["src/main/**/*.ts"]
+  "include": ["src/main/**/*.ts"],
+  "exclude": ["src/main/shell-preload.ts"]
 }

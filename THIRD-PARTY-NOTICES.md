@@ -30,6 +30,12 @@ remains under MIT.
 - License: MIT
 - Source: https://github.com/electron-userland/electron-builder
 
+### electron-chrome-extensions, electron-chrome-web-store
+
+- Copyright: Copyright (c) 2021 Samuel Maddock
+- License: MIT
+- Source: https://github.com/samuelmaddock/electron-browser-shell
+
 ### Electron (runtime)
 
 - License: MIT
@@ -53,7 +59,7 @@ application code):
 The exact list URLs used by the app are defined in `src/main/main.ts`
 (`ADBLOCK_LISTS`).
 
-## Full text of the MIT license (tldts-experimental, electron-updater)
+## Full text of the MIT license (tldts-experimental, electron-updater, electron-chrome-extensions, electron-chrome-web-store)
 
 ```
 Permission is hereby granted, free of charge, to any person obtaining a copy

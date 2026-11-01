@@ -71,6 +71,7 @@ type BrowserApi = {
   getSearchSettings: () => Promise<SearchSettings>;
   setSearchSettings: (settings: SearchSettings) => Promise<SearchSettingsResult>;
   openSettingsWindow: () => Promise<boolean>;
+  getExtensionActionsInfo: () => Promise<{ privatePartition: string | null }>;
   getAdblockStatus: () => Promise<AdblockerStatus>;
   toggleAdblock: () => Promise<AdblockerStatus>;
   toggleAdblockTabPause: () => Promise<AdblockerStatus>;
@@ -272,6 +273,7 @@ const applyLayout = (): void => {
   renderSidebarToggle();
   updateNewTabTitle();
   render();
+  syncExtensionActions();
   // A shrinking sidebar keeps the old page bounds until its width animation ends; a growing one claims its room at once.
   const nextX = isVertical() ? currentSidebarWidth() : 0; // inset of the page from its window edge
   if (isVertical() && animationsOn() && nextX < lastViewportX) {
@@ -292,8 +294,67 @@ const getActiveTab = (): TabState | undefined => {
   return state.tabs.find((tab) => tab.id === state.activeTabId);
 };
 
+// ── Extension actions (<browser-action-list>) ──────────────────────────────
+// One list at a time: normal tabs show the default session's extensions, private tabs the private partition's (only
+// when private extensions are enabled). Internal pages have no extensions. The element comes from the shell preload.
+const extActionsHost = document.getElementById("ext-actions") as HTMLDivElement;
+let extActionsKey = "";
+let extActionsObserver: MutationObserver | null = null;
+let extPrivatePartition: string | null | undefined; // undefined = not asked yet
+let extRefreshFlip = false;
+
+const syncExtensionActions = (): void => {
+  const tab = getActiveTab();
+  const internal = !!tab && tab.url.startsWith("monobrowser://") && !tab.url.startsWith(DEFAULT_URL);
+  let partition: string | null = null;
+  let show = !!tab && !internal && !!customElements.get("browser-action-list");
+  if (show && tab!.isPrivate) {
+    if (extPrivatePartition === undefined) {
+      show = false;
+      void window.browserApi.getExtensionActionsInfo().then((info) => { extPrivatePartition = info.privatePartition; syncExtensionActions(); }).catch(() => { extPrivatePartition = null; });
+    } else if (extPrivatePartition === null) {
+      show = false;
+    } else {
+      partition = extPrivatePartition;
+    }
+  } else {
+    extPrivatePartition = undefined; // re-check next time a private tab becomes active
+  }
+  // Popups open away from the window edge: above the button in the sidebar layouts (the actions sit at its bottom).
+  const alignment = isVertical() ? (isSidebarRight() ? "top left" : "top right") : "bottom left";
+  const key = show ? `${partition ?? "_self"}|${alignment}` : "";
+  if (key === extActionsKey) return;
+  extActionsKey = key;
+  extActionsObserver?.disconnect();
+  extActionsObserver = null;
+  extActionsHost.replaceChildren();
+  extActionsHost.hidden = true;
+  if (!show) return;
+  const list = document.createElement("browser-action-list");
+  if (partition) list.setAttribute("partition", partition);
+  list.setAttribute("alignment", alignment);
+  extActionsHost.appendChild(list);
+  const shadow = list.shadowRoot;
+  if (!shadow) return;
+  const updateVisibility = (): void => { extActionsHost.hidden = shadow.querySelectorAll(".action").length === 0; };
+  extActionsObserver = new MutationObserver(updateVisibility);
+  extActionsObserver.observe(shadow, { childList: true });
+  updateVisibility();
+};
+
+// The library resolves "the active tab" from the last focused window: refetch its state when this window regains focus
+// (changing an observed attribute makes the element reload its state without recreating the buttons).
+window.addEventListener("focus", () => {
+  const list = extActionsHost.firstElementChild;
+  const alignment = list?.getAttribute("alignment");
+  if (!list || alignment === null || alignment === undefined) return;
+  extRefreshFlip = !extRefreshFlip;
+  list.setAttribute("alignment", extRefreshFlip ? `${alignment.trim()} ` : alignment.trim());
+});
+
 const renderControls = (): void => {
   const activeTab = getActiveTab();
+  syncExtensionActions();
 
   backButton.disabled = !activeTab || !activeTab.canGoBack;
   forwardButton.disabled = !activeTab || !activeTab.canGoForward;
@@ -419,6 +480,8 @@ const INTERNAL_ICON_PATHS: Record<string, string> = {
   onboarding: "M8 2v12M2 8h12M3.8 3.8l8.4 8.4M12.2 3.8l-8.4 8.4",
   // Blank page with a folded corner, so the start-page tab differs from the "+" new-tab button.
   "new-tab": "M4 2.5h5.5L12 5v8.5H4ZM9.5 2.5V5H12",
+  // Puzzle piece.
+  extensions: "M6 2.5h4v2.5a1.5 1.5 0 1 1 0 3V11H6.8a1.5 1.5 0 1 0-3 0H2.5V6.5H5a1.5 1.5 0 1 0 1-4ZM2.5 11v2.5H11V11",
   about: "M8 2.5a5.5 5.5 0 1 0 0 11 5.5 5.5 0 0 0 0-11ZM8 7.2v3.6M8 4.9v.1",
 };
 const createInternalTabIcon = (kind: string): SVGElement | null => {

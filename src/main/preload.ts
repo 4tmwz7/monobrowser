@@ -86,7 +86,9 @@ type AdblockerStatus = {
   activeTabBlocked: number;
   activeTabPaused: boolean;
   error: string | null;
-};type FindResult = { requestId: number; activeMatchOrdinal: number; matches: number; finalUpdate: boolean };
+  pausedBy: string | null;
+};
+type FindResult = { requestId: number; activeMatchOrdinal: number; matches: number; finalUpdate: boolean };
 type UserScriptRunAt = "document-start" | "document-idle";
 type UserScript = {
   id: string;
@@ -346,6 +348,21 @@ const browserApi = {
   rememberSettingsTab: (tab: string): void => ipcRenderer.send("settings:remember-tab", tab),
   setStartupSettings: (patch: Partial<StartupSettings>): Promise<StartupSettings> =>
     ipcRenderer.invoke("startup:set", patch),
+  openExtensionsPage: (): Promise<boolean> => ipcRenderer.invoke("extensions:open-page"),
+  getExtensions: (): Promise<unknown> => ipcRenderer.invoke("extensions:list"),
+  setExtensionEnabled: (key: string, enabled: boolean): Promise<unknown> => ipcRenderer.invoke("extensions:set-enabled", key, enabled),
+  setExtensionPrivate: (key: string, allowed: boolean): Promise<unknown> => ipcRenderer.invoke("extensions:set-private", key, allowed),
+  removeExtension: (key: string): Promise<unknown> => ipcRenderer.invoke("extensions:remove", key),
+  openExtensionOptions: (key: string): Promise<boolean> => ipcRenderer.invoke("extensions:open-options", key),
+  openExtensionsFolder: (): Promise<boolean> => ipcRenderer.invoke("extensions:open-folder"),
+  loadUnpackedExtension: (): Promise<unknown> => ipcRenderer.invoke("extensions:load-unpacked"),
+  openExtensionStore: (): Promise<boolean> => ipcRenderer.invoke("extensions:open-store"),
+  getExtensionActionsInfo: (): Promise<{ privatePartition: string | null }> => ipcRenderer.invoke("extensions:actions-info"),
+  onExtensionsChanged: (callback: () => void): (() => void) => {
+    const listener = () => callback();
+    ipcRenderer.on("extensions:changed", listener);
+    return () => ipcRenderer.removeListener("extensions:changed", listener);
+  },
   getPortableState: (): Promise<unknown> => ipcRenderer.invoke("portable:get-state"),
   setPortableEncryption: (payload: { enabled: boolean; password?: string; confirm?: string }): Promise<unknown> =>
     ipcRenderer.invoke("portable:set-encryption", payload),

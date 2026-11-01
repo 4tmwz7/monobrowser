@@ -65,6 +65,8 @@ export const isViewSourceUrl = (value: string): boolean => /^view-source:https?:
 export const buildViewSourceUrl = (pageUrl: string): string | null =>
   isHttpUrl(pageUrl) ? `view-source:${pageUrl}` : null;
 
+/** chrome-extension://<id>/... pages (extension options, popups opened as tabs). */
+export const isExtensionUrl = (value: string): boolean => /^chrome-extension:\/\/[a-p]{32}(?:[/?#]|$)/i.test(value);
 export const isFileUrl = (value: string): boolean => /^file:\/\//i.test(value);
 
 /** Adres do wyświetlenia: bez samotnego "/" po gołym hoście (jak w Chrome); reszta bez zmian. */

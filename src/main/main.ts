@@ -12,10 +12,16 @@ import crypto from "node:crypto";
 import fsSync from "node:fs";
 import fs from "node:fs/promises";
 import path from "node:path";
+import {
+  attachPrivateSession, extensionsAddTab, extensionsRemoveTab, extensionsSelectTab, getExtensionContextMenu, getPausingBlocker,
+  isExtensionPopupOpen, listExtensions, loadUnpackedExtension, openExtensionOptions, openExtensionsFolder, privateExtensionsReady,
+  privatePartitionFor, removeInstalledExtension, setExtensionAllowedInPrivate, setExtensionEnabled, startExtensions,
+} from "./extensions.js";
+import { renderExtensionsPageHtml } from "./extensions-page.js";
 import { ElectronBlocker, fullLists } from "@ghostery/adblocker-electron";
 import { autoUpdater, CancellationToken } from "electron-updater";
 import { exportBookmarksHtml, exportBookmarksJson, parseBookmarksImport } from "./bookmarks-io.js";
-import { HOST_PATTERNS, LOCAL_HOST_PATTERNS, buildViewSourceUrl, getErrorCode, hostInputToUrl, isAboutBlankUrl, isFileUrl, isHttpUrl, isInternalSchemeInput, isViewSourceUrl, looksLikeHost, recoverEmbeddedUrl, shortUrlLabel } from "./url-utils.js";
+import { HOST_PATTERNS, LOCAL_HOST_PATTERNS, buildViewSourceUrl, getErrorCode, hostInputToUrl, isAboutBlankUrl, isExtensionUrl, isFileUrl, isHttpUrl, isInternalSchemeInput, isViewSourceUrl, looksLikeHost, recoverEmbeddedUrl, shortUrlLabel } from "./url-utils.js";
 import { DEFAULT_LAYOUT_SETTINGS, mergeLayoutSettings, normalizeLayoutSettings, type LayoutSettings } from "./layout-settings.js";
 import { PINNABLE_TOOLBAR_ACTIONS, isToolbarActionId, normalizeToolbarPins, setToolbarPinned, type ToolbarActionId } from "./toolbar-pins.js";
 import { DEFAULT_GLANCE_SETTINGS, mergeGlanceSettings, normalizeGlanceSettings, type GlanceSettings } from "./glance-settings.js";
@@ -83,7 +89,7 @@ type TabState = {
   favicon: string | null;
 };
 
-type InternalKind = "settings" | "history" | "downloads" | "site-data" | "stats" | "about" | "onboarding";
+type InternalKind = "settings" | "history" | "downloads" | "site-data" | "stats" | "about" | "onboarding" | "extensions";
 
 type TabRecord = TabState & {
   // Przestrzeń (workspace), do której należy karta; widoczne i układane są tylko karty bieżącej przestrzeni.
@@ -176,6 +182,8 @@ type AdblockerStatus = {
   activeTabBlocked: number;
   activeTabPaused: boolean;
   error: string | null;
+  /** Name of the extension blocker (uBlock Origin, ...) that currently replaces the built-in one, or null. */
+  pausedBy: string | null;
 };
 
 type StatsDay = {
@@ -249,7 +257,7 @@ type UserScriptImportResult = {
 };
 
 const START_PAGE_URL = "monobrowser://new-tab";
-const INTERNAL_KINDS: readonly InternalKind[] = ["settings", "history", "downloads", "site-data", "stats", "about", "onboarding"];
+const INTERNAL_KINDS: readonly InternalKind[] = ["settings", "history", "downloads", "site-data", "stats", "about", "onboarding", "extensions"];
 const DEFAULT_URL = START_PAGE_URL;
 const DEFAULT_SEARCH_SETTINGS: SearchSettings = {
   engine: "google",
@@ -1196,7 +1204,7 @@ const normalizeInputToUrl = (input: string): string => {
     return DEFAULT_URL;
   }
 
-  if (trimmed === START_PAGE_URL || isAboutBlankUrl(trimmed) || isHttpUrl(trimmed) || isFileUrl(trimmed) || isViewSourceUrl(trimmed)) {
+  if (trimmed === START_PAGE_URL || isAboutBlankUrl(trimmed) || isHttpUrl(trimmed) || isFileUrl(trimmed) || isViewSourceUrl(trimmed) || isExtensionUrl(trimmed)) {
     return trimmed;
   }
 
@@ -1215,7 +1223,7 @@ const normalizeInputToUrl = (input: string): string => {
 
 const isSearchQueryInput = (raw: string): boolean => {
   const trimmed = raw.trim();
-  if (!trimmed || trimmed === START_PAGE_URL || isAboutBlankUrl(trimmed) || isHttpUrl(trimmed) || isFileUrl(trimmed) || isViewSourceUrl(trimmed) || isInternalSchemeInput(trimmed)) {
+  if (!trimmed || trimmed === START_PAGE_URL || isAboutBlankUrl(trimmed) || isHttpUrl(trimmed) || isFileUrl(trimmed) || isViewSourceUrl(trimmed) || isExtensionUrl(trimmed) || isInternalSchemeInput(trimmed)) {
     return false;
   }
   return !looksLikeHost(trimmed);
@@ -1329,10 +1337,15 @@ const PRIVATE_PARTITION = "monobrowser-private";
 let privateSessionConfigured = false;
 
 // Partycja bez prefiksu "persist:" działa wyłącznie w pamięci – nic nie trafia na dysk.
+// Wyjątek: gdy jakieś rozszerzenie jest dozwolone w trybie prywatnym, Electron wymaga trwałej partycji
+// (rozszerzenia nie działają w sesjach pamięciowych); jest ona czyszczona przy starcie i po zamknięciu kart prywatnych.
+const privateSessionObject = (): Electron.Session => session.fromPartition(privatePartitionFor(PRIVATE_PARTITION));
+
 const getPrivateSession = (): Electron.Session => {
-  const privateSession = session.fromPartition(PRIVATE_PARTITION);
+  const privateSession = privateSessionObject();
   if (!privateSessionConfigured) {
     privateSessionConfigured = true;
+    attachPrivateSession(privateSession);
     setupPermissionHandlers(privateSession, privatePermissionDecisions, "private");
     try {
       const languages = spellcheckLanguagesFor(appLanguage, privateSession.availableSpellCheckerLanguages);
@@ -1358,7 +1371,7 @@ const clearPrivateSessionData = async (): Promise<void> => {
   if (!privateSessionConfigured) {
     return;
   }
-  const privateSession = session.fromPartition(PRIVATE_PARTITION);
+  const privateSession = privateSessionObject();
   try {
     await privateSession.clearData();
     await privateSession.clearCache();
@@ -2023,6 +2036,7 @@ const getAdblockerStatus = (): AdblockerStatus => {
     error: adblockError,
     activeTabBlocked: activeTab?.blockedCount ?? 0,
     activeTabPaused: activeTab?.adblockPaused ?? false,
+    pausedBy: getPausingBlocker("default"),
   };
 };
 
@@ -2107,16 +2121,24 @@ const scheduleAdblockRefresh = (): void => {
   }, 60 * 60 * 1000);
 };
 
-const attachAdblockerToSession = (targetSession: Electron.Session): void => {
-  targetSession.registerPreloadScript({
-    type: "frame",
-    filePath: ADBLOCKER_PRELOAD_PATH,
-  });
+// A known content-blocker extension (uBlock Origin, AdGuard, ...) replaces the built-in blocker: it is paused in the
+// sessions where that extension runs (normal tabs; private tabs only when the extension is allowed there).
+const adblockScopeFor = (targetSession: Electron.Session): "default" | "private" =>
+  targetSession === session.defaultSession ? "default" : "private";
+
+const isBuiltinAdblockOn = (scope: "default" | "private"): boolean => adblockEnabled && getPausingBlocker(scope) === null;
+
+const adblockBoundSessions = new Set<Electron.Session>();
+
+const bindAdblockWebRequest = (targetSession: Electron.Session): void => {
+  if (adblockBoundSessions.has(targetSession)) return;
+  adblockBoundSessions.add(targetSession);
+  const scope = adblockScopeFor(targetSession);
 
   // Electron's webRequest API allows a single listener per event, so these
   // wrappers own the slot and forward to the engine only when appropriate.
   targetSession.webRequest.onBeforeRequest({ urls: ["<all_urls>"] }, (details, callback) => {
-    if (!adblockEnabled || !adblockReady || !adblockBlocker) {
+    if (!isBuiltinAdblockOn(scope) || !adblockReady || !adblockBlocker) {
       callback({});
       return;
     }
@@ -2129,7 +2151,7 @@ const attachAdblockerToSession = (targetSession: Electron.Session): void => {
   });
 
   targetSession.webRequest.onHeadersReceived({ urls: ["<all_urls>"] }, (details, callback) => {
-    if (!adblockEnabled || !adblockReady || !adblockBlocker) {
+    if (!isBuiltinAdblockOn(scope) || !adblockReady || !adblockBlocker) {
       callback({});
       return;
     }
@@ -2152,7 +2174,32 @@ const attachAdblockerToSession = (targetSession: Electron.Session): void => {
       tab.blockedCount += 1;
     }
   });
+};
 
+// While an extension blocker is in charge the webRequest slots are freed: Electron skips chrome.webRequest
+// listeners of extensions as long as the app owns a session.webRequest listener.
+const unbindAdblockWebRequest = (targetSession: Electron.Session): void => {
+  if (!adblockBoundSessions.delete(targetSession)) return;
+  targetSession.webRequest.onBeforeRequest(null);
+  targetSession.webRequest.onHeadersReceived(null);
+  targetSession.webRequest.onErrorOccurred(null);
+};
+
+const syncAdblockWithExtensions = (): void => {
+  const targets: Electron.Session[] = [session.defaultSession, ...(privateSessionConfigured ? [privateSessionObject()] : [])];
+  for (const target of targets) {
+    if (getPausingBlocker(adblockScopeFor(target)) === null) bindAdblockWebRequest(target);
+    else unbindAdblockWebRequest(target);
+  }
+  notifySettingsPage("adblock-status", getAdblockerStatus());
+};
+
+const attachAdblockerToSession = (targetSession: Electron.Session): void => {
+  targetSession.registerPreloadScript({
+    type: "frame",
+    filePath: ADBLOCKER_PRELOAD_PATH,
+  });
+  if (getPausingBlocker(adblockScopeFor(targetSession)) === null) bindAdblockWebRequest(targetSession);
 };
 
 const initAdblocker = (): void => {
@@ -2160,6 +2207,9 @@ const initAdblocker = (): void => {
 
   ipcMain.handle(ADBLOCK_INJECT_CHANNEL, (event, url: unknown, msg: unknown) => {
     if (!adblockEnabled || !adblockReady || !adblockBlocker || typeof url !== "string" || isInternalPageUrl(url)) {
+      return;
+    }
+    if (!isBuiltinAdblockOn(event.sender.session === session.defaultSession ? "default" : "private")) {
       return;
     }
     const tab = resolveTabByWebContentsId(event.sender.id);
@@ -2176,7 +2226,8 @@ const initAdblocker = (): void => {
     );
   });
 
-  ipcMain.handle(ADBLOCK_MUTATION_CHANNEL, () => Boolean(adblockEnabled && adblockReady && adblockBlocker));
+  ipcMain.handle(ADBLOCK_MUTATION_CHANNEL, (event) =>
+    Boolean(isBuiltinAdblockOn(event.sender.session === session.defaultSession ? "default" : "private") && adblockReady && adblockBlocker));
 
   void ensureAdblockerEngine();
   scheduleAdblockRefresh();
@@ -3906,7 +3957,7 @@ const renderSettingsPageHtml = (): string => {
     customLabel: "Adres wyszukiwania", customHint: "Wstaw {query} w miejscu wyszukiwanego tekstu.",
     save: "Zapisz ustawienia", blockerHeading: "Blokowanie treści", blockerDescription: "Wbudowana ochrona przed reklamami i modułami śledzącymi (EasyList, EasyPrivacy, EasyList Polish, annoyances).",
     blockerEngine: "Ghostery adblocker — uBlock/EasyList", blockerOn: "Włączone", blockerOff: "Wyłączone", blockerLoading: "Ładowanie list…",
-    blockerError: "Blokowanie niedostępne", exceptionsHeading: "Wyjątki blokowania", exceptionsDescription: "Na tych witrynach (i ich subdomenach) treści nie są blokowane.", exceptionsEmpty: "Brak wyjątków.", exceptionsAdd: "Dodaj", exceptionsRemove: "Usuń", exceptionsPlaceholder: "example.com", exceptionsInvalid: "Nieprawidłowa nazwa domeny.", blockedTotalLabel: "Zablokowane w tej sesji:", blockedValueSuffix: "żądań",
+    blockerError: "Blokowanie niedostępne", blockerPausedBy: "Wbudowany bloker jest wstrzymany, ponieważ zainstalowano rozszerzenie: {name}. Wróci po jego wyłączeniu lub usunięciu.", extHeading: "Rozszerzenia", extDescription: "Rozszerzenia Chrome: instaluj ze sklepu Chrome Web Store, wczytuj z folderu, włączaj, wyłączaj lub usuwaj.", extOpen: "Zarządzaj rozszerzeniami", exceptionsHeading: "Wyjątki blokowania", exceptionsDescription: "Na tych witrynach (i ich subdomenach) treści nie są blokowane.", exceptionsEmpty: "Brak wyjątków.", exceptionsAdd: "Dodaj", exceptionsRemove: "Usuń", exceptionsPlaceholder: "example.com", exceptionsInvalid: "Nieprawidłowa nazwa domeny.", blockedTotalLabel: "Zablokowane w tej sesji:", blockedValueSuffix: "żądań",
     active: "Aktywny", unavailable: "Niedostępny", loading: "Wczytywanie ustawień…", loadFailed: "Nie udało się wczytać ustawień.",
     searchTab: "Wyszukiwanie", browsingTab: "Przeglądanie", workspacesTab: "Przestrzenie", wsHeading: "Przestrzenie", wsDescription: "Przestrzenie to osobne zestawy kart (jak w Arc/Zen). Zmień nazwę, ikonę (litera, symbol lub emoji) i kolor, ustaw kolejność albo usuń przestrzeń. Przestrzeń Główna nie może być usunięta.", wsIcon: "Ikona", wsName: "Nazwa", wsColor: "Kolor", wsNoColor: "Bez koloru", wsUp: "Wyżej", wsDown: "Niżej", wsDelete: "Usuń", wsAdd: "Nowa przestrzeń", wsTabs: "Kart:", themeTab: "Motyw", themeHeading: "Motyw", themeDescription: "Jeden motyw dla całej przeglądarki: pasek kart, strona startowa, ustawienia, menu i okna. Zmiany działają od razu.", themeDefault: "Domyślny", themeDefaultHint: "auto: jasny lub ciemny jak system", themeCustom: "Własny", themeCustomHint: "edytor poniżej", themeCustomHeading: "Motyw własny", themeCustomDescription: "Pola są wypełnione kolorami wybranego motywu. Zmiana dowolnego koloru przełącza na motyw własny oparty na nim.", themeReset: "Przywróć domyślny", themeSaved: "Motyw zapisany.", themeLoadFailed: "Nie udało się wczytać motywu.", previewTab: "Karta", previewActive: "Aktywna", previewAddress: "Szukaj lub wpisz adres", previewHeading: "Podgląd", previewText: "Tekst pomocniczy i ramka.", previewAccent: "Akcent", previewDanger: "Błąd", tokenNames: { bg: "Tło", surface: "Powierzchnia (paski)", surface2: "Powierzchnia 2 (najechanie)", fg: "Tekst", muted: "Tekst pomocniczy", accent: "Akcent", onAccent: "Tekst na akcencie", border: "Ramka", danger: "Błąd / ostrzeżenie" }, experimentalTab: "Eksperymentalne", experimentalHeading: "Funkcje eksperymentalne", experimentalWarning: "Uwaga: to funkcje eksperymentalne. Mogą działać niestabilnie, różnić się między systemami i zostać zmienione lub usunięte.",
     ramHeading: "Ogranicznik RAM", ramDescription: "Gdy łączne zużycie pamięci przez przeglądarkę przekroczy limit, najdawniej używane karty w tle są usypiane (aktywna karta, karty wewnętrzne i Glance są pomijane; przypięte i odtwarzające dźwięk w ostatniej kolejności).",
@@ -3950,7 +4001,7 @@ const renderSettingsPageHtml = (): string => {
     customLabel: "Search URL", customHint: "Place {query} where the search text should appear.",
     save: "Save settings", blockerHeading: "Content blocking", blockerDescription: "Built-in protection against ads and trackers (EasyList, EasyPrivacy, EasyList Polish, annoyances).",
     blockerEngine: "Ghostery adblocker — uBlock/EasyList", blockerOn: "On", blockerOff: "Off", blockerLoading: "Loading lists…",
-    blockerError: "Blocking unavailable", exceptionsHeading: "Blocking exceptions", exceptionsDescription: "Content is not blocked on these sites (or their subdomains).", exceptionsEmpty: "No exceptions.", exceptionsAdd: "Add", exceptionsRemove: "Remove", exceptionsPlaceholder: "example.com", exceptionsInvalid: "Invalid domain name.", blockedTotalLabel: "Blocked this session:", blockedValueSuffix: "requests",
+    blockerError: "Blocking unavailable", blockerPausedBy: "The built-in blocker is paused because an extension is installed: {name}. It comes back when that extension is disabled or removed.", extHeading: "Extensions", extDescription: "Chrome extensions: install from the Chrome Web Store, load from a folder, enable, disable or remove them.", extOpen: "Manage extensions", exceptionsHeading: "Blocking exceptions", exceptionsDescription: "Content is not blocked on these sites (or their subdomains).", exceptionsEmpty: "No exceptions.", exceptionsAdd: "Add", exceptionsRemove: "Remove", exceptionsPlaceholder: "example.com", exceptionsInvalid: "Invalid domain name.", blockedTotalLabel: "Blocked this session:", blockedValueSuffix: "requests",
     active: "Active", unavailable: "Unavailable", loading: "Loading settings…", loadFailed: "Settings could not be loaded.",
     searchTab: "Search", browsingTab: "Browsing", workspacesTab: "Spaces", wsHeading: "Spaces", wsDescription: "Spaces are separate sets of tabs (like Arc/Zen). Rename a space, pick its icon (letter, symbol or emoji) and color, reorder or delete it. The Main space cannot be deleted.", wsIcon: "Icon", wsName: "Name", wsColor: "Color", wsNoColor: "No color", wsUp: "Up", wsDown: "Down", wsDelete: "Delete", wsAdd: "New space", wsTabs: "Tabs:", themeTab: "Theme", themeHeading: "Theme", themeDescription: "One theme for the whole browser: tab bar, start page, settings, menus and overlays. Changes apply instantly.", themeDefault: "Default", themeDefaultHint: "auto: light or dark like the system", themeCustom: "Custom", themeCustomHint: "editor below", themeCustomHeading: "Custom theme", themeCustomDescription: "The fields are prefilled from the selected theme. Changing any color switches to a custom theme based on it.", themeReset: "Reset to default", themeSaved: "Theme saved.", themeLoadFailed: "The theme could not be loaded.", previewTab: "Tab", previewActive: "Active", previewAddress: "Search or enter address", previewHeading: "Preview", previewText: "Muted text and border.", previewAccent: "Accent", previewDanger: "Error", tokenNames: { bg: "Background", surface: "Surface (bars)", surface2: "Surface 2 (hover)", fg: "Text", muted: "Muted text", accent: "Accent", onAccent: "Text on accent", border: "Border", danger: "Error / warning" }, experimentalTab: "Experimental", experimentalHeading: "Experimental features", experimentalWarning: "Warning: these features are experimental. They may be unstable, behave differently across systems, and may change or be removed.",
     ramHeading: "RAM limiter", ramDescription: "When the browser's total memory use exceeds the limit, the least recently used background tabs are put to sleep (the active tab, internal pages and Glance are skipped; pinned tabs and tabs playing audio go last).",
@@ -4106,13 +4157,17 @@ ${UI_BASE_END_CSS}
       <div class="custom-field"><label for="custom-url">${copy.customLabel}</label><input id="custom-url" type="url" maxlength="2048" spellcheck="false"><span class="hint">${copy.customHint.replace("{query}", "<code>{query}</code>")}</span></div>
       <div class="actions"><span id="message">${copy.loading}</span><button id="save" type="submit">${copy.save}</button></div>
     </form>
-    <section class="card blocker-row"><div class="blocker-copy"><h2>${copy.blockerHeading}</h2><p class="description">${copy.blockerDescription}</p><span id="blocker-name" class="blocker-name">${copy.blockerEngine}</span><span id="blocker-total" class="description" style="margin:0"></span></div><button type="button" id="blocker-toggle" class="badge" style="cursor:pointer">${copy.blockerOn}</button></section>
+    <section class="card blocker-row"><div class="blocker-copy"><h2>${copy.blockerHeading}</h2><p class="description">${copy.blockerDescription}</p><span id="blocker-name" class="blocker-name">${copy.blockerEngine}</span><span id="blocker-total" class="description" style="margin:0"></span><span id="blocker-note" class="hint" role="status" hidden></span></div><button type="button" id="blocker-toggle" class="badge" style="cursor:pointer">${copy.blockerOn}</button></section>
     <section class="card" id="exceptions-card"><h2>${copy.exceptionsHeading}</h2><p class="description">${copy.exceptionsDescription}</p>
       <div id="exceptions-list"></div>
       <form id="exceptions-form" class="custom-field" style="display:flex;gap:8px;align-items:center"><input id="exceptions-input" type="text" maxlength="253" spellcheck="false" autocomplete="off" placeholder="${copy.exceptionsPlaceholder}" style="flex:1"><button type="submit" class="secondary">${copy.exceptionsAdd}</button></form>
       <span id="exceptions-message" class="hint" role="status"></span></section>
   </section>
   <section id="panel-browsing" class="panel" hidden>
+    <section class="card" id="extensions-card">
+      <h2>${copy.extHeading}</h2><p class="description">${copy.extDescription}</p>
+      <div class="actions"><button type="button" id="extensions-open" class="secondary">${copy.extOpen}</button></div>
+    </section>
     <section class="card" id="language-card">
       <h2>${copy.languageHeading}</h2><p class="description">${copy.languageDescription}</p>
       <div class="engines" style="grid-template-columns:repeat(2,1fr)">
@@ -4305,8 +4360,10 @@ ${UI_BASE_END_CSS}
   const form = document.getElementById('settings-form');
   const customUrl = document.getElementById('custom-url');
   const message = document.getElementById('message');
+  document.getElementById('extensions-open').addEventListener('click', () => { void window.browserApi.openExtensionsPage(); });
   const blockerToggle = document.getElementById('blocker-toggle');
   const blockerTotal = document.getElementById('blocker-total');
+  const blockerNote = document.getElementById('blocker-note');
   const selectedEngine = () => form.querySelector('input[name=engine]:checked')?.value || 'google';
   const syncCustomState = () => { customUrl.disabled = selectedEngine() !== 'custom'; };
   form.querySelectorAll('input[name=engine]').forEach(input => input.addEventListener('change', syncCustomState));
@@ -4324,6 +4381,9 @@ ${UI_BASE_END_CSS}
     blockerToggle.textContent = blocker.enabled ? copy.blockerOn : copy.blockerOff;
     blockerToggle.classList.toggle('off', !blocker.enabled);
     blockerToggle.title = blocker.enabled ? copy.blockerOff : copy.blockerOn;
+    blockerNote.hidden = !(blocker.pausedBy && blocker.enabled);
+    blockerNote.textContent = blocker.pausedBy ? copy.blockerPausedBy.replace('{name}', blocker.pausedBy) : '';
+    if (blocker.pausedBy && blocker.enabled) { blockerTotal.textContent = ''; return; }
     if (!blocker.enabled) { blockerTotal.textContent = ''; return; }
     if (blocker.error && !blocker.ready) { blockerTotal.textContent = copy.blockerError; return; }
     blockerTotal.textContent = blocker.ready
@@ -4709,6 +4769,7 @@ const INTERNAL_PAGE_TITLES: Record<InternalKind, { pl: string; en: string }> = {
   stats: { pl: "Statystyki", en: "Statistics" },
   about: { pl: "O programie", en: "About" },
   onboarding: { pl: "Witaj", en: "Welcome" },
+  extensions: { pl: "Rozszerzenia", en: "Extensions" },
 };
 
 const isInternalKind = (value: unknown): value is InternalKind =>
@@ -4813,6 +4874,7 @@ const renderInternalPageHtml = (kind: InternalKind): string => {
     case "stats": return renderStatsPageHtml();
     case "about": return renderAboutPage();
     case "onboarding": return renderOnboardingPage();
+    case "extensions": return renderExtensionsPageHtml({ language: appLanguage === "pl" ? "pl" : "en", fontDataUrl: getBebasNeueFontDataUrl() });
     default: return renderSettingsPageHtml();
   }
 };
@@ -4832,6 +4894,14 @@ const notifySettingsPage = (topic: "adblock-exceptions" | "adblock-status" | "wo
   for (const tab of getInternalTabs("settings")) {
     const contents = getTabContents(tab);
     if (contents && !contents.isDestroyed()) contents.send("settings:data-changed", topic, data);
+  }
+};
+
+/** Tells the open Extensions page (and the toolbar-independent parts of the UI) that the extension list changed. */
+const notifyExtensionsChanged = (): void => {
+  for (const tab of getInternalTabs("extensions")) {
+    const contents = getTabContents(tab);
+    if (contents && !contents.isDestroyed()) contents.send("extensions:changed");
   }
 };
 
@@ -4891,7 +4961,7 @@ const refreshLocalizedWindows = async (): Promise<void> => {
 
 // Słownik pisowni zgodny z językiem interfejsu (pl / en-US); dotyczy sesji zwykłej i prywatnej.
 const applySpellcheckLanguages = (): void => {
-  const sessions = [session.defaultSession, ...(privateSessionConfigured ? [session.fromPartition(PRIVATE_PARTITION)] : [])];
+  const sessions = [session.defaultSession, ...(privateSessionConfigured ? [privateSessionObject()] : [])];
   for (const target of sessions) {
     try {
       const languages = spellcheckLanguagesFor(appLanguage, target.availableSpellCheckerLanguages);
@@ -5637,14 +5707,14 @@ const openNavigationMenu = async (anchor: unknown): Promise<boolean> => {
   const copy = appLanguage === "pl" ? {
     title: "Menu", settings: "Ustawienia", newPrivateTab: "Nowa karta prywatna", devTools: "Narzędzia deweloperskie", bookmarks: "Zakładki", addBookmark: "Dodaj bieżącą stronę", removeCurrentBookmark: "Usuń bieżącą zakładkę",
     noBookmarks: "Brak zapisanych zakładek", clearBookmarks: "Wyczyść wszystkie zakładki", importBookmarks: "Importuj zakładki…", exportBookmarks: "Eksportuj zakładki…", history: "Historia", downloads: "Pobieranie",
-    siteData: "Dane witryn", remove: "Usuń",
+    siteData: "Dane witryn", remove: "Usuń", extensions: "Rozszerzenia",
     welcome: "Pokaż powitanie", about: "O programie", notes: "Notatki", stats: "Statystyki", adblock: "Blokowanie treści (globalnie)", on: "Włączone", off: "Wyłączone",
     compact: "Tryb kompaktowy", splitClose: "Zamknij podzielony widok",
     tools: "Narzędzia", help: "Pomoc",
   } : {
     title: "Menu", settings: "Settings", newPrivateTab: "New private tab", devTools: "Developer tools", bookmarks: "Bookmarks", addBookmark: "Bookmark current page", removeCurrentBookmark: "Remove current bookmark",
     noBookmarks: "No saved bookmarks", clearBookmarks: "Clear all bookmarks", importBookmarks: "Import bookmarks…", exportBookmarks: "Export bookmarks…", history: "History", downloads: "Downloads",
-    siteData: "Site data", remove: "Remove",
+    siteData: "Site data", remove: "Remove", extensions: "Extensions",
     welcome: "Show welcome", about: "About", notes: "Notes", stats: "Statistics", adblock: "Content blocking (global)", on: "On", off: "Off",
     compact: "Compact mode", splitClose: "Close split view",
     tools: "Tools", help: "Help",
@@ -5677,6 +5747,7 @@ const openNavigationMenu = async (anchor: unknown): Promise<boolean> => {
   <details><summary>${copy.bookmarks}<span class="summary-count">${bookmarkEntries.length}</span></summary><div class="submenu">${bookmarkToggle}${bookmarksContent}${bookmarkTransfer}</div></details>
   <a class="menu-item" href="monobrowser-menu://history">${copy.history}</a>
   <a class="menu-item" href="monobrowser-menu://downloads">${copy.downloads}</a>
+  <a class="menu-item" href="monobrowser-menu://extensions">${copy.extensions}</a>
   <a class="menu-item" href="monobrowser-menu://notes">${copy.notes}<span class="shortcut">Ctrl+Shift+M</span></a>
   ${splitMenuRows}
   <a class="menu-item" href="monobrowser-menu://compact-toggle">${copy.compact}<span class="shortcut">${layoutSettings.compactMode ? copy.on : "Ctrl+Shift+C"}</span></a>
@@ -5697,6 +5768,7 @@ ${POPUP_HEIGHT_REPORT_SCRIPT}</body></html>`;
   return openStyledPopup("navigation", position, 340, 520, html, async (actionUrl) => {
     const action = actionUrl.hostname;
     if (action === "site-data") return openInternalPage("site-data");
+    if (action === "extensions") return openInternalPage("extensions");
     if (action === "stats") return openInternalPage("stats");
     if (action === "settings") return openSettingsWindow();
     if (isToolbarActionId(action) && action !== "bookmarks") { await runToolbarAction(action); return; }
@@ -5762,7 +5834,7 @@ const openSiteInfoMenu = async (anchor: unknown): Promise<boolean> => {
     unknown: "Bezpieczeństwo połączenia nieznane", reputation: "HTTPS chroni połączenie, ale MonoBrowser nie skanuje reputacji ani treści witryny.", host: "Witryna",
     cookies: "Pliki cookie", memory: "RAM karty", blocker: "Blokowanie treści", active: "Aktywne", inactive: "Nieaktywne", sandbox: "Sandbox", enabled: "Aktywny",
     zoom: "Powiększenie", state: "Stan", loading: "Ładowanie", ready: "Gotowa", siteData: "Otwórz dane witryn", version: "Wersja",
-    blockerLoading: "Ładowanie list…", blockerOff: "Wyłączone globalnie", blockerSiteOff: "Wyłączone na tej stronie", blockerPaused: "Wstrzymane na karcie",
+    blockerLoading: "Ładowanie list…", blockerOff: "Wyłączone globalnie", blockerSiteOff: "Wyłączone na tej stronie", blockerPaused: "Wstrzymane na karcie", blockerExtension: "Zastąpione rozszerzeniem",
     blockedOnTab: "Zablokowane na tej karcie", blockedTotal: "Zablokowane łącznie", pauseAction: "Wstrzymaj blokowanie na tej karcie", resumeAction: "Wznów blokowanie na tej karcie",
     toggleAction: "Przełącz blokowanie treści (globalnie)",
     siteBlocking: "Blokowanie treści na tej stronie", siteOn: "Włączone", siteOff: "Wyłączone", siteDisabledNote: "Blokowanie jest wyłączone globalnie.",
@@ -5771,7 +5843,7 @@ const openSiteInfoMenu = async (anchor: unknown): Promise<boolean> => {
     unknown: "Connection security unknown", reputation: "HTTPS protects the connection, but MonoBrowser does not scan the site's reputation or content.", host: "Site",
     cookies: "Cookies", memory: "Tab RAM", blocker: "Content blocking", active: "Active", inactive: "Inactive", sandbox: "Sandbox", enabled: "Active",
     zoom: "Zoom", state: "State", loading: "Loading", ready: "Ready", siteData: "Open site data", version: "Version",
-    blockerLoading: "Loading lists…", blockerOff: "Disabled globally", blockerSiteOff: "Off on this site", blockerPaused: "Paused for this tab",
+    blockerLoading: "Loading lists…", blockerOff: "Disabled globally", blockerSiteOff: "Off on this site", blockerPaused: "Paused for this tab", blockerExtension: "Replaced by extension",
     blockedOnTab: "Blocked on this tab", blockedTotal: "Blocked in total", pauseAction: "Pause blocking on this tab", resumeAction: "Resume blocking on this tab",
     toggleAction: "Toggle content blocking (global)",
     siteBlocking: "Content blocking on this site", siteOn: "On", siteOff: "Off", siteDisabledNote: "Blocking is turned off globally.",
@@ -5782,8 +5854,11 @@ const openSiteInfoMenu = async (anchor: unknown): Promise<boolean> => {
     ? `MonoBrowser / ${tab.internalKind}`
     : parsedUrl?.hostname || (isInternal ? "MonoBrowser / new-tab" : url || "—");
   const exceptionHost = isInternal ? null : getSiteExceptionHost(url);
+  const extensionBlocker = getPausingBlocker(tab.isPrivate ? "private" : "default");
   const blockerStateFor = (excepted: boolean): string => !adblockEnabled
     ? copy.blockerOff
+    : extensionBlocker
+      ? `${copy.blockerExtension}: ${extensionBlocker}`
     : !adblockReady
       ? copy.blockerLoading
       : excepted
@@ -5953,6 +6028,22 @@ const openPageContextMenu = async (
   const reloadItems = [action("context-force-reload", copy.forceReload)];
   if (siteCacheOrigin(tab.url)) reloadItems.push(action("context-clear-site-cache", copy.clearSiteCache));
   sections.push(reloadItems);
+
+  // Items added by extensions (chrome.contextMenus) sit just above "Inspect"; submenus use the shared <details> style.
+  const extensionActions: Array<() => void> = [];
+  const renderExtensionEntry = (entry: ReturnType<typeof getExtensionContextMenu>[number]): string => {
+    if (entry.separator) return `<div class="ctx-sep" role="separator"></div>`;
+    const label = `<span class="menu-label">${escapeHtml(entry.label)}</span>`;
+    if (entry.children.length > 0) {
+      return `<details><summary>${escapeHtml(entry.label)}</summary><div class="submenu">${entry.children.map(renderExtensionEntry).join("")}</div></details>`;
+    }
+    if (!entry.enabled) return `<span class="menu-item disabled" aria-disabled="true">${label}</span>`;
+    extensionActions.push(entry.run);
+    return `<a class="menu-item" href="monobrowser-menu://context-ext?i=${extensionActions.length - 1}">${label}</a>`;
+  };
+  const extensionItems = getExtensionContextMenu(tab.view.webContents, params).map(renderExtensionEntry);
+  if (extensionItems.length > 0) sections.push(extensionItems);
+
   sections.push([action("context-inspect", copy.inspect, "F12")]);
 
   // Navigation: a compact icon row at the top (back / forward are dimmed when there is no history in that direction).
@@ -6019,6 +6110,7 @@ const openPageContextMenu = async (
       case "context-spell-add": contents.session.addWordToSpellCheckerDictionary(misspelledWord); break;
       case "context-save-page": await savePageAs(tab); break;
       case "context-view-source": viewSourceOfTab(tab); break;
+      case "context-ext": extensionActions[Number(actionUrl.searchParams.get("i"))]?.(); break;
     }
   });
 };
@@ -6817,6 +6909,7 @@ const buildPaletteItems = (): PaletteItem[] => {
     { id: "open-history", kind: "command", label: pl ? "Otwórz: Historia" : "Open: History", keywords: "otworz historia open history" },
     { id: "open-downloads", kind: "command", label: pl ? "Otwórz: Pobieranie" : "Open: Downloads", keywords: "otworz pobieranie open downloads" },
     { id: "open-site-data", kind: "command", label: pl ? "Otwórz: Dane witryn" : "Open: Site data", keywords: "otworz dane witryn open site data cookies" },
+    { id: "open-extensions", kind: "command", label: pl ? "Otwórz: Rozszerzenia" : "Open: Extensions", keywords: "otworz rozszerzenia wtyczki dodatki open extensions addons plugins chrome web store ublock" },
     { id: "open-stats", kind: "command", label: pl ? "Otwórz: Statystyki" : "Open: Statistics", keywords: "otworz statystyki stats usage time pobrane zablokowane" },
     { id: "open-settings", kind: "command", label: pl ? "Otwórz: Ustawienia" : "Open: Settings", keywords: "otworz ustawienia open settings preferences" },
     { id: "open-about", kind: "command", label: pl ? "Otwórz: O programie" : "Open: About", keywords: "o programie about wersja version aktualizacje updates skroty shortcuts licencje licenses" },
@@ -6955,6 +7048,7 @@ const executePaletteCommand = async (id: string): Promise<void> => {
     case "open-history": await openInternalPage("history"); break;
     case "open-downloads": await openInternalPage("downloads"); break;
     case "open-site-data": await openInternalPage("site-data"); break;
+    case "open-extensions": await openInternalPage("extensions"); break;
     case "open-stats": await openInternalPage("stats"); break;
     case "open-settings": await openSettingsWindow(); break;
     case "open-about": await openInternalPage("about"); break;
@@ -7907,6 +8001,7 @@ const setActiveTab = (id: number): boolean => {
   currentWorkspaceId = tab.workspaceId;
   activeTabId = id;
   tab.lastActiveAt = Date.now();
+  if (!tab.internalKind) extensionsSelectTab(tab.view.webContents);
   promoteTabInMruOrder(id);
   resourceLimiter?.notifyTabsChanged();
   applyActiveViewBounds();
@@ -8217,6 +8312,7 @@ const closeTab = (id: number): boolean => {
   tabs.delete(id);
   removeTabFromMruOrder(id);
   if (tabToClose.view && !tabToClose.view.webContents.isDestroyed()) {
+    if (!tabToClose.internalKind) extensionsRemoveTab(tabToClose.view.webContents);
     tabToClose.view.webContents.close();
   }
 
@@ -8350,6 +8446,8 @@ const requestCloseTab = (id: number): boolean => {
 
 const wireTabEvents = (tab: TabRecord, view: WebContentsView): void => {
   const contents = view.webContents;
+  // Chrome extensions see web tabs only (never internal pages); private tabs only when a private extension session exists.
+  if (!tab.internalKind && mainWindow && !mainWindow.isDestroyed()) extensionsAddTab(contents, mainWindow);
 
   if (tab.internalKind) {
     contents.on("before-input-event", handleBeforeInputEvent);
@@ -9738,6 +9836,23 @@ const registerIpc = (): void => {
     toggleActiveTabAdblockPause();
     return getAdblockerStatus();
   });
+  handleTrusted("extensions:open-page", async () => {
+    await openInternalPage("extensions");
+    return true;
+  });
+  handleTrusted("extensions:list", () => listExtensions());
+  handleTrusted("extensions:set-enabled", (_event, key: unknown, enabled: unknown) => setExtensionEnabled(key, enabled === true));
+  handleTrusted("extensions:set-private", (_event, key: unknown, allowed: unknown) => setExtensionAllowedInPrivate(key, allowed === true));
+  handleTrusted("extensions:remove", (_event, key: unknown) => removeInstalledExtension(key));
+  handleTrusted("extensions:open-options", (_event, key: unknown) => openExtensionOptions(key));
+  handleTrusted("extensions:open-folder", () => openExtensionsFolder());
+  handleTrusted("extensions:load-unpacked", () => loadUnpackedExtension());
+  handleTrusted("extensions:open-store", () => {
+    openNewTab("https://chromewebstore.google.com/");
+    return true;
+  });
+  // The toolbar's <browser-action-list> asks which partition shows the actions of private tabs (null: none).
+  handleTrusted("extensions:actions-info", () => ({ privatePartition: privateExtensionsReady() ? privatePartitionFor(PRIVATE_PARTITION) : null }));
   handleTrusted("navigation-menu:open", (_event, anchor: unknown) => openNavigationMenu(anchor));
   handleTrusted("site-info-menu:open", async (_event, anchor: unknown) => openSiteInfoMenu(anchor));
 
@@ -10212,7 +10327,8 @@ const createMainWindow = async (
     backgroundColor: currentBackgroundColor,
     icon: path.join(app.getAppPath(), "assets", "icon.png"),
     webPreferences: {
-      preload: path.join(__dirname, "preload.js"),
+      // The shell preload = preload.js + the <browser-action-list> bridge of electron-chrome-extensions (bundled).
+      preload: path.join(__dirname, "shell-preload.js"),
       contextIsolation: true,
       nodeIntegration: false,
       sandbox: true,
@@ -10244,7 +10360,7 @@ const createMainWindow = async (
   compactChrome = createCompactChrome({
     getMainWindow: () => mainWindow,
     getLayout: () => layoutSettings,
-    preloadPath: path.join(__dirname, "preload.js"),
+    preloadPath: path.join(__dirname, "shell-preload.js"),
     stripPreloadPath: path.join(__dirname, "compact-strip-preload.js"),
     htmlPath: path.join(__dirname, "../renderer/index.html"),
     onContentsCreated: (contents) => {
@@ -10257,7 +10373,7 @@ const createMainWindow = async (
       mainWindow.contentView.addChildView(view);
       if (isPopupVisible()) attachPopupViewOnTop();
     },
-    isPopupOpen: isPopupVisible,
+    isPopupOpen: () => isPopupVisible() || isExtensionPopupOpen(),
     isForcedOpen: () => activeTabId === null,
     isSuppressed: () => htmlFullscreenTabId !== null,
     onViewportChanged: () => {
@@ -10591,6 +10707,31 @@ const bootstrap = async (): Promise<void> => {
   await persistentDataLoad;
   registerDownloadHandling();
   initAdblocker();
+  await startExtensions({
+    createTab: (url, active, isPrivate) => {
+      const id = createTab(url || DEFAULT_URL, active, isPrivate);
+      return tabs.get(id)?.view?.webContents ?? null;
+    },
+    selectTab: (contents) => {
+      const tab = resolveTabByWebContentsId(contents.id);
+      if (tab) setActiveTab(tab.id);
+    },
+    removeTab: (contents) => {
+      const tab = resolveTabByWebContentsId(contents.id);
+      if (tab) closeTab(tab.id);
+    },
+    getWindow: () => mainWindow,
+    getActiveContents: (isPrivate) => {
+      const tab = getActiveTab();
+      return tab && !tab.internalKind && tab.isPrivate === isPrivate && tab.view && !tab.view.webContents.isDestroyed() ? tab.view.webContents : null;
+    },
+    getLanguage: () => (appLanguage === "pl" ? "pl" : "en"),
+    getShellOrigin: () => (compactChrome?.isEnabled() ? compactChrome.getOrigin() : { x: 0, y: 0 }),
+    onChanged: () => {
+      syncAdblockWithExtensions();
+      notifyExtensionsChanged();
+    },
+  });
   startStatsTimer();
   startTabSleepTimer();
 

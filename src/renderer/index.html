@@ -2,7 +2,7 @@
 <html lang="pl">
   <head>
     <meta charset="UTF-8" />
-    <meta http-equiv="Content-Security-Policy" content="default-src 'none'; script-src 'self'; style-src 'unsafe-inline'; img-src data:" />
+    <meta http-equiv="Content-Security-Policy" content="default-src 'none'; script-src 'self'; style-src 'unsafe-inline'; img-src data: crx:" />
     <meta
       name="viewport"
       content="width=device-width, initial-scale=1.0" />
@@ -84,6 +84,63 @@
       /* Menu functions pinned by the user; the buttons are flex items of #chrome-actions. */
       #toolbar-pins {
         display: contents;
+      }
+
+      /* Extension actions (<browser-action-list> from electron-chrome-extensions): same 28px square buttons as the
+         other toolbar controls, gray until hovered. The host is hidden by app.ts while no extension has an action. */
+      #ext-actions {
+        display: contents;
+      }
+
+      #ext-actions[hidden] {
+        display: none;
+      }
+
+      #ext-actions browser-action-list {
+        display: flex;
+        flex-direction: row;
+        flex-wrap: wrap;
+        align-items: center;
+        gap: 1px;
+        flex-shrink: 0;
+        --browser-action-hover-bg: var(--ctl-hover-bg);
+        --browser-action-badge-outline: var(--tabbar-line);
+      }
+
+      /* Extension icons are usually dark artwork meant for a light toolbar: each one sits on a light, neutral tile so it
+         stays visible on every theme (gray until hovered, like the rest of the monochrome toolbar). */
+      #ext-actions browser-action-list::part(action) {
+        width: 28px;
+        height: 28px;
+        padding: 3px;
+        border-radius: 0;
+        background-color: #d9d8d2;
+        background-clip: content-box;
+        background-origin: content-box;
+        background-size: 82%;
+        filter: grayscale(1);
+        opacity: 0.8;
+        cursor: pointer;
+        transition: opacity var(--mb-dur, 160ms) var(--mb-ease, ease), filter var(--mb-dur, 160ms) var(--mb-ease, ease);
+      }
+
+      #ext-actions browser-action-list::part(action):hover {
+        background-color: #f4f3ee;
+        filter: none;
+        opacity: 1;
+      }
+
+      #ext-actions browser-action-list::part(action):active {
+        background-color: #ffffff;
+      }
+
+      #ext-actions browser-action-list::part(action):focus-visible {
+        outline: 2px solid var(--accent);
+        outline-offset: -2px;
+      }
+
+      body.vertical.collapsed #ext-actions browser-action-list {
+        flex-direction: column;
       }
 
       #nav-buttons,
@@ -1135,6 +1192,7 @@
             <path d="M2.5 4h6.2a2 2 0 0 1 3.6 0h1.2a.75.75 0 0 1 0 1.5h-1.2a2 2 0 0 1-3.6 0H2.5a.75.75 0 0 1 0-1.5Zm0 6.5h1.2a2 2 0 0 1 3.6 0h6.2a.75.75 0 0 1 0 1.5H7.3a2 2 0 0 1-3.6 0H2.5a.75.75 0 0 1 0-1.5Z" />
           </svg>
         </button>
+        <div id="ext-actions" hidden></div>
         <div id="toolbar-pins"></div>
         <button id="zoom-pill" type="button" hidden aria-label="Zoom" title="Zoom"></button>
         <button id="menu-button" class="nav-btn" type="button" aria-haspopup="menu" aria-label="Menu" title="Menu">
