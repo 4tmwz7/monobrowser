@@ -70,3 +70,14 @@ test("pushClosedTab keeps every closed new-tab page (no dedupe for the start pag
   list = pushClosedTab(list, { url: "monobrowser://new-tab", title: "Nowa karta", pinned: false });
   assert.equal(list.length, 2);
 });
+
+test("keepAwake (\"never sleep\") survives a save/restore round trip", () => {
+  const data = buildSessionData([
+    { id: 1, url: "https://a.test/", title: "A", isPinned: false, isMuted: false, keepAwake: true, isPrivate: false, internal: false },
+    { id: 2, url: "https://b.test/", title: "B", isPinned: false, isMuted: false, isPrivate: false, internal: false },
+  ], 1, []);
+  assert.deepEqual(data.tabs.map((tab) => tab.keepAwake), [true, false]);
+  const restored = normalizeSessionData(JSON.parse(JSON.stringify(data)));
+  assert.deepEqual(restored.tabs.map((tab) => tab.keepAwake), [true, false]);
+  assert.equal(normalizeSessionData({ tabs: [{ url: "https://c.test/", keepAwake: "yes" }] }).tabs[0].keepAwake, false);
+});

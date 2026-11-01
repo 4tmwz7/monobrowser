@@ -74,6 +74,8 @@ type TabState = {
   canGoForward: boolean;
   isPinned: boolean;
   isMuted: boolean;
+  /** "Nie usypiaj": excluded from idle sleep and the RAM limiter. */
+  keepAwake: boolean;
   isSleeping: boolean;
   isPrivate: boolean;
   isAudible: boolean;
@@ -1255,6 +1257,7 @@ const getTabSnapshot = (tab: TabRecord): TabState & { splitGroupId: number | nul
   canGoForward: tab.canGoForward,
   isPinned: tab.isPinned,
   isMuted: tab.isMuted,
+  keepAwake: tab.keepAwake,
   isSleeping: tab.isSleeping,
   isPrivate: tab.isPrivate,
   isAudible: tab.isAudible,
@@ -1679,6 +1682,7 @@ const buildCurrentSession = (): SessionData => buildSessionData(
     title: tab.title,
     isPinned: tab.isPinned,
     isMuted: tab.isMuted,
+    keepAwake: tab.keepAwake,
     isPrivate: tab.isPrivate,
     internal: Boolean(tab.internalKind),
   })),
@@ -6094,12 +6098,14 @@ const openTabContextMenu = async (tabId: number, anchor: unknown): Promise<boole
   const copy = appLanguage === "pl" ? {
     title: "Menu karty", duplicate: "Duplikuj kartę", pin: "Przypnij kartę", unpin: "Odepnij kartę",
     mute: "Wycisz kartę", unmute: "Włącz dźwięk karty", close: "Zamknij kartę",
+    keepAwake: "Nie usypiaj karty", allowSleep: "Pozwól usypiać kartę",
     closeOthers: "Zamknij pozostałe karty", closeRight: "Zamknij karty po prawej", reopen: "Przywróć zamkniętą kartę",
     moveToWorkspace: "Przenieś do przestrzeni",
     splitClose: "Zamknij podzielony widok",
   } : {
     title: "Tab menu", duplicate: "Duplicate tab", pin: "Pin tab", unpin: "Unpin tab",
     mute: "Mute tab", unmute: "Unmute tab", close: "Close tab",
+    keepAwake: "Never sleep this tab", allowSleep: "Allow this tab to sleep",
     closeOthers: "Close other tabs", closeRight: "Close tabs to the right", reopen: "Reopen closed tab",
     moveToWorkspace: "Move to space",
     splitClose: "Close split view",
@@ -6115,6 +6121,7 @@ const openTabContextMenu = async (tabId: number, anchor: unknown): Promise<boole
       action("tab-duplicate", copy.duplicate),
       action("tab-toggle-pin", tab.isPinned ? copy.unpin : copy.pin),
       action("tab-toggle-mute", tab.isMuted ? copy.unmute : copy.mute),
+      ...(tab.internalKind ? [] : [action("tab-toggle-keep-awake", tab.keepAwake ? copy.allowSleep : copy.keepAwake)]),
     ],
     splitRegistry.groupOf(tab.id)
       ? [action("tab-split-close", copy.splitClose)]
@@ -6155,6 +6162,14 @@ const openTabContextMenu = async (tabId: number, anchor: unknown): Promise<boole
           currentTab.isMuted = !currentTab.isMuted;
           const muteContents = getTabContents(currentTab);
           muteContents?.setAudioMuted(currentTab.isMuted);
+          broadcastTabsState();
+        }
+        break;
+      case "tab-toggle-keep-awake":
+        if (currentTab) {
+          currentTab.keepAwake = !currentTab.keepAwake;
+          // A sleeping tab marked "never sleep" wakes up right away.
+          if (currentTab.keepAwake && currentTab.isSleeping) wakeTab(currentTab);
           broadcastTabsState();
         }
         break;
@@ -8505,6 +8520,7 @@ const createTab = (
     canGoForward: false,
     isPinned: false,
     isMuted: false,
+    keepAwake: false,
     isSleeping: false,
     isPrivate,
     isAudible: false,
@@ -8542,7 +8558,7 @@ const createTab = (
 };
 
 // Przywrócona karta w tle powstaje jako uśpiona (bez widoku) – ładuje się dopiero po aktywacji.
-const createSleepingTab = (entry: { url: string; title: string; pinned: boolean; muted: boolean; workspaceId?: string }): number => {
+const createSleepingTab = (entry: { url: string; title: string; pinned: boolean; muted: boolean; keepAwake?: boolean; workspaceId?: string }): number => {
   const id = nextTabId++;
   tabs.set(id, {
     id,
@@ -8553,6 +8569,7 @@ const createSleepingTab = (entry: { url: string; title: string; pinned: boolean;
     canGoForward: false,
     isPinned: entry.pinned,
     isMuted: entry.muted,
+    keepAwake: entry.keepAwake === true,
     isSleeping: true,
     isPrivate: false,
     isAudible: false,
@@ -8581,6 +8598,7 @@ const restoreSession = (session: SessionData): boolean => {
       const tab = tabs.get(id);
       if (tab) {
         tab.isPinned = entry.pinned;
+        tab.keepAwake = entry.keepAwake === true;
         if (entry.title) tab.title = entry.title;
         if (entry.muted) {
           tab.isMuted = true;
@@ -8609,7 +8627,7 @@ const restoreSession = (session: SessionData): boolean => {
 // In-page JS/form state is intentionally lost.
 // `force` (RAM limiter only) also allows pinned and audible tabs; never the active tab, internal pages or loading tabs.
 const canTabSleep = (tab: TabRecord, force: boolean = false): boolean => {
-  if (tab.isSleeping || tab.id === activeTabId || isSplitPartnerOfActive(tab.id) || tab.internalKind || (!force && tab.isPinned)) {
+  if (tab.isSleeping || tab.keepAwake || tab.id === activeTabId || isSplitPartnerOfActive(tab.id) || tab.internalKind || (!force && tab.isPinned)) {
     return false;
   }
 

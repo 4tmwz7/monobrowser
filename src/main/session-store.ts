@@ -6,6 +6,8 @@ export type SessionTab = {
   title: string;
   pinned: boolean;
   muted: boolean;
+  /** Karta wyłączona z usypiania ("nie usypiaj"). */
+  keepAwake: boolean;
   /** Przestrzeń karty (sesje sprzed przestrzeni: "main"). */
   workspaceId: string;
 };
@@ -75,6 +77,7 @@ const normalizeSessionTab = (value: unknown, knownWorkspaces: ReadonlySet<string
     title: cleanTitle(raw.title),
     pinned: raw.pinned === true,
     muted: raw.muted === true,
+    keepAwake: raw.keepAwake === true,
     workspaceId: typeof raw.workspaceId === "string" && knownWorkspaces.has(raw.workspaceId) ? raw.workspaceId : MAIN_WORKSPACE_ID,
   };
 };
@@ -147,6 +150,8 @@ export type SessionSourceTab = {
   title: string;
   isPinned: boolean;
   isMuted: boolean;
+  /** Brak = false. */
+  keepAwake?: boolean;
   isPrivate: boolean;
   internal: boolean;
   /** Przestrzeń karty; brak = główna. */
@@ -183,6 +188,7 @@ export const buildSessionData = (
       title: cleanTitle(tab.title),
       pinned: tab.isPinned,
       muted: tab.isMuted,
+      keepAwake: tab.keepAwake === true,
       workspaceId: tab.workspaceId && known.has(tab.workspaceId) ? tab.workspaceId : MAIN_WORKSPACE_ID,
     });
     if (tabs.length >= MAX_SESSION_TABS) break;

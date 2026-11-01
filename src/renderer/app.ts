@@ -8,6 +8,7 @@ type TabState = {
   canGoForward: boolean;
   isPinned: boolean;
   isMuted: boolean;
+  keepAwake?: boolean;
   isSleeping: boolean;
   isPrivate: boolean;
   isAudible: boolean;
@@ -571,6 +572,10 @@ const renderTabs = (): void => {
     }
     if (tab.isSleeping) {
       status.innerHTML += `<svg viewBox="0 0 24 24" aria-hidden="true"><path d="M21 12.79A9 9 0 1 1 11.21 3 7 7 0 0 0 21 12.79Z"/></svg>`;
+    }
+    if (tab.keepAwake) {
+      // "Never sleep": a small lightning bolt.
+      status.innerHTML += `<svg viewBox="0 0 16 16" aria-hidden="true"><path d="M9.5 1.5 3.5 9h4l-1 5.5 6-7.5h-4l1-5.5Z"/></svg>`;
     }
     if (tab.isPinned) {
       status.innerHTML += `<svg viewBox="0 0 16 16" aria-hidden="true"><path d="M5 2.5h6l-1 3 2 2v1H8.75v4.75L8 14l-.75-.75V8.5H4v-1l2-2-1-3Z"/></svg>`;

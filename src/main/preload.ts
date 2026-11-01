@@ -9,6 +9,7 @@ type TabState = {
   canGoForward: boolean;
   isPinned: boolean;
   isMuted: boolean;
+  keepAwake?: boolean;
   isSleeping: boolean;
   isPrivate: boolean;
   isAudible: boolean;
