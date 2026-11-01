@@ -1,15 +1,15 @@
 # MonoBrowser
 
-MonoBrowser is a small desktop browser for Windows and Linux, built with Electron, TypeScript, and esbuild. The latest stable release is [v0.6.0](https://github.com/4tmwz7/monobrowser/releases/tag/v0.6.0).
+MonoBrowser is a small desktop browser for Windows and Linux, built with Electron, TypeScript, and esbuild. The latest stable release is [v0.7.0](https://github.com/4tmwz7/monobrowser/releases/tag/v0.7.0).
 
 ## Download
 
-- [Windows x64 installer](https://github.com/4tmwz7/monobrowser/releases/download/v0.6.0/MonoBrowser-Setup-0.6.0.exe)
-- [Linux x64 AppImage](https://github.com/4tmwz7/monobrowser/releases/download/v0.6.0/MonoBrowser-0.6.0-x86_64.AppImage)
+- [Windows x64 installer](https://github.com/4tmwz7/monobrowser/releases/download/v0.7.0/MonoBrowser-Setup-0.7.0.exe)
+- [Linux x64 AppImage](https://github.com/4tmwz7/monobrowser/releases/download/v0.7.0/MonoBrowser-0.7.0-x86_64.AppImage)
 
 ## System requirements
 
-MonoBrowser is built on Electron 44 (Chromium 152) and ships 64-bit builds only.
+MonoBrowser is built on Electron 45 (Chromium 156) and ships 64-bit builds only.
 
 | | Minimum | Recommended |
 | --- | --- | --- |
@@ -21,15 +21,25 @@ MonoBrowser is built on Electron 44 (Chromium 152) and ships 64-bit builds only.
 
 Notes:
 
-- 32-bit Windows (ia32) and Linux ARM (armv7l) builds are not provided; Electron 44 publishes 64-bit binaries only.
+- 32-bit Windows (ia32) and Linux ARM (armv7l) builds are not provided; Electron 45 publishes 64-bit binaries only.
 - macOS is not supported and no macOS builds are published.
 - On Wayland sessions the app runs as a native Wayland client; XWayland can be forced with `--ozone-platform=x11`.
 - If the AppImage fails to start because FUSE is missing, run it with `--appimage-extract-and-run`.
+
+## Extensions
+
+- Install Chrome extensions straight from the Chrome Web Store ("Add to MonoBrowser"); installed extensions update automatically.
+- Manage them on `monobrowser://extensions` (also in the menu, Settings → Browsing and the command palette): enable, disable, remove, open options, allow in private mode, or load unpacked extensions.
+- Extensions that need APIs MonoBrowser doesn't support are marked "Limited compatibility"; keyboard shortcuts defined by extensions are not supported yet.
+- When a working content blocker extension (uBlock Origin Lite, AdGuard, …) is installed, the built-in ad blocker steps aside until the extension is disabled or removed.
 
 ## Bookmarks and tabs
 
 - Import bookmarks from HTML (Netscape format used by Chrome, Firefox, Edge) or JSON, and export to HTML or JSON, from the menu under Bookmarks.
 - Drag tabs to reorder them; pinned and unpinned tabs are reordered within their own group.
+- The vertical tab sidebar can sit on the left or right edge of the window (Settings → Browsing → Tab bar side).
+- "Never sleep this tab" in the tab menu excludes a tab from automatic sleeping and the RAM limiter.
+- Links opened with a middle click open in a background tab.
 
 ## Security notes
 
@@ -45,14 +55,19 @@ Notes:
 - `Ctrl+Shift+N` - open a private tab (in-memory session, no history; cleared when the last private tab closes)
 - `Ctrl+W` - close current tab
 - `Ctrl+R` or `F5` - reload current tab
+- `Ctrl+Shift+R` or `Shift+F5` - hard reload (bypass cache)
 - `Ctrl+L` - focus and select the address bar
 - `Ctrl+K` - open the command palette
 - `Ctrl+D` - add or remove the current bookmark
 - `Ctrl+F` - find text on the current page
+- `Ctrl+P` / `Ctrl+S` / `Ctrl+U` - print, save page, view source
+- `Ctrl+Shift+M` - toggle notes
+- `Ctrl+Shift+C` - toggle compact mode
 - `F12` or `Ctrl+Shift+I` - toggle DevTools for the current page
 - `Ctrl+Tab` / `Ctrl+Shift+Tab` - switch between tabs
 - `Ctrl+PageDown` / `Ctrl+PageUp` - switch between tabs
 - `Ctrl+1`…`Ctrl+9` - select a tab (`9` selects the last tab)
+- `Ctrl+Alt+1`…`Ctrl+Alt+9`, `Ctrl+Alt+PageUp` / `Ctrl+Alt+PageDown` - switch spaces
 - `Alt+Left` / `Alt+Right` - navigate back or forward
 - `Ctrl++` / `Ctrl+-` / `Ctrl+0` - control page zoom
 - `F11` - toggle full screen
