@@ -65,6 +65,7 @@ type LayoutSettings = {
   compactMode: boolean;
 };
 type StartupSettings = { startupMode: "restore" | "newtab" };
+type TabSleepSettings = { afterMinutes: number; neverSleepSites: string[] };
 type GlanceSettings = { enabled: boolean; trigger: "alt" | "ctrl" | "shift" | "longpress" };
 type GlanceViewState = {
   title: string;
@@ -237,6 +238,10 @@ const browserApi = {
   getExperimentalSettings: (): Promise<unknown> => ipcRenderer.invoke("experimental:get"),
   setExperimentalSettings: (patch: Record<string, unknown>): Promise<unknown> =>
     ipcRenderer.invoke("experimental:set", patch),
+  getTabSleepSettings: (): Promise<TabSleepSettings> => ipcRenderer.invoke("tab-sleep:get"),
+  setTabSleepSettings: (patch: Partial<TabSleepSettings>): Promise<TabSleepSettings> => ipcRenderer.invoke("tab-sleep:set", patch),
+  addTabSleepSite: (site: string): Promise<{ ok: boolean; reason?: "invalid" | "limit"; settings: TabSleepSettings }> => ipcRenderer.invoke("tab-sleep:site-add", site),
+  removeTabSleepSite: (site: string): Promise<{ ok: boolean; settings: TabSleepSettings }> => ipcRenderer.invoke("tab-sleep:site-remove", site),
   getGlanceSettings: (): Promise<GlanceSettings> => ipcRenderer.invoke("glance:get"),
   setGlanceSettings: (patch: Partial<GlanceSettings>): Promise<GlanceSettings> =>
     ipcRenderer.invoke("glance:set", patch),

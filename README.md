@@ -30,6 +30,7 @@ Notes:
 
 - Import bookmarks from HTML (Netscape format used by Chrome, Firefox, Edge) or JSON, and export to HTML or JSON, from the menu under Bookmarks.
 - Drag tabs to reorder them; pinned and unpinned tabs are reordered within their own group.
+- Inactive background tabs are put to sleep to free memory. In Settings → Browsing choose the idle time (never, 5 min … 4 h) and a list of sites that never sleep (a site covers its subdomains); the tab menu also has "Never sleep this site".
 
 ## Security notes
 

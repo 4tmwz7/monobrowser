@@ -27,6 +27,7 @@ import { exportBookmarksHtml, exportBookmarksJson, parseBookmarksImport } from "
 import { HOST_PATTERNS, LOCAL_HOST_PATTERNS, buildViewSourceUrl, getErrorCode, hostInputToUrl, isAboutBlankUrl, isExtensionUrl, isFileUrl, isHttpUrl, isInternalSchemeInput, isViewSourceUrl, looksLikeHost, recoverEmbeddedUrl, shortUrlLabel } from "./url-utils.js";
 import { DEFAULT_LAYOUT_SETTINGS, mergeLayoutSettings, normalizeLayoutSettings, type LayoutSettings } from "./layout-settings.js";
 import { PINNABLE_TOOLBAR_ACTIONS, isToolbarActionId, normalizeToolbarPins, setToolbarPinned, type ToolbarActionId } from "./toolbar-pins.js";
+import { DEFAULT_TAB_SLEEP_SETTINGS, MAX_NEVER_SLEEP_SITES, TAB_SLEEP_MINUTE_OPTIONS, isSiteExcludedFromSleep, mergeTabSleepSettings, normalizeSleepSite, normalizeTabSleepSettings, type TabSleepSettings } from "./tab-sleep-settings.js";
 import { DEFAULT_GLANCE_SETTINGS, mergeGlanceSettings, normalizeGlanceSettings, type GlanceSettings } from "./glance-settings.js";
 import { isHostExcepted, isUrlExcepted, normalizeExceptionHost, parseExceptionList } from "./adblock-exceptions.js";
 import { buildGlanceTriggerScript, parseGlanceMessage } from "./glance-trigger.js";
@@ -285,7 +286,6 @@ const ALLOWED_SITE_DATA_TYPES = new Set<SiteDataType>([
   "cache",
   "serviceWorkers",
 ]);
-const TAB_SLEEP_AFTER_MS = 10 * 60 * 1000;
 const TAB_SLEEP_SWEEP_INTERVAL_MS = 30_000;
 const NOTES_WIDTH = 340;
 const NOTES_SCROLLBAR_INSET = 14; // keeps the page's right scrollbar reachable
@@ -346,6 +346,8 @@ let layoutSettingsFilePath = "";
 let toolbarPinsFilePath = "";
 let toolbarPins: ToolbarActionId[] = [];
 let layoutSettings: LayoutSettings = { ...DEFAULT_LAYOUT_SETTINGS };
+let tabSleepSettingsFilePath = "";
+let tabSleepSettings: TabSleepSettings = { ...DEFAULT_TAB_SLEEP_SETTINGS, neverSleepSites: [] };
 let glanceSettingsFilePath = "";
 let glanceSettings: GlanceSettings = { ...DEFAULT_GLANCE_SETTINGS };
 let experimentalSettingsFilePath = "";
@@ -1843,6 +1845,37 @@ const toggleTabMuted = (tabId: number): boolean => {
   getTabContents(tab)?.setAudioMuted(tab.isMuted);
   broadcastTabsState();
   return true;
+};
+
+const loadTabSleepSettings = async (): Promise<void> => {
+  try {
+    const raw = await fs.readFile(tabSleepSettingsFilePath, "utf8");
+    tabSleepSettings = normalizeTabSleepSettings(JSON.parse(raw));
+  } catch {
+    tabSleepSettings = { ...DEFAULT_TAB_SLEEP_SETTINGS, neverSleepSites: [] };
+  }
+};
+
+const getTabSleepSettings = (): TabSleepSettings => ({ afterMinutes: tabSleepSettings.afterMinutes, neverSleepSites: [...tabSleepSettings.neverSleepSites] });
+
+// Already sleeping tabs that now match an exception are left alone; they simply won't sleep again.
+const setTabSleepSettings = async (patch: unknown): Promise<TabSleepSettings> => {
+  tabSleepSettings = mergeTabSleepSettings(tabSleepSettings, patch);
+  await writeJsonAtomically(tabSleepSettingsFilePath, tabSleepSettings);
+  notifySettingsPage("tab-sleep", getTabSleepSettings());
+  return getTabSleepSettings();
+};
+
+const setTabSleepSite = async (input: unknown, excluded: boolean): Promise<{ ok: boolean; reason?: "invalid" | "limit"; settings: TabSleepSettings }> => {
+  const host = normalizeSleepSite(input);
+  if (!host) return { ok: false, reason: "invalid", settings: getTabSleepSettings() };
+  const sites = new Set(tabSleepSettings.neverSleepSites);
+  if (excluded && !sites.has(host) && sites.size >= MAX_NEVER_SLEEP_SITES) {
+    return { ok: false, reason: "limit", settings: getTabSleepSettings() };
+  }
+  if (excluded) sites.add(host);
+  else sites.delete(host);
+  return { ok: true, settings: await setTabSleepSettings({ neverSleepSites: [...sites] }) };
 };
 
 const loadGlanceSettings = async (): Promise<void> => {
@@ -3966,7 +3999,7 @@ const renderSettingsPageHtml = (): string => {
     customLabel: "Adres wyszukiwania", customHint: "Wstaw {query} w miejscu wyszukiwanego tekstu.",
     save: "Zapisz ustawienia", blockerHeading: "Blokowanie treści", blockerDescription: "Wbudowana ochrona przed reklamami i modułami śledzącymi (EasyList, EasyPrivacy, EasyList Polish, annoyances).",
     blockerEngine: "Ghostery adblocker — uBlock/EasyList", blockerOn: "Włączone", blockerOff: "Wyłączone", blockerLoading: "Ładowanie list…",
-    blockerError: "Blokowanie niedostępne", blockerPausedBy: "Wbudowany bloker jest wstrzymany, ponieważ zainstalowano rozszerzenie: {name}. Wróci po jego wyłączeniu lub usunięciu.", extHeading: "Rozszerzenia", extDescription: "Rozszerzenia Chrome: instaluj ze sklepu Chrome Web Store, wczytuj z folderu, włączaj, wyłączaj lub usuwaj.", extOpen: "Zarządzaj rozszerzeniami", exceptionsHeading: "Wyjątki blokowania", exceptionsDescription: "Na tych witrynach (i ich subdomenach) treści nie są blokowane.", exceptionsEmpty: "Brak wyjątków.", exceptionsAdd: "Dodaj", exceptionsRemove: "Usuń", exceptionsPlaceholder: "example.com", exceptionsInvalid: "Nieprawidłowa nazwa domeny.", blockedTotalLabel: "Zablokowane w tej sesji:", blockedValueSuffix: "żądań",
+    blockerError: "Blokowanie niedostępne", blockerPausedBy: "Wbudowany bloker jest wstrzymany, ponieważ zainstalowano rozszerzenie: {name}. Wróci po jego wyłączeniu lub usunięciu.", extHeading: "Rozszerzenia", extDescription: "Rozszerzenia Chrome: instaluj ze sklepu Chrome Web Store, wczytuj z folderu, włączaj, wyłączaj lub usuwaj.", extOpen: "Zarządzaj rozszerzeniami", sleepHeading: "Usypianie kart", sleepDescription: "Nieaktywne karty w tle są usypiane, aby zwolnić pamięć. Uśpiona karta wczytuje się ponownie po wybraniu.", sleepAfterLabel: "Usypiaj nieaktywne karty po", sleepNever: "Nigdy", sleepMinutes: "{n} min", sleepHours: "{n} h", sleepSitesHeading: "Nigdy nie usypiaj tych witryn", sleepSitesDescription: "Karty tych witryn (i ich subdomen) nie są usypiane, także przy limicie pamięci.", sleepSitesFull: "Osiągnięto limit 500 witryn — usuń któryś wpis.", exceptionsHeading: "Wyjątki blokowania", exceptionsDescription: "Na tych witrynach (i ich subdomenach) treści nie są blokowane.", exceptionsEmpty: "Brak wyjątków.", exceptionsAdd: "Dodaj", exceptionsRemove: "Usuń", exceptionsPlaceholder: "example.com", exceptionsInvalid: "Nieprawidłowa nazwa domeny.", blockedTotalLabel: "Zablokowane w tej sesji:", blockedValueSuffix: "żądań",
     active: "Aktywny", unavailable: "Niedostępny", loading: "Wczytywanie ustawień…", loadFailed: "Nie udało się wczytać ustawień.",
     searchTab: "Wyszukiwanie", browsingTab: "Przeglądanie", workspacesTab: "Przestrzenie", wsHeading: "Przestrzenie", wsDescription: "Przestrzenie to osobne zestawy kart (jak w Arc/Zen). Zmień nazwę, ikonę (litera, symbol lub emoji) i kolor, ustaw kolejność albo usuń przestrzeń. Przestrzeń Główna nie może być usunięta.", wsIcon: "Ikona", wsName: "Nazwa", wsColor: "Kolor", wsNoColor: "Bez koloru", wsUp: "Wyżej", wsDown: "Niżej", wsDelete: "Usuń", wsAdd: "Nowa przestrzeń", wsTabs: "Kart:", themeTab: "Motyw", themeHeading: "Motyw", themeDescription: "Jeden motyw dla całej przeglądarki: pasek kart, strona startowa, ustawienia, menu i okna. Zmiany działają od razu.", themeDefault: "Domyślny", themeDefaultHint: "auto: jasny lub ciemny jak system", themeCustom: "Własny", themeCustomHint: "edytor poniżej", themeCustomHeading: "Motyw własny", themeCustomDescription: "Pola są wypełnione kolorami wybranego motywu. Zmiana dowolnego koloru przełącza na motyw własny oparty na nim.", themeReset: "Przywróć domyślny", themeSaved: "Motyw zapisany.", themeLoadFailed: "Nie udało się wczytać motywu.", previewTab: "Karta", previewActive: "Aktywna", previewAddress: "Szukaj lub wpisz adres", previewHeading: "Podgląd", previewText: "Tekst pomocniczy i ramka.", previewAccent: "Akcent", previewDanger: "Błąd", tokenNames: { bg: "Tło", surface: "Powierzchnia (paski)", surface2: "Powierzchnia 2 (najechanie)", fg: "Tekst", muted: "Tekst pomocniczy", accent: "Akcent", onAccent: "Tekst na akcencie", border: "Ramka", danger: "Błąd / ostrzeżenie" }, experimentalTab: "Eksperymentalne", experimentalHeading: "Funkcje eksperymentalne", experimentalWarning: "Uwaga: to funkcje eksperymentalne. Mogą działać niestabilnie, różnić się między systemami i zostać zmienione lub usunięte.",
     ramHeading: "Ogranicznik RAM", ramDescription: "Gdy łączne zużycie pamięci przez przeglądarkę przekroczy limit, najdawniej używane karty w tle są usypiane (aktywna karta, karty wewnętrzne i Glance są pomijane; przypięte i odtwarzające dźwięk w ostatniej kolejności).",
@@ -4010,7 +4043,7 @@ const renderSettingsPageHtml = (): string => {
     customLabel: "Search URL", customHint: "Place {query} where the search text should appear.",
     save: "Save settings", blockerHeading: "Content blocking", blockerDescription: "Built-in protection against ads and trackers (EasyList, EasyPrivacy, EasyList Polish, annoyances).",
     blockerEngine: "Ghostery adblocker — uBlock/EasyList", blockerOn: "On", blockerOff: "Off", blockerLoading: "Loading lists…",
-    blockerError: "Blocking unavailable", blockerPausedBy: "The built-in blocker is paused because an extension is installed: {name}. It comes back when that extension is disabled or removed.", extHeading: "Extensions", extDescription: "Chrome extensions: install from the Chrome Web Store, load from a folder, enable, disable or remove them.", extOpen: "Manage extensions", exceptionsHeading: "Blocking exceptions", exceptionsDescription: "Content is not blocked on these sites (or their subdomains).", exceptionsEmpty: "No exceptions.", exceptionsAdd: "Add", exceptionsRemove: "Remove", exceptionsPlaceholder: "example.com", exceptionsInvalid: "Invalid domain name.", blockedTotalLabel: "Blocked this session:", blockedValueSuffix: "requests",
+    blockerError: "Blocking unavailable", blockerPausedBy: "The built-in blocker is paused because an extension is installed: {name}. It comes back when that extension is disabled or removed.", extHeading: "Extensions", extDescription: "Chrome extensions: install from the Chrome Web Store, load from a folder, enable, disable or remove them.", extOpen: "Manage extensions", sleepHeading: "Tab sleeping", sleepDescription: "Inactive background tabs are put to sleep to free memory. A sleeping tab reloads when you select it.", sleepAfterLabel: "Put inactive tabs to sleep after", sleepNever: "Never", sleepMinutes: "{n} min", sleepHours: "{n} h", sleepSitesHeading: "Never sleep these sites", sleepSitesDescription: "Tabs of these sites (and their subdomains) are never put to sleep, even under memory pressure.", sleepSitesFull: "Limit of 500 sites reached - remove an entry first.", exceptionsHeading: "Blocking exceptions", exceptionsDescription: "Content is not blocked on these sites (or their subdomains).", exceptionsEmpty: "No exceptions.", exceptionsAdd: "Add", exceptionsRemove: "Remove", exceptionsPlaceholder: "example.com", exceptionsInvalid: "Invalid domain name.", blockedTotalLabel: "Blocked this session:", blockedValueSuffix: "requests",
     active: "Active", unavailable: "Unavailable", loading: "Loading settings…", loadFailed: "Settings could not be loaded.",
     searchTab: "Search", browsingTab: "Browsing", workspacesTab: "Spaces", wsHeading: "Spaces", wsDescription: "Spaces are separate sets of tabs (like Arc/Zen). Rename a space, pick its icon (letter, symbol or emoji) and color, reorder or delete it. The Main space cannot be deleted.", wsIcon: "Icon", wsName: "Name", wsColor: "Color", wsNoColor: "No color", wsUp: "Up", wsDown: "Down", wsDelete: "Delete", wsAdd: "New space", wsTabs: "Tabs:", themeTab: "Theme", themeHeading: "Theme", themeDescription: "One theme for the whole browser: tab bar, start page, settings, menus and overlays. Changes apply instantly.", themeDefault: "Default", themeDefaultHint: "auto: light or dark like the system", themeCustom: "Custom", themeCustomHint: "editor below", themeCustomHeading: "Custom theme", themeCustomDescription: "The fields are prefilled from the selected theme. Changing any color switches to a custom theme based on it.", themeReset: "Reset to default", themeSaved: "Theme saved.", themeLoadFailed: "The theme could not be loaded.", previewTab: "Tab", previewActive: "Active", previewAddress: "Search or enter address", previewHeading: "Preview", previewText: "Muted text and border.", previewAccent: "Accent", previewDanger: "Error", tokenNames: { bg: "Background", surface: "Surface (bars)", surface2: "Surface 2 (hover)", fg: "Text", muted: "Muted text", accent: "Accent", onAccent: "Text on accent", border: "Border", danger: "Error / warning" }, experimentalTab: "Experimental", experimentalHeading: "Experimental features", experimentalWarning: "Warning: these features are experimental. They may be unstable, behave differently across systems, and may change or be removed.",
     ramHeading: "RAM limiter", ramDescription: "When the browser's total memory use exceeds the limit, the least recently used background tabs are put to sleep (the active tab, internal pages and Glance are skipped; pinned tabs and tabs playing audio go last).",
@@ -4055,6 +4088,8 @@ const renderSettingsPageHtml = (): string => {
     "",
     "",
   ].join("\n");
+  const sleepDurationLabel = (minutes: number): string =>
+    minutes >= 60 ? copy.sleepHours.replace("{n}", String(minutes / 60)) : copy.sleepMinutes.replace("{n}", String(minutes));
   const scriptStubLiteral = JSON.stringify(scriptStub);
   return `<!doctype html>
 <html lang="${appLanguage}"><head><meta charset="UTF-8"><meta name="viewport" content="width=device-width,initial-scale=1">
@@ -4203,6 +4238,15 @@ ${UI_BASE_END_CSS}
       <div class="field"><label class="checkbox-row" for="glance-enabled"><input id="glance-enabled" type="checkbox" checked>${copy.glanceEnable}</label></div>
       <div class="field"><label for="glance-trigger">${copy.glanceTriggerLabel}</label>
         <select id="glance-trigger"><option value="alt">${copy.glanceAlt}</option><option value="ctrl">${copy.glanceCtrl}</option><option value="shift">${copy.glanceShift}</option><option value="longpress">${copy.glanceLongPress}</option></select></div>
+    </section>
+    <section class="card" id="tab-sleep-card">
+      <h2>${copy.sleepHeading}</h2><p class="description">${copy.sleepDescription}</p>
+      <div class="field"><label for="tab-sleep-after">${copy.sleepAfterLabel}</label>
+        <select id="tab-sleep-after"><option value="0">${copy.sleepNever}</option>${TAB_SLEEP_MINUTE_OPTIONS.filter((minutes) => minutes > 0).map((minutes) => `<option value="${minutes}">${escapeHtml(sleepDurationLabel(minutes))}</option>`).join("")}</select></div>
+      <h3 style="margin:14px 0 4px;font-size:12px;text-transform:uppercase;letter-spacing:.06em">${copy.sleepSitesHeading}</h3><p class="description">${copy.sleepSitesDescription}</p>
+      <div id="sleep-sites-list"></div>
+      <form id="sleep-sites-form" class="custom-field" style="display:flex;gap:8px;align-items:center"><input id="sleep-sites-input" type="text" maxlength="253" spellcheck="false" autocomplete="off" placeholder="${copy.exceptionsPlaceholder}" style="flex:1"><button type="submit" class="secondary">${copy.exceptionsAdd}</button></form>
+      <span id="sleep-sites-message" class="hint" role="status"></span>
     </section>
     <section class="card" id="toolbar-card">
       <h2>${copy.toolbarHeading}</h2><p class="description">${copy.toolbarDescription}</p>
@@ -4432,6 +4476,7 @@ ${UI_BASE_END_CSS}
     if (topic === 'adblock-exceptions' && Array.isArray(data)) renderExceptions(data);
     else if (topic === 'adblock-status' && data) renderBlocker(data);
     else if (topic === 'workspaces' && !wsEditing()) renderWorkspaceRows(data);
+    else if (topic === 'tab-sleep' && data) renderSleep(data);
   });
 
   const layoutInputs = Array.from(document.querySelectorAll('input[name=tab-bar-layout]'));
@@ -4482,6 +4527,30 @@ ${UI_BASE_END_CSS}
   }));
   window.browserApi.getToolbarPins().then(showToolbarPins).catch(() => undefined);
   window.browserApi.onToolbarPinsChanged(showToolbarPins);
+
+  const sleepAfter = document.getElementById('tab-sleep-after');
+  const sleepList = document.getElementById('sleep-sites-list');
+  const sleepInput = document.getElementById('sleep-sites-input');
+  const sleepMessage = document.getElementById('sleep-sites-message');
+  const renderSleep = (settings) => {
+    sleepAfter.value = String(settings.afterMinutes);
+    sleepList.replaceChildren();
+    if (!settings.neverSleepSites.length) { sleepList.append(make('p', 'description', copy.exceptionsEmpty)); return; }
+    settings.neverSleepSites.forEach((site) => {
+      const row = make('div', 'exception-row');
+      row.style.cssText = 'display:flex;justify-content:space-between;align-items:center;gap:8px;padding:6px 0;border-bottom:1px solid var(--black)';
+      row.append(make('span', '', site), action(copy.exceptionsRemove, async () => renderSleep((await window.browserApi.removeTabSleepSite(site)).settings)));
+      sleepList.append(row);
+    });
+  };
+  sleepAfter.addEventListener('change', async () => { renderSleep(await window.browserApi.setTabSleepSettings({ afterMinutes: Number(sleepAfter.value) })); });
+  document.getElementById('sleep-sites-form').addEventListener('submit', async (event) => {
+    event.preventDefault(); sleepMessage.textContent = '';
+    const result = await window.browserApi.addTabSleepSite(sleepInput.value);
+    if (!result.ok) { sleepMessage.textContent = result.reason === 'limit' ? copy.sleepSitesFull : copy.exceptionsInvalid; return; }
+    sleepInput.value = ''; renderSleep(result.settings);
+  });
+  window.browserApi.getTabSleepSettings().then(renderSleep).catch(() => undefined);
 
   const glanceEnabled = document.getElementById('glance-enabled');
   const glanceTrigger = document.getElementById('glance-trigger');
@@ -4899,7 +4968,7 @@ const getInternalTab = (kind: InternalKind, workspaceId: string = currentWorkspa
   getInternalTabs(kind).find((tab) => tab.workspaceId === workspaceId) ?? null;
 
 /** Pushes a data change to the open Settings tab (no reload), so its lists never go stale. */
-const notifySettingsPage = (topic: "adblock-exceptions" | "adblock-status" | "workspaces", data: unknown): void => {
+const notifySettingsPage = (topic: "adblock-exceptions" | "adblock-status" | "workspaces" | "tab-sleep", data: unknown): void => {
   for (const tab of getInternalTabs("settings")) {
     const contents = getTabContents(tab);
     if (contents && !contents.isDestroyed()) contents.send("settings:data-changed", topic, data);
@@ -6292,20 +6361,25 @@ const openTabContextMenu = async (tabId: number, anchor: unknown): Promise<boole
   const copy = appLanguage === "pl" ? {
     title: "Menu karty", duplicate: "Duplikuj kartę", pin: "Przypnij kartę", unpin: "Odepnij kartę",
     mute: "Wycisz kartę", unmute: "Włącz dźwięk karty", close: "Zamknij kartę",
-    keepAwake: "Nie usypiaj karty", allowSleep: "Pozwól usypiać kartę",
+    keepAwake: "Nie usypiaj karty", allowSleep: "Pozwól usypiać kartę", neverSleepSite: "Nigdy nie usypiaj tej witryny", removeSleepSite: "Usuń z wyjątków usypiania",
     closeOthers: "Zamknij pozostałe karty", closeRight: "Zamknij karty po prawej", reopen: "Przywróć zamkniętą kartę",
     moveToWorkspace: "Przenieś do przestrzeni",
     splitClose: "Zamknij podzielony widok",
   } : {
     title: "Tab menu", duplicate: "Duplicate tab", pin: "Pin tab", unpin: "Unpin tab",
     mute: "Mute tab", unmute: "Unmute tab", close: "Close tab",
-    keepAwake: "Never sleep this tab", allowSleep: "Allow this tab to sleep",
+    keepAwake: "Never sleep this tab", allowSleep: "Allow this tab to sleep", neverSleepSite: "Never sleep this site", removeSleepSite: "Remove from sleep exceptions",
     closeOthers: "Close other tabs", closeRight: "Close tabs to the right", reopen: "Reopen closed tab",
     moveToWorkspace: "Move to space",
     splitClose: "Close split view",
   };
   const action = (name: string, label: string): string =>
     `<a class="menu-item" href="monobrowser-menu://${name}">${escapeHtml(label)}</a>`;
+  // Site sleep exception: offered for http(s) tabs; hidden when only a parent domain is listed.
+  const tabUrl = getTabContents(tab)?.getURL() || tab.url;
+  const sleepSiteHostRaw = !tab.internalKind && /^https?:/i.test(tabUrl) ? normalizeSleepSite(tabUrl) : null;
+  const sleepSiteListed = sleepSiteHostRaw !== null && tabSleepSettings.neverSleepSites.includes(sleepSiteHostRaw);
+  const sleepSiteHost = sleepSiteHostRaw !== null && (sleepSiteListed || !isSiteExcludedFromSleep(tabUrl, tabSleepSettings.neverSleepSites)) ? sleepSiteHostRaw : null;
   const orderedTabs = getOrderedTabRecords();
   const tabIndex = orderedTabs.findIndex((entry) => entry.id === tab.id);
   const tabsToRight = orderedTabs.slice(tabIndex + 1).filter((entry) => !entry.isPinned);
@@ -6316,6 +6390,7 @@ const openTabContextMenu = async (tabId: number, anchor: unknown): Promise<boole
       action("tab-toggle-pin", tab.isPinned ? copy.unpin : copy.pin),
       action("tab-toggle-mute", tab.isMuted ? copy.unmute : copy.mute),
       ...(tab.internalKind ? [] : [action("tab-toggle-keep-awake", tab.keepAwake ? copy.allowSleep : copy.keepAwake)]),
+      ...(sleepSiteHost ? [action("tab-toggle-sleep-site", sleepSiteListed ? copy.removeSleepSite : copy.neverSleepSite)] : []),
     ],
     splitRegistry.groupOf(tab.id)
       ? [action("tab-split-close", copy.splitClose)]
@@ -6365,6 +6440,17 @@ const openTabContextMenu = async (tabId: number, anchor: unknown): Promise<boole
           // A sleeping tab marked "never sleep" wakes up right away.
           if (currentTab.keepAwake && currentTab.isSleeping) wakeTab(currentTab);
           broadcastTabsState();
+        }
+        break;
+      case "tab-toggle-sleep-site":
+        if (currentTab) {
+          const siteUrl = getTabContents(currentTab)?.getURL() || currentTab.url;
+          const host = /^https?:/i.test(siteUrl) ? normalizeSleepSite(siteUrl) : null;
+          if (host) {
+            void setTabSleepSite(host, !tabSleepSettings.neverSleepSites.includes(host)).then((result) => {
+              if (result.reason === "limit") showToast(appLanguage === "pl" ? "Osiągnięto limit 500 witryn, które nigdy nie są usypiane." : "Limit of 500 never-sleep sites reached.");
+            });
+          }
         }
         break;
       case "tab-split-close": closeSplit(tabId); break;
@@ -8850,6 +8936,11 @@ const canTabSleep = (tab: TabRecord, force: boolean = false): boolean => {
     return false;
   }
 
+  // Excluded sites never sleep, not even when forced (RAM limiter, "sleep other tabs").
+  if (isSiteExcludedFromSleep(contents.getURL() || tab.url, tabSleepSettings.neverSleepSites)) {
+    return false;
+  }
+
   if ((!force && contents.isCurrentlyAudible()) || contents.isLoading() || contents.isDevToolsOpened()) {
     return false;
   }
@@ -8921,9 +9012,11 @@ const sleepOtherTabs = (): number => {
 };
 
 const sleepIdleTabs = (): void => {
+  const afterMs = tabSleepSettings.afterMinutes * 60 * 1000;
+  if (afterMs <= 0) return;
   const now = Date.now();
   for (const tab of [...tabs.values()]) {
-    if (!canTabSleep(tab) || now - tab.lastActiveAt < TAB_SLEEP_AFTER_MS) {
+    if (!canTabSleep(tab) || now - tab.lastActiveAt < afterMs) {
       continue;
     }
     sleepTab(tab);
@@ -10057,6 +10150,10 @@ const registerIpc = (): void => {
   handleTrusted("split:close", () => closeSplit());
   handleTrusted("experimental:get", () => getExperimentalPayload());
   handleTrusted("experimental:set", (_event, patch: unknown) => setExperimentalSettings(patch));
+  handleTrusted("tab-sleep:get", () => getTabSleepSettings());
+  handleTrusted("tab-sleep:set", (_event, patch: unknown) => setTabSleepSettings(patch));
+  handleTrusted("tab-sleep:site-add", (_event, site: unknown) => setTabSleepSite(site, true));
+  handleTrusted("tab-sleep:site-remove", (_event, site: unknown) => setTabSleepSite(site, false));
   handleTrusted("glance:get", () => ({ ...glanceSettings }));
   handleTrusted("glance:set", (_event, patch: unknown) => setGlanceSettings(patch));
   handleTrusted("glance:get-state", (event) => (glance && event.sender.id === glance.shell.webContents.id ? buildGlanceViewState(glance) : null));
@@ -10800,6 +10897,7 @@ const bootstrap = async (): Promise<void> => {
   toolbarPinsFilePath = path.join(app.getPath("userData"), "toolbar-pins.json");
   splitFilePath = path.join(app.getPath("userData"), "split-view.json");
   glanceSettingsFilePath = path.join(app.getPath("userData"), "glance-settings.json");
+  tabSleepSettingsFilePath = path.join(app.getPath("userData"), "tab-sleep-settings.json");
   adblockSettingsFilePath = path.join(app.getPath("userData"), "adblock-settings.json");
   adblockExceptionsFilePath = path.join(app.getPath("userData"), "adblock-exceptions.json");
   adblockEngineCachePath = path.join(app.getPath("userData"), "adblock-engine.bin");
@@ -10815,7 +10913,7 @@ const bootstrap = async (): Promise<void> => {
   );
 
   await detectOnboarding();
-  await Promise.all([loadStartPageBackgroundColor(), loadLanguage(), loadSearchSettings(), loadLayoutSettings(), loadToolbarPins(), loadGlanceSettings(), loadAdblockSettings(), loadAdblockExceptions(), loadExperimentalSettings(), loadStartupSettings(), loadAnimationSettings(), loadZoomStore()]);
+  await Promise.all([loadStartPageBackgroundColor(), loadLanguage(), loadSearchSettings(), loadLayoutSettings(), loadToolbarPins(), loadGlanceSettings(), loadTabSleepSettings(), loadAdblockSettings(), loadAdblockExceptions(), loadExperimentalSettings(), loadStartupSettings(), loadAnimationSettings(), loadZoomStore()]);
   applyExperimentalSettings();
   startPageBackgroundColor = getThemeTokens().bg;
   applyStartPageBackgroundColor();
