@@ -69,7 +69,7 @@
         left: 0;
         right: 0;
         height: 36px;
-        transition: width var(--mb-dur-slow, 240ms) var(--mb-ease, ease);
+        transition: width var(--mb-dur-slow, 320ms) var(--mb-ease, ease);
         background: var(--tabbar-bg);
         color: var(--tabbar-fg);
         border-bottom: 1px solid var(--tabbar-line);
@@ -233,6 +233,7 @@
         height: 26px;
         padding: 0 8px 0 2px;
         gap: 4px;
+        transition: border-color var(--mb-dur, 180ms) var(--mb-ease, ease), box-shadow var(--mb-dur, 180ms) var(--mb-ease, ease), background-color var(--mb-dur, 180ms) var(--mb-ease, ease);
       }
 
       #address-form:hover {
@@ -357,10 +358,64 @@
         color: var(--tab-fg);
         font-size: 11px;
         cursor: pointer;
-        transition: background-color var(--mb-dur, 160ms) var(--mb-ease, ease), border-color var(--mb-dur, 160ms) var(--mb-ease, ease), color var(--mb-dur, 160ms) var(--mb-ease, ease), opacity var(--mb-dur, 160ms) var(--mb-ease, ease), transform var(--mb-dur, 160ms) var(--mb-ease, ease);
+        transition: background-color var(--mb-dur-fast, 120ms) var(--mb-ease, ease), border-color var(--mb-dur-fast, 120ms) var(--mb-ease, ease), color var(--mb-dur-fast, 120ms) var(--mb-ease, ease), opacity var(--mb-dur, 180ms) var(--mb-ease, ease), transform var(--mb-dur-fast, 120ms) var(--mb-ease, ease);
         white-space: nowrap;
         position: relative;
+        overflow: hidden;
         text-align: left;
+      }
+
+      /* Active-tab indicator: a thin accent line that grows from the side the previously active tab was on (app.ts sets
+         --ind-origin on both tabs), so the selection appears to slide along the strip. transform only. */
+      .tab-btn:not(.split-member)::after {
+        content: "";
+        position: absolute;
+        left: 0;
+        right: 0;
+        bottom: 0;
+        height: 2px;
+        background: var(--accent);
+        transform: scaleX(0);
+        transform-origin: var(--ind-origin, left center);
+        transition: transform var(--mb-dur, 180ms) var(--mb-ease, ease);
+        pointer-events: none;
+      }
+
+      .tab-btn.active:not(.split-member)::after {
+        transform: scaleX(1);
+      }
+
+      body.vertical .tab-btn:not(.pinned):not(.split-member)::after {
+        right: auto;
+        top: 0;
+        width: 2px;
+        height: auto;
+        transform: scaleY(0);
+        transform-origin: var(--ind-origin, center top);
+      }
+
+      body.vertical .tab-btn.active:not(.pinned):not(.split-member)::after {
+        transform: scaleY(1);
+      }
+
+      /* Loading: a short bar sweeps along the top edge of the tab (phase vars keep it continuous across strip rebuilds). */
+      @keyframes mb-load-sweep {
+        from { transform: translateX(-100%); }
+        to { transform: translateX(260%); }
+      }
+
+      .tab-btn.loading::before {
+        content: "";
+        position: absolute;
+        top: 0;
+        left: 0;
+        width: 40%;
+        height: 2px;
+        background: linear-gradient(90deg, transparent, currentColor, transparent);
+        opacity: calc(var(--mb-on, 1) * .7);
+        animation: mb-load-sweep 1.2s ease-in-out infinite;
+        animation-delay: var(--pw, 0s);
+        pointer-events: none;
       }
 
       .tab-btn.active {
@@ -585,11 +640,18 @@
         border-top-color: currentColor;
         border-radius: 50%;
         animation: spin 0.7s linear infinite;
+        animation-delay: var(--ps, 0s);
         display: none;
       }
 
       .tab-btn.loading .tab-loading {
         display: block;
+      }
+
+      /* Reduced motion: the loading state stays visible but static (a ring and a thin line instead of spinning / sweeping). */
+      @media (prefers-reduced-motion: reduce) {
+        .tab-loading { animation: none; }
+        .tab-btn.loading::before { animation: none; width: 100%; opacity: .45; }
       }
 
       .tab-btn.loading .tab-favicon {
@@ -667,7 +729,7 @@
         line-height: 1;
         padding: 0;
         cursor: pointer;
-        transition: background var(--mb-dur, 160ms) var(--mb-ease, cubic-bezier(.2, .7, .2, 1)), color var(--mb-dur, 160ms) var(--mb-ease, cubic-bezier(.2, .7, .2, 1));
+        transition: background var(--mb-dur, 180ms) var(--mb-ease, cubic-bezier(.22, 1, .36, 1)), color var(--mb-dur, 180ms) var(--mb-ease, cubic-bezier(.22, 1, .36, 1));
       }
 
       #ws-add svg {
@@ -777,7 +839,7 @@
 
       /* Hook for the tab-list switch animation: restarted by app.ts whenever the workspace changes. */
       .ws-enter {
-        animation: ws-enter var(--mb-dur, 160ms) var(--mb-ease, cubic-bezier(.2, .7, .2, 1));
+        animation: ws-enter var(--mb-dur, 180ms) var(--mb-ease, cubic-bezier(.22, 1, .36, 1));
       }
 
       .mb-no-anim .ws-enter {
@@ -834,6 +896,11 @@
         border-right: 1px solid var(--tabbar-line);
       }
 
+      /* Labels that are still on screen while the sidebar width animates must not spill out of it. */
+      body.vertical #chrome {
+        overflow-x: clip;
+      }
+
       /* Sidebar on the right edge: mirrors the left-hand layout. */
       body.vertical.sidebar-right #chrome {
         left: auto;
@@ -872,6 +939,9 @@
         flex-direction: column;
         align-items: stretch;
         height: auto;
+        /* A flex item's min-height defaults to its content height: without this the tab list never shrinks, so with
+           many tabs it pushes the sidebar's bottom actions out of the window instead of scrolling. */
+        min-height: 0;
         gap: 4px;
       }
 
@@ -1104,6 +1174,20 @@
         display: none;
       }
 
+      /* Windows: the drag strip is always laid out (never toggled between display:none and block) so Chromium keeps its
+         draggable-region list in sync in every layout. Where #chrome is the title bar itself (horizontal layout) it is
+         an invisible duplicate underneath; the compact strip gives it its look below. */
+      html.platform-win32:not(.chrome-overlay) #titlebar-drag {
+        display: block;
+        position: fixed;
+        top: 0;
+        left: 0;
+        right: 0;
+        height: 36px;
+        z-index: 0;
+        pointer-events: auto;
+      }
+
       html.platform-win32 {
         --wco-right: 138px;
       }
@@ -1112,10 +1196,57 @@
         --wco-right: 0px;
       }
 
-      /* Horizontal layout: the single toolbar row is the title bar. */
+      /* Horizontal layout: the single toolbar row is the title bar. Its bottom line (--tabbar-line) spans the whole
+         width: the native controls are 1px shorter than the bar (titlebar.ts), so the line runs under them to the edge. */
       html.platform-win32 body:not(.vertical) #chrome {
         padding-right: calc(6px + var(--wco-right));
         -webkit-app-region: drag;
+      }
+
+      /* 1 px outline of the native controls: this vertical line just left of them (the bottom line is the bar's own
+         border, the overlay is 1px shorter). Horizontal layout and the compact strip only; in the vertical layout the
+         controls float over the page and main.ts draws the outline with a native view. --wco-right follows the real
+         controls width (DPI scaling, geometrychange); gone in fullscreen (the controls are not drawn). */
+      html.platform-win32:not(.window-fullscreen):not(.chrome-overlay):has(body:not(.vertical))::after,
+      html.platform-win32:not(.window-fullscreen):not(.chrome-overlay):has(body.compact)::after {
+        content: "";
+        position: fixed;
+        top: 0;
+        right: var(--wco-right);
+        width: 1px;
+        height: 36px;
+        background: var(--tabbar-line);
+        z-index: 10;
+        pointer-events: none;
+      }
+
+      html.platform-win32:not(.window-fullscreen):not(.chrome-overlay):has(body.compact)::after {
+        height: 32px;
+      }
+
+      /* Vertical layout (Windows behaves like Linux): address bar and navigation live in the sidebar, the page starts at
+         y=0 and the native controls float over its top-right corner. Empty sidebar space drags the window. */
+      /* Only the empty strip beside the navigation buttons drags (its buttons opt out below). The rest of the sidebar must
+         NOT be a drag region: Windows reports the document's drag regions to the window as the title bar (HTCAPTION)
+         even where a popup WebContentsView lies over them, which swallowed every hover and click on a popup opened over
+         the sidebar (the menu). */
+      html.platform-win32:not(.chrome-overlay) body.vertical #nav-buttons {
+        -webkit-app-region: drag;
+      }
+
+      /* Right sidebar: the controls float over its top, keep that corner free so they never cover its buttons.
+         (The 36px extra sits inside the drag strip, 6px chrome padding + 36px = the former 42px.) */
+      html.platform-win32 body.vertical.sidebar-right.wco-top #nav-buttons {
+        padding-top: 36px;
+      }
+
+      html.platform-win32.window-fullscreen body.vertical.sidebar-right.wco-top #nav-buttons {
+        padding-top: 0;
+      }
+
+      /* No title strip in the vertical layout (the sidebar is the drag area): the strip element takes no room. */
+      html.platform-win32 body.vertical:not(.compact) #titlebar-drag {
+        height: 0;
       }
 
       html.platform-win32 #titlebar-drag {
@@ -1126,57 +1257,40 @@
         -webkit-app-region: no-drag;
       }
 
-      /* Vertical layout: a full-width top bar (nav buttons + address bar, then the controls) above sidebar and page. */
-      html.platform-win32 body.top-row #titlebar-drag {
-        display: block;
-        position: fixed;
-        top: 0;
-        left: 0;
-        right: 0;
-        height: 36px;
-        background: var(--tabbar-bg);
-        border-bottom: 1px solid var(--tabbar-line);
-        z-index: 9;
+      /* Vertical layout: the tab list (with its scrollbar) is never a drag region, so the scrollbar can be grabbed; only
+         the empty space around the sidebar's controls (top) drags the window. */
+      html.platform-win32 body.vertical #tab-scroll {
+        -webkit-app-region: no-drag;
       }
 
-      html.platform-win32 body.top-row #chrome {
-        top: 36px;
+      /* While a tab is dragged (HTML5 drag and drop) nothing may be a window drag region: over a drag region the OS
+         does not deliver dragover/drop to the page, so the tab could not be dropped there (app.ts sets the class). */
+      html.platform-win32 body.tab-dragging #chrome,
+      html.platform-win32 body.tab-dragging #titlebar-drag,
+      html.platform-win32 body.tab-dragging #nav-buttons {
+        -webkit-app-region: no-drag !important;
       }
 
-      html.platform-win32 body.top-row #nav-buttons {
-        position: fixed;
-        top: 0;
-        left: 6px;
-        height: 36px;
-        flex-direction: row;
-        justify-content: flex-start;
-      }
-
-      html.platform-win32 body.top-row #address-form {
-        display: flex;
-        position: fixed;
-        top: 5px;
-        left: 98px;
-        right: calc(var(--wco-right) + 8px);
-        width: auto;
-        max-width: 720px;
-        height: 26px;
+      /* While an overlay view (menu, tab menu, extension popup, prompt, palette, notes, find, glance...) is open above
+         the window, no part of this document is a drag region: on Windows the regions are reported to the window as the
+         caption area even under a child view, so clicks on the overlay would start a window drag instead. main.ts
+         sends "overlay-open" (app.ts toggles the class). */
+      html.platform-win32 body.overlay-open #chrome,
+      html.platform-win32 body.overlay-open #titlebar-drag,
+      html.platform-win32 body.overlay-open #nav-buttons {
+        -webkit-app-region: no-drag !important;
       }
 
       /* Compact mode (the window's own shell): the page covers everything but a thin drag strip; the chrome comes back
-         as the overlay instance when the pointer touches the top / side edge. */
+         as the overlay instance when the pointer touches the top / side edge. The strip keeps its bottom line. */
       html.platform-win32 body.compact #chrome {
         visibility: hidden;
       }
 
       html.platform-win32 body.compact #titlebar-drag {
-        display: block;
-        position: fixed;
-        top: 0;
-        left: 0;
-        right: 0;
         height: 32px;
         background: var(--tabbar-bg);
+        border-bottom: 1px solid var(--tabbar-line);
         z-index: 9;
       }
 

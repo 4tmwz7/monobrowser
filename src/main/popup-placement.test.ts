@@ -118,3 +118,13 @@ test("anchored popup: flips when it does not fit, is clamped into the window and
   const clear = computeAnchoredPopupBounds({ anchor: { x: 1860, y: 0, width: 28, height: 4 }, alignment: "top right", width: 200, height: 300, contentWidth: 1904, contentHeight: 800, avoid: { x: 1766, y: 0, width: 138, height: 36 } });
   assert.ok(clear.y >= 36);
 });
+
+test("keepClearOf: a popup pushed below the controls is shortened again to stay inside the window", () => {
+  const avoid = { x: 1062, y: 0, width: 138, height: 36 };
+  const ctx = computePopupGeometry({ ...base, contentHeight: 400, preferredHeight: 390, anchor: { x: 1190, y: 5 }, clampInside: true, avoid });
+  assert.equal(ctx.bounds.y, 36);
+  assert.ok(ctx.bounds.y + ctx.bounds.height <= 400 - 4);
+  const anchored = computeAnchoredPopupBounds({ anchor: { x: 1160, y: 0, width: 28, height: 30 }, width: 300, height: 380, contentWidth: 1200, contentHeight: 400, avoid });
+  assert.ok(anchored.y >= 36);
+  assert.ok(anchored.y + anchored.height <= 400 - 4);
+});

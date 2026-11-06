@@ -63,6 +63,7 @@ type LayoutSettings = {
   verticalTabBarCollapsed: boolean;
   verticalTabBarSide: "left" | "right";
   compactMode: boolean;
+  hideWindowControls: boolean;
 };
 type StartupSettings = { startupMode: "restore" | "newtab" };
 type TabSleepSettings = { afterMinutes: number; neverSleepSites: string[] };
@@ -218,6 +219,12 @@ const browserApi = {
   setCompactPointer: (inside: boolean): void => ipcRenderer.send("compact:pointer", inside),
   // Split view: a tab drag started/ended (page area turns into left/right drop zones).
   notifyTabDrag: (tabId: number | null): void => ipcRenderer.send("split:tab-drag", tabId),
+  // An overlay view (menu popup, prompt, palette, notes, find, glance, extension popup) opened/closed above the window.
+  onOverlayOpen: (callback: (open: boolean) => void): (() => void) => {
+    const listener = (_event: Electron.IpcRendererEvent, open: boolean) => callback(Boolean(open));
+    ipcRenderer.on("overlay:open", listener);
+    return () => ipcRenderer.removeListener("overlay:open", listener);
+  },
   // Toolbar pins: menu functions pinned as icon buttons (see toolbar-pins.ts).
   getToolbarPins: (): Promise<unknown> => ipcRenderer.invoke("toolbar:get"),
   runToolbarAction: (id: string): Promise<boolean> => ipcRenderer.invoke("toolbar:run", id),
@@ -347,8 +354,8 @@ const browserApi = {
   getLicenses: (): Promise<string> => ipcRenderer.invoke("about:get-licenses"),
   setOnboardingStep: (index: number): Promise<boolean> => ipcRenderer.invoke("onboarding:set-step", index),
   finishOnboarding: (): Promise<boolean> => ipcRenderer.invoke("onboarding:finish"),
-  getAnimationSettings: (): Promise<{ enabled: boolean }> => ipcRenderer.invoke("animations:get"),
-  setAnimationSettings: (patch: { enabled: boolean }): Promise<{ enabled: boolean }> => ipcRenderer.invoke("animations:set", patch),
+  getAnimationSettings: (): Promise<{ enabled: boolean; level: "subtle" | "full" }> => ipcRenderer.invoke("animations:get"),
+  setAnimationSettings: (patch: { enabled?: boolean; level?: "subtle" | "full" }): Promise<{ enabled: boolean; level: "subtle" | "full" }> => ipcRenderer.invoke("animations:set", patch),
   getStartupSettings: (): Promise<StartupSettings> => ipcRenderer.invoke("startup:get"),
   rememberSettingsTab: (tab: string): void => ipcRenderer.send("settings:remember-tab", tab),
   setStartupSettings: (patch: Partial<StartupSettings>): Promise<StartupSettings> =>
@@ -385,6 +392,8 @@ const browserApi = {
     return () => ipcRenderer.removeListener("window:fullscreen", listener);
   },
   isWindowFullscreen: (): Promise<boolean> => ipcRenderer.invoke("window:is-fullscreen"),
+  // Windows: measured width of the native window controls, so the main process can outline them (titlebar.ts).
+  reportWindowControlsWidth: (width: number): void => ipcRenderer.send("window:controls-width", width),
   onExtensionsChanged: (callback: () => void): (() => void) => {
     const listener = () => callback();
     ipcRenderer.on("extensions:changed", listener);

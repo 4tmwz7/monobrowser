@@ -14,7 +14,7 @@ test("normalizeLayoutSettings clamps the vertical bar width", () => {
 });
 
 test("mergeLayoutSettings applies partial patches", () => {
-  const current = { tabBarLayout: "vertical" as const, verticalTabBarWidth: 260, verticalTabBarCollapsed: false, verticalTabBarSide: "left" as const, compactMode: false };
+  const current = { tabBarLayout: "vertical" as const, verticalTabBarWidth: 260, verticalTabBarCollapsed: false, verticalTabBarSide: "left" as const, compactMode: false, hideWindowControls: true };
   assert.deepEqual(mergeLayoutSettings(current, { verticalTabBarCollapsed: true }), { ...current, verticalTabBarCollapsed: true });
   assert.equal(mergeLayoutSettings(current, { tabBarLayout: "horizontal" }).tabBarLayout, "horizontal");
 });
@@ -36,4 +36,16 @@ test("verticalTabBarSide defaults to left and only accepts left or right", () =>
   assert.equal(mergeLayoutSettings(current, { verticalTabBarSide: 3 }).verticalTabBarSide, "right");
   assert.equal(mergeLayoutSettings(current, { tabBarLayout: "vertical" }).verticalTabBarSide, "right");
   assert.equal(mergeLayoutSettings(current, { verticalTabBarSide: "left" }).verticalTabBarSide, "left");
+});
+
+test("hideWindowControls defaults to on, is persisted as boolean only", () => {
+  assert.equal(DEFAULT_LAYOUT_SETTINGS.hideWindowControls, true);
+  assert.equal(normalizeLayoutSettings({}).hideWindowControls, true);
+  assert.equal(normalizeLayoutSettings({ hideWindowControls: false }).hideWindowControls, false);
+  assert.equal(normalizeLayoutSettings({ hideWindowControls: "no" }).hideWindowControls, true);
+  assert.equal(normalizeLayoutSettings({ hideWindowControls: 0 }).hideWindowControls, true);
+  const off = { ...DEFAULT_LAYOUT_SETTINGS, hideWindowControls: false };
+  assert.equal(mergeLayoutSettings(off, { tabBarLayout: "vertical" }).hideWindowControls, false);
+  assert.equal(mergeLayoutSettings(off, { hideWindowControls: "yes" }).hideWindowControls, false);
+  assert.equal(mergeLayoutSettings(off, { hideWindowControls: true }).hideWindowControls, true);
 });

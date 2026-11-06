@@ -32,3 +32,20 @@ export const normalizeToolbarInfo = (value: unknown): ExtensionToolbarInfo => {
     hasActions: raw.hasActions === true,
   };
 };
+
+/** Why an extension cannot be run on the active page (null: it can). Pinning/unpinning never depends on the page. */
+export type ExtensionRunBlock = "no-page" | "private" | null;
+
+/**
+ * `tab` is the active tab: monobrowser:// pages (settings, history, ...) and sleeping/gone views are no page extensions
+ * can act on (internal tabs are not registered with the extension host and have no tab id there).
+ */
+export const extensionRunBlock = (
+  tab: { internal: boolean; isPrivate: boolean; hasLiveView: boolean } | null,
+  privateReady: boolean,
+  allowedInPrivate: boolean,
+): ExtensionRunBlock => {
+  if (!tab || tab.internal || !tab.hasLiveView) return "no-page";
+  if (tab.isPrivate && !(privateReady && allowedInPrivate)) return "private";
+  return null;
+};

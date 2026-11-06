@@ -2,6 +2,7 @@ import { BrowserWindow, WebContentsView } from "electron";
 import type { Session, WebContents } from "electron";
 import type { ElectronChromeExtensions } from "electron-chrome-extensions";
 import { computeAnchoredPopupBounds, type PopupRect } from "./popup-placement.js";
+import { shouldIgnoreReopen, type OutsideClose } from "./popup-toggle.js";
 
 // Extension action popups (the page an extension shows when its toolbar button is clicked) hosted INSIDE the main
 // window as a WebContentsView. electron-chrome-extensions opens them as a child BrowserWindow it positions with
@@ -37,12 +38,19 @@ const MAX_HEIGHT = 600;
 /** Focus events right after opening (the menu closing, the page regaining focus) must not dismiss the popup. */
 const OPEN_GRACE_MS = 500;
 
-type ActivePopup = { extensionId: string; view: WebContentsView; openedAt: number; close: () => void };
+type ActivePopup = { extensionId: string; view: WebContentsView; openedAt: number; close: () => void; closeFromOutside: () => void };
 let active: ActivePopup | null = null;
+/** Last popup dismissed by an outside click / blur: the click on its own icon must not open it again (popup-toggle.ts). */
+let lastOutsideClose: OutsideClose | null = null;
 
 const alive = (popup: ActivePopup | null): popup is ActivePopup => Boolean(popup && !popup.view.webContents.isDestroyed());
 
 export const isInWindowPopupOpen = (): boolean => alive(active);
+
+let stateListener: ((open: boolean) => void) | null = null;
+/** Called whenever a popup opens or closes (main.ts uses it to switch the shell's window drag regions off). */
+export const setInWindowPopupListener = (listener: ((open: boolean) => void) | null): void => { stateListener = listener; };
+const notifyState = (): void => stateListener?.(alive(active));
 
 export const closeInWindowPopup = (): void => {
   if (active) active.close();
@@ -50,7 +58,7 @@ export const closeInWindowPopup = (): void => {
 
 /** Focus moved to the shell or a page: the user clicked outside the popup. */
 export const closeInWindowPopupFromOutside = (): void => {
-  if (alive(active) && Date.now() - active.openedAt > OPEN_GRACE_MS && !active.view.webContents.isFocused()) active.close();
+  if (alive(active) && Date.now() - active.openedAt > OPEN_GRACE_MS && !active.view.webContents.isFocused()) active.closeFromOutside();
 };
 
 const clampSize = (size: { width: number; height: number }): { width: number; height: number } => ({
@@ -64,6 +72,8 @@ const openPopup = (host: InWindowPopupHost, target: Session, isPrivate: boolean,
   const sameExtension = alive(active) && active.extensionId === details.extensionId;
   closeInWindowPopup();
   if (sameExtension) return; // a second click on the same button closes its popup
+  // The click on the icon already dismissed the popup through its blur: that was the "second click".
+  if (shouldIgnoreReopen(lastOutsideClose, details.extensionId, Date.now())) { lastOutsideClose = null; return; }
 
   const view = new WebContentsView({
     webPreferences: { session: target, sandbox: true, nodeIntegration: false, nodeIntegrationInWorker: false, contextIsolation: true, enablePreferredSizeMode: true },
@@ -100,6 +110,7 @@ const openPopup = (host: InWindowPopupHost, target: Session, isPrivate: boolean,
     if (closed) return;
     closed = true;
     if (active?.view === view) active = null;
+    notifyState();
     win.off("resize", close);
     win.off("closed", close);
     if (!win.isDestroyed() && win.contentView.children.includes(view)) win.contentView.removeChildView(view);
@@ -108,12 +119,18 @@ const openPopup = (host: InWindowPopupHost, target: Session, isPrivate: boolean,
       contents.close();
     }
   };
-  active = { extensionId: details.extensionId, view, openedAt: Date.now(), close };
+  const closeFromOutside = (): void => {
+    if (closed) return;
+    lastOutsideClose = { extensionId: details.extensionId, at: Date.now() };
+    close();
+  };
+  active = { extensionId: details.extensionId, view, openedAt: Date.now(), close, closeFromOutside };
 
   win.contentView.addChildView(view);
+  notifyState();
   win.on("resize", close);
   win.on("closed", close);
-  contents.once("destroyed", () => { if (!closed) { closed = true; if (active?.view === view) active = null; } });
+  contents.once("destroyed", () => { if (!closed) { closed = true; if (active?.view === view) active = null; notifyState(); } });
   contents.setWindowOpenHandler(({ url: linkUrl }) => {
     if (/^https?:\/\//i.test(linkUrl)) { host.openLink(linkUrl, isPrivate); close(); }
     return { action: "deny" };
@@ -125,7 +142,7 @@ const openPopup = (host: InWindowPopupHost, target: Session, isPrivate: boolean,
     // Focus can bounce while the compositor settles; dismiss only when it really left (and not for another app window).
     setTimeout(() => {
       if (closed || contents.isDestroyed() || contents.isFocused() || contents.isDevToolsOpened()) return;
-      if (BrowserWindow.getAllWindows().some((window) => window.isFocused())) close();
+      if (BrowserWindow.getAllWindows().some((window) => window.isFocused())) closeFromOutside();
     }, 120);
   });
   contents.on("preferred-size-changed", (_event, preferred) => {

@@ -35,15 +35,20 @@ const MIN_HEIGHT = 180;
 const GAP = 7;
 const MARGIN = 4;
 
-/** Moves a popup that would overlap `avoid` (horizontally and vertically) below it; no-op when it does not. */
-export const keepClearOf = (geometry: PopupGeometry, avoid: PopupRect | null | undefined): PopupGeometry => {
+/**
+ * Moves a popup that would overlap `avoid` (horizontally and vertically) below it; no-op when it does not.
+ * With `contentHeight` a popup hanging from the top is shortened again so that it still ends inside the window.
+ */
+export const keepClearOf = (geometry: PopupGeometry, avoid: PopupRect | null | undefined, contentHeight?: number): PopupGeometry => {
   if (!avoid) return geometry;
   const { bounds } = geometry;
   const clearY = avoid.y + avoid.height;
   const overlapsX = bounds.x < avoid.x + avoid.width && bounds.x + bounds.width > avoid.x;
   if (!overlapsX || bounds.y >= clearY || bounds.y + bounds.height <= avoid.y) return geometry;
   if (geometry.fixedEdge === "top") {
-    return { ...geometry, bounds: { ...bounds, y: clearY }, edgeY: clearY };
+    const room = contentHeight === undefined ? bounds.height : contentHeight - MARGIN - clearY;
+    const height = Math.min(bounds.height, Math.max(MIN_HEIGHT, room));
+    return { ...geometry, bounds: { ...bounds, y: clearY, height }, edgeY: clearY };
   }
   // Hanging from the bottom edge: the bottom stays, the popup becomes shorter.
   const bottom = bounds.y + bounds.height;
@@ -51,7 +56,7 @@ export const keepClearOf = (geometry: PopupGeometry, avoid: PopupRect | null | u
   return { ...geometry, bounds: { ...bounds, y: bottom - height, height }, minTop: clearY };
 };
 
-export const computePopupGeometry = (input: PopupGeometryInput): PopupGeometry => keepClearOf(computeRawPopupGeometry(input), input.avoid);
+export const computePopupGeometry = (input: PopupGeometryInput): PopupGeometry => keepClearOf(computeRawPopupGeometry(input), input.avoid, input.contentHeight);
 
 const computeRawPopupGeometry = (input: PopupGeometryInput): PopupGeometry => {
   const { anchor, rect, width, preferredHeight, contentWidth, contentHeight } = input;
@@ -156,5 +161,5 @@ export const computeAnchoredPopupBounds = (input: AnchoredPopupInput): PopupRect
     width,
     height,
   };
-  return keepClearOf({ bounds, fixedEdge: "top", edgeY: bounds.y }, input.avoid).bounds;
+  return keepClearOf({ bounds, fixedEdge: "top", edgeY: bounds.y }, input.avoid, contentHeight).bounds;
 };

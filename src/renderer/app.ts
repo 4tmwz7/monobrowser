@@ -1,5 +1,6 @@
 import { displayUrl } from "../main/url-utils.js";
-import { shellViewport, windowControlsReserve } from "../main/titlebar.js";
+import { TITLEBAR_HEIGHT, shellViewport, windowControlsReserve } from "../main/titlebar.js";
+import { nearestTabDrop, planTabMove, rectContainsPoint, trustedDragEndPoint } from "../main/tab-drop.js";
 import { EMPTY_TOOLBAR_INFO, normalizeToolbarInfo, pinnedActionsCss, type ExtensionToolbarInfo } from "../main/extension-toolbar.js";
 type TabState = {
   id: number;
@@ -48,6 +49,7 @@ type LayoutSettings = {
   verticalTabBarCollapsed: boolean;
   verticalTabBarSide: "left" | "right";
   compactMode: boolean;
+  hideWindowControls: boolean;
 };
 type BrowserApi = {
   createTab: (initialUrl?: string) => Promise<number>;
@@ -80,6 +82,7 @@ type BrowserApi = {
   platform: string;
   onWindowFullscreen: (callback: (fullscreen: boolean) => void) => () => void;
   isWindowFullscreen: () => Promise<boolean>;
+  reportWindowControlsWidth: (width: number) => void;
   getAdblockStatus: () => Promise<AdblockerStatus>;
   toggleAdblock: () => Promise<AdblockerStatus>;
   toggleAdblockTabPause: () => Promise<AdblockerStatus>;
@@ -91,6 +94,7 @@ type BrowserApi = {
   setCompactKeep: (flags: { address: boolean }) => void;
   setCompactPointer: (inside: boolean) => void;
   notifyTabDrag: (tabId: number | null) => void;
+  onOverlayOpen: (callback: (open: boolean) => void) => () => void;
   getToolbarPins: () => Promise<unknown>;
   runToolbarAction: (id: string) => Promise<boolean>;
   setToolbarPinned: (id: string, pinned: boolean) => Promise<unknown>;
@@ -129,6 +133,7 @@ if (isChromeOverlay) document.documentElement.classList.add("chrome-overlay");
 // The CSS (platform-win32) makes the empty strip a drag area and keeps --wco-right of room free for the controls.
 const isWindows = window.browserApi.platform === "win32";
 let windowFullscreen = false;
+let lastReportedControlsWidth = -1;
 if (isWindows) {
   document.documentElement.classList.add("platform-win32");
   type ControlsOverlay = { visible: boolean; getTitlebarAreaRect: () => DOMRect; addEventListener: (type: "geometrychange", listener: () => void) => void };
@@ -142,6 +147,15 @@ if (isWindows) {
     const reserve = windowControlsReserve({ fullscreen: windowFullscreen, titlebarArea, viewportWidth: window.innerWidth });
     document.documentElement.style.setProperty("--wco-right", `${reserve}px`);
     document.documentElement.classList.toggle("window-fullscreen", windowFullscreen);
+    // The main process outlines the controls in the vertical layout (they float over the page there): give it the
+    // real width, also while fullscreen hides them (then it is simply the last known one).
+    if (!isChromeOverlay && !windowFullscreen) {
+      const width = windowControlsReserve({ fullscreen: false, titlebarArea, viewportWidth: window.innerWidth });
+      if (width !== lastReportedControlsWidth) {
+        lastReportedControlsWidth = width;
+        window.browserApi.reportWindowControlsWidth(width);
+      }
+    }
   };
   updateControlsReserve();
   window.addEventListener("resize", updateControlsReserve);
@@ -199,7 +213,6 @@ const state: {
   currentWorkspaceId: "main",
 };
 
-const HORIZONTAL_CHROME_HEIGHT = 36; // single compact toolbar row
 const COLLAPSED_SIDEBAR_WIDTH = 52;
 const MIN_SIDEBAR_WIDTH = 180;
 const MAX_SIDEBAR_WIDTH = 400;
@@ -210,6 +223,7 @@ const layout: LayoutSettings = {
   verticalTabBarCollapsed: false,
   verticalTabBarSide: "left",
   compactMode: false,
+  hideWindowControls: true,
 };
 
 const tabsContainer = document.getElementById("tab-list") as HTMLDivElement;
@@ -295,7 +309,7 @@ const renderSidebarToggle = (): void => {
 
 // Tells the main process where web content starts (below the toolbar or right of the sidebar).
 const syncViewport = async (): Promise<void> => {
-  const rect = shellViewport({ platform: window.browserApi.platform, vertical: isVertical(), sidebarRight: isSidebarRight(), sidebarWidth: currentSidebarWidth() });
+  const rect = shellViewport({ vertical: isVertical(), sidebarRight: isSidebarRight(), sidebarWidth: currentSidebarWidth() });
   placeholder.style.top = `${rect.y}px`;
   placeholder.style.left = `${rect.x}px`;
   placeholder.style.right = `${rect.right}px`;
@@ -309,9 +323,10 @@ const applyLayout = (): void => {
   document.body.classList.toggle("vertical", isVertical());
   document.body.classList.toggle("sidebar-right", isSidebarRight());
   document.body.classList.toggle("collapsed", isCollapsed());
-  // Windows: vertical layout puts the address row in a full-width top bar next to the native controls; in compact
-  // mode the window's own shell only shows a thin drag strip (the revealed chrome is the overlay instance).
-  document.body.classList.toggle("top-row", isWindows && isVertical() && !layout.compactMode);
+  // Windows: the page starts at y=0 in the vertical layout and the native controls float over its top-right corner;
+  // with the sidebar on the right the sidebar keeps that corner free (wco-top). In compact mode the window's own shell
+  // only shows a thin drag strip (the revealed chrome is the overlay instance).
+  document.body.classList.toggle("wco-top", isWindows && isSidebarRight() && !layout.compactMode);
   document.body.classList.toggle("compact", isWindows && layout.compactMode && !isChromeOverlay);
   document.documentElement.style.setProperty("--sidebar-width", `${currentSidebarWidth()}px`);
   renderSidebarToggle();
@@ -462,6 +477,20 @@ const clearTabDropMarks = (): void => {
 type TabDropTarget = { button: HTMLElement; tabId: number; before: boolean };
 type DragPoint = { x: number; y: number; target: Element | null };
 const dragPointOf = (event: DragEvent): DragPoint => ({ x: event.clientX, y: event.clientY, target: event.target instanceof Element ? event.target : null });
+/** Nearest tab of the dragged tab's group to the pointer (see tab-drop.ts), as a drop target with its button. */
+const nearestTabDropTarget = (point: { x: number; y: number }, dragged: TabState): TabDropTarget | null => {
+  const buttons = tabDropButtons(dragged.isPinned);
+  const drop = nearestTabDrop(
+    buttons.map((button) => {
+      const rect = button.getBoundingClientRect();
+      return { id: Number(button.dataset.tabId), rect: { left: rect.left, top: rect.top, right: rect.right, bottom: rect.bottom } };
+    }),
+    point,
+    isVertical() && !dragged.isPinned,
+  );
+  const button = drop ? buttons.find((candidate) => Number(candidate.dataset.tabId) === drop.tabId) : undefined;
+  return drop && button ? { button, tabId: drop.tabId, before: drop.before } : null;
+};
 const resolveTabDropTarget = (point: DragPoint): TabDropTarget | null => {
   const dragged = state.tabs.find((entry) => entry.id === draggedTabId);
   if (!dragged) return null;
@@ -470,20 +499,22 @@ const resolveTabDropTarget = (point: DragPoint): TabDropTarget | null => {
   if (target?.closest(".ws-btn, #address-form, #nav-buttons, #ws-switch")) return null;
   const inTabsArea = Boolean(target?.closest("#tabs"));
   if (!inTabsArea && !(isVertical() && target?.closest("#chrome"))) return null;
-  let best: { button: HTMLElement; rect: DOMRect; dist: number } | null = null;
-  for (const button of tabDropButtons(dragged.isPinned)) {
-    const rect = button.getBoundingClientRect();
-    const dx = Math.max(rect.left - point.x, 0, point.x - rect.right);
-    const dy = Math.max(rect.top - point.y, 0, point.y - rect.bottom);
-    const dist = dx * dx + dy * dy;
-    if (!best || dist < best.dist) best = { button, rect, dist };
-  }
-  if (!best) return null;
-  const stacked = isVertical() && !dragged.isPinned;
-  const before = stacked
-    ? point.y < best.rect.top + best.rect.height / 2
-    : point.x < best.rect.left + best.rect.width / 2;
-  return { button: best.button, tabId: Number(best.button.dataset.tabId), before };
+  return nearestTabDropTarget(point, dragged);
+};
+/** Where a drag ended, judged by the pointer position alone (the OS did not deliver a `drop` over the strip). */
+const resolveTabDropAt = (point: { x: number; y: number }): TabDropTarget | null => {
+  const dragged = state.tabs.find((entry) => entry.id === draggedTabId);
+  const area = document.getElementById(isVertical() ? "chrome" : "tabs");
+  if (!dragged || !area) return null;
+  const rect = area.getBoundingClientRect();
+  // Horizontal: anywhere along the strip's row (the tab area), vertical: inside the sidebar.
+  const bounds = isVertical()
+    ? { left: rect.left, top: rect.top, right: rect.right, bottom: rect.bottom }
+    : { left: rect.left, top: 0, right: rect.right, bottom: Math.max(rect.bottom, TITLEBAR_HEIGHT) };
+  if (!rectContainsPoint(bounds, point)) return null;
+  const element = document.elementFromPoint(point.x, point.y);
+  if (element?.closest(".ws-btn, #address-form, #nav-buttons, #ws-switch")) return null;
+  return nearestTabDropTarget(point, dragged);
 };
 // The last drop target seen during the drag and whether a drop already moved the tab: a drag whose `drop`
 // event never arrives (dragover fired once or was not cancelled in time) is still completed from `dragend`.
@@ -491,12 +522,10 @@ let lastTabDropTarget: TabDropTarget | null = null;
 let tabDropDone = false;
 const commitTabDrop = (drop: TabDropTarget | null): boolean => {
   const dragged = state.tabs.find((entry) => entry.id === draggedTabId);
-  if (!drop || !dragged || drop.tabId === dragged.id) return false;
-  const group = state.tabs.filter((entry) => entry.isPinned === dragged.isPinned);
-  const index = group.findIndex((entry) => entry.id === drop.tabId);
-  const beforeId = drop.before ? drop.tabId : (group[index + 1]?.id ?? null);
-  if (beforeId === dragged.id) return false;
-  void window.browserApi.moveTab(dragged.id, beforeId);
+  if (!drop || !dragged) return false;
+  const plan = planTabMove(state.tabs.filter((entry) => entry.isPinned === dragged.isPinned).map((entry) => entry.id), dragged.id, drop);
+  if (!plan) return false;
+  void window.browserApi.moveTab(dragged.id, plan.beforeId);
   return true;
 };
 const initTabDragDrop = (): void => {
@@ -521,7 +550,13 @@ const initTabDragDrop = (): void => {
       lastTabDropTarget = null;
     }
   });
+  // Safety net for body.tab-dragging (it turns the window drag regions off for the duration of a tab drag): a drop, a
+  // later pointer release or the window losing focus always ends it, even if `dragend` never arrived (source removed).
+  const clearTabDraggingClass = (): void => document.body.classList.remove("tab-dragging");
+  window.addEventListener("pointerup", clearTabDraggingClass);
+  window.addEventListener("blur", clearTabDraggingClass);
   document.addEventListener("drop", (event) => {
+    clearTabDraggingClass();
     if (draggedTabId === null) return;
     // Another control (a workspace icon) already took this drop.
     if (event.defaultPrevented) { tabDropDone = true; clearTabDropMarks(); return; }
@@ -587,12 +622,15 @@ const tileLetterFor = (url: string, fallbackTitle: string): string => {
 // ── Tab animations ──────────────────────────────────────────────────────────
 // The tab strip is rebuilt on every state change, so enter/leave/active transitions are replayed
 // from small bookkeeping maps (negative delay keeps a running animation continuous across rebuilds).
-const animDurations = (): { dur: number; slow: number } => {
+const EASE = "cubic-bezier(.22,1,.36,1)";
+const animDurations = (): { dur: number; slow: number; fast: number; shift: number; spring: string } => {
   const style = getComputedStyle(document.documentElement);
-  return { dur: parseFloat(style.getPropertyValue("--mb-dur")) || 0, slow: parseFloat(style.getPropertyValue("--mb-dur-slow")) || 0 };
+  const read = (name: string): number => parseFloat(style.getPropertyValue(name)) || 0;
+  // --mb-spring is the entering curve (a little overshoot in "full", plain ease-out in "subtle").
+  return { dur: read("--mb-dur"), slow: read("--mb-dur-slow"), fast: read("--mb-dur-fast"), shift: read("--mb-shift"), spring: style.getPropertyValue("--mb-spring").trim() || EASE };
 };
 const animationsOn = (): boolean => animDurations().dur > 0;
-const EASE = "cubic-bezier(.2,.7,.2,1)";
+
 let tabsRenderedOnce = false;
 /** Scrolls the tab strip (#tab-scroll: horizontal or vertical) so the whole active tab is visible, with a small margin. */
 const revealActiveTab = (smooth: boolean): void => {
@@ -623,245 +661,342 @@ const updateTabFade = (): void => {
   tabScroll.style.setProperty("--fade-end", hiddenAfter ? "28px" : "0px");
 };
 
-const knownTabIds = new Set<number>();
-const enterStarted = new Map<number, number>();
-const activeChanged = new Map<number, { wasActive: boolean; at: number }>();
-const previousActive = new Map<number, boolean>();
-type TabGhost = { el: HTMLElement; parent: HTMLElement; index: number; start: number; dur: number; vertical: boolean };
-const tabGhosts: TabGhost[] = [];
+/** Persistent tab buttons by tab id: the strip is reconciled in place (never rebuilt), so running animations and CSS transitions survive every state broadcast. */
+const tabButtons = new Map<number, HTMLElement>();
+/** Content signature of each button's children; the children are rebuilt only when it changes. */
+const tabSignatures = new Map<number, string>();
+/** Running FLIP (`translate`) animations of reordered tabs; replaced by the next reorder. */
+const flipAnimations = new Map<number, Animation[]>();
+/** Pending cleanup of the inline `--ind-origin` of the two tabs of the last active-tab change. */
+const indicatorTimers = new Map<number, number>();
+const tabGhosts = new Set<HTMLElement>();
 let lastRenderedWorkspaceId: string | null = null;
+let lastTabOrderKey = "";
+let lastRenderVertical = false;
+let lastActiveIndex = -1;
 
-const runGhost = (ghost: TabGhost): void => {
-  const elapsed = performance.now() - ghost.start;
-  if (elapsed >= ghost.dur) { ghost.el.remove(); tabGhosts.splice(tabGhosts.indexOf(ghost), 1); return; }
-  const shrink = ghost.vertical
-    ? { height: "0px", minHeight: "0px", paddingTop: "0px", paddingBottom: "0px", borderTopWidth: "0px", borderBottomWidth: "0px" }
+/** Style that collapses a tab to nothing along the strip axis (width in the horizontal strip and for pinned tiles, height in the sidebar list); the negative margin swallows the flex gap. */
+const collapsedTabStyle = (vertical: boolean): Keyframe =>
+  vertical
+    ? { height: "0px", minHeight: "0px", paddingTop: "0px", paddingBottom: "0px", borderTopWidth: "0px", borderBottomWidth: "0px", marginBottom: "-1px" }
     : { width: "0px", minWidth: "0px", flexBasis: "0px", paddingLeft: "0px", paddingRight: "0px", borderLeftWidth: "0px", borderRightWidth: "0px", marginRight: "-2px" };
-  const anim = ghost.el.animate([{ opacity: 0, ...shrink }], { duration: ghost.dur, delay: -elapsed, easing: EASE, fill: "forwards" });
-  anim.addEventListener("finish", () => { ghost.el.remove(); const i = tabGhosts.indexOf(ghost); if (i >= 0) tabGhosts.splice(i, 1); });
+
+/** A closed tab keeps its element and collapses in place; its collapse is stacked on a still running enter animation, so it continues from wherever that was. */
+const retireTabButton = (button: HTMLElement, dur: number): void => {
+  const vertical = isVertical() && !button.classList.contains("pinned");
+  button.classList.add("tab-ghost");
+  button.classList.remove("active");
+  button.removeAttribute("data-tab-id");
+  button.setAttribute("aria-hidden", "true");
+  button.style.cssText = "pointer-events:none;transition:none";
+  button.tabIndex = -1;
+  button.draggable = false;
+  if (document.activeElement && button.contains(document.activeElement)) (document.activeElement as HTMLElement).blur();
+  tabGhosts.add(button);
+  const done = (): void => { button.remove(); tabGhosts.delete(button); };
+  button.animate([{ opacity: 0, ...collapsedTabStyle(vertical) }], { duration: dur, easing: EASE, fill: "forwards" }).addEventListener("finish", done);
 };
 
+const createTabButton = (id: number): HTMLElement => {
+  const button = document.createElement("button");
+  button.className = "tab-btn";
+  button.dataset.tabId = String(id);
+  button.type = "button";
+  button.draggable = true;
+  button.addEventListener("click", async () => {
+    await window.browserApi.switchTab(id);
+  });
+  button.addEventListener("mousedown", (event) => {
+    if (event.button === 1) event.preventDefault();
+  });
+  button.addEventListener("auxclick", async (event) => {
+    if (event.button !== 1) return;
+    event.preventDefault();
+    event.stopPropagation();
+    await window.browserApi.closeTab(id);
+  });
+  button.addEventListener("dragstart", (event) => {
+    draggedTabId = id;
+    lastTabDropTarget = null;
+    tabDropDone = false;
+    window.browserApi.notifyTabDrag(id);
+    event.dataTransfer?.setData("text/plain", String(id));
+    if (event.dataTransfer) event.dataTransfer.effectAllowed = "move";
+    requestAnimationFrame(() => {
+      // A very short drag can end before this frame: then dragend has already run and the class must not stick.
+      if (draggedTabId !== id || tabDropDone) return;
+      button.classList.add("dragging");
+      document.body.classList.add("tab-dragging");
+    });
+  });
+  button.addEventListener("dragend", (event) => {
+    // No `drop` arrived (e.g. the pointer ended over a window drag region, or only one dragover fired): finish the
+    // move from where the drag ended, else from the last drop target seen.
+    if (!tabDropDone && draggedTabId === id) {
+      const endPoint = trustedDragEndPoint(event);
+      commitTabDrop((endPoint ? resolveTabDropAt(endPoint) : null) ?? lastTabDropTarget);
+    }
+    document.body.classList.remove("tab-dragging");
+    lastTabDropTarget = null;
+    tabDropDone = false;
+    draggedTabId = null;
+    clearTabDropMarks();
+    window.browserApi.notifyTabDrag(null);
+    if (renderDeferredByDrag) {
+      renderDeferredByDrag = false;
+      scheduleRender();
+    }
+    button.classList.remove("dragging");
+  });
+  button.addEventListener("contextmenu", async (event) => {
+    event.preventDefault();
+    await window.browserApi.openTabContextMenu(id, {
+      x: Math.round(event.clientX),
+      y: Math.round(event.clientY),
+    });
+  });
+  return button;
+};
+
+/** Everything inside a tab button except its state classes (spinner, icon, letter, status icons, audio badge, title, close). */
+const fillTabButton = (button: HTMLElement, tab: TabState, copy: (typeof translations)[AppLanguage], now: number): void => {
+  // The spinner starts at the global phase, so a rebuilt one continues instead of restarting.
+  const spinner = document.createElement("span");
+  spinner.className = "tab-loading";
+  spinner.style.animationDelay = `-${Math.round(now % 700)}ms`;
+
+  const status = document.createElement("span");
+  status.className = "tab-status";
+  if (tab.isPrivate) {
+    status.innerHTML += `<svg viewBox="0 0 16 16" aria-hidden="true"><path d="M1 7h14v1.5H1V7Zm2.5-3.5L5 2h6l1.5 1.5L13 7H3l.5-3.5ZM4.5 14a2 2 0 1 1 0-4 2 2 0 0 1 2 2c0 .5.5.75 1.5.75s1.5-.25 1.5-.75a2 2 0 1 1 2 2 2 2 0 0 1-2-1.5 5 5 0 0 0-3 0A2 2 0 0 1 4.5 14Z"/></svg>`;
+  }
+  if (tab.isSleeping) {
+    status.innerHTML += `<svg viewBox="0 0 24 24" aria-hidden="true"><path d="M21 12.79A9 9 0 1 1 11.21 3 7 7 0 0 0 21 12.79Z"/></svg>`;
+  }
+  if (tab.keepAwake) {
+    // "Never sleep": a small lightning bolt.
+    status.innerHTML += `<svg viewBox="0 0 16 16" aria-hidden="true"><path d="M9.5 1.5 3.5 9h4l-1 5.5 6-7.5h-4l1-5.5Z"/></svg>`;
+  }
+  if (tab.isPinned) {
+    status.innerHTML += `<svg viewBox="0 0 16 16" aria-hidden="true"><path d="M5 2.5h6l-1 3 2 2v1H8.75v4.75L8 14l-.75-.75V8.5H4v-1l2-2-1-3Z"/></svg>`;
+  }
+  // Speaker icon: audio playing or tab muted; a click toggles mute.
+  let audio: HTMLSpanElement | null = null;
+  if (tab.isAudible || tab.isMuted) {
+    audio = document.createElement("span");
+    audio.className = "tab-audio";
+    audio.setAttribute("role", "button");
+    audio.title = tab.isMuted ? copy.unmuteTab : copy.muteTab;
+    audio.setAttribute("aria-label", audio.title);
+    audio.innerHTML = tab.isMuted
+      ? `<svg viewBox="0 0 16 16" aria-hidden="true"><path d="M2 6h2l3-2.5v9L4 10H2V6Zm7.2-.8 1.3 1.3 1.3-1.3 1 1-1.3 1.3 1.3 1.3-1 1-1.3-1.3L9.2 9l-1-1 1.3-1.3-1.3-1.3 1-1Z"/></svg>`
+      : `<svg viewBox="0 0 16 16" aria-hidden="true"><path d="M2 6h2l3-2.5v9L4 10H2V6Zm8.1-.4a3.4 3.4 0 0 1 0 4.8l-.9-.9a2.1 2.1 0 0 0 0-3l.9-.9Zm2-2a6.2 6.2 0 0 1 0 8.8l-.9-.9a4.9 4.9 0 0 0 0-7l.9-.9Z"/></svg>`;
+    const toggleMute = (event: Event): void => {
+      event.stopPropagation();
+      event.preventDefault();
+      void window.browserApi.toggleTabMute(tab.id);
+    };
+    audio.addEventListener("click", toggleMute);
+    audio.addEventListener("mousedown", (event) => event.stopPropagation());
+    audio.addEventListener("dblclick", (event) => event.stopPropagation());
+  }
+
+  let favicon: HTMLImageElement | SVGElement | null = null;
+  let noIcon = false;
+  const internalIcon = tab.favicon?.startsWith(INTERNAL_ICON_PREFIX)
+    ? createInternalTabIcon(tab.favicon.slice(INTERNAL_ICON_PREFIX.length))
+    : (!tab.favicon && tab.url === DEFAULT_URL ? createInternalTabIcon("new-tab") : null);
+  if (internalIcon) {
+    favicon = internalIcon;
+  } else if (tab.favicon && !tab.favicon.startsWith(INTERNAL_ICON_PREFIX)) {
+    const image = document.createElement("img");
+    image.className = "tab-favicon";
+    image.alt = "";
+    image.draggable = false;
+    image.src = tab.favicon;
+    image.addEventListener("error", () => {
+      image.remove();
+      button.classList.add("no-icon");
+    });
+    favicon = image;
+  } else {
+    noIcon = true;
+  }
+  button.classList.toggle("no-icon", noIcon);
+
+  const title = document.createElement("span");
+  title.className = "tab-title";
+  title.textContent = !tab.title || tab.title === "New Tab" || tab.title === "Nowa karta"
+    ? copy.newTab
+    : tab.title;
+
+  // Icon-only modes (pinned, collapsed sidebar) show the first letter when there is no favicon.
+  const letter = document.createElement("span");
+  letter.className = "tab-letter";
+  letter.textContent = tileLetterFor(tab.url, title.textContent || "");
+
+  const close = document.createElement("button");
+  close.className = "close-tab";
+  close.type = "button";
+  close.title = copy.closeTab;
+  close.innerHTML = `<svg viewBox="0 0 16 16" width="10" height="10" fill="currentColor"><path d="M3.72 3.72a.75.75 0 0 1 1.06 0L8 6.94l3.22-3.22a.75.75 0 1 1 1.06 1.06L9.06 8l3.22 3.22a.75.75 0 1 1-1.06 1.06L8 9.06l-3.22 3.22a.75.75 0 0 1-1.06-1.06L6.94 8 3.72 4.78a.75.75 0 0 1 0-1.06Z"/></svg>`;
+  close.addEventListener("click", async (event) => {
+    event.stopPropagation();
+    await window.browserApi.closeTab(tab.id);
+  });
+
+  button.replaceChildren(spinner, ...(favicon ? [favicon] : []), letter, status, ...(audio ? [audio] : []), title, close);
+};
+
+/** Moves `wanted` into `container` in order, touching only the elements that are out of place (closing tabs stay where they are). */
+const placeTabButtons = (container: HTMLElement, wanted: HTMLElement[]): void => {
+  let ref: ChildNode | null = container.firstChild;
+  for (const element of wanted) {
+    while (ref && !(ref instanceof HTMLElement && ref.classList.contains("tab-btn") && !ref.classList.contains("tab-ghost"))) ref = ref.nextSibling;
+    if (ref === element) { ref = ref.nextSibling; continue; }
+    container.insertBefore(element, ref);
+  }
+};
+
+/**
+ * The strip is reconciled, not rebuilt: a button lives as long as its tab, so enter/close animations, the FLIP glide,
+ * the active-tab indicator transition, the spinner and the loading sweep all keep running across state broadcasts.
+ */
 const renderTabs = (): void => {
   if (draggedTabId !== null) {
     renderDeferredByDrag = true;
     return;
   }
-  const { dur } = animDurations();
+  const { dur, slow, shift, spring } = animDurations();
+  const vertical = isVertical();
   // A Space switch swaps the whole strip at once: no enter/leave animations for that render.
   const workspaceSwitched = lastRenderedWorkspaceId !== null && lastRenderedWorkspaceId !== state.currentWorkspaceId;
   lastRenderedWorkspaceId = state.currentWorkspaceId;
-  if (workspaceSwitched) {
-    for (const ghost of tabGhosts) { ghost.el.getAnimations().forEach((a) => a.cancel()); ghost.el.remove(); }
-    tabGhosts.length = 0;
-    enterStarted.clear();
-    state.tabs.forEach((tab) => knownTabIds.add(tab.id));
-  }
-  const animate = dur > 0 && !workspaceSwitched;
+  const animate = dur > 0 && !workspaceSwitched && tabsRenderedOnce;
   const now = performance.now();
-  // Snapshot the old strip: removed tabs become collapsing ghosts at their old position.
-  const oldButtons = new Map<number, { el: HTMLElement; parent: HTMLElement; index: number }>();
-  if (animate && tabsRenderedOnce) {
-    for (const parent of [tabsContainer, pinnedContainer]) {
-      Array.from(parent.children).forEach((el, index) => {
-        const id = Number((el as HTMLElement).dataset.tabId);
-        if (Number.isFinite(id) && !(el as HTMLElement).classList.contains("tab-ghost")) oldButtons.set(id, { el: el as HTMLElement, parent, index });
-      });
-    }
-  }
-  for (const ghost of tabGhosts) ghost.el.getAnimations().forEach((a) => a.cancel());
-  tabsContainer.innerHTML = "";
-  pinnedContainer.innerHTML = "";
-  document.body.classList.toggle("has-pinned", isVertical() && state.tabs.some((tab) => tab.isPinned));
   const copy = translations[state.language];
+  if (!tabsRenderedOnce) { tabsContainer.textContent = ""; pinnedContainer.textContent = ""; }
 
-  state.tabs.forEach((tab) => {
+  // Reorder / pin / unpin: the same tabs in a new order or group. The old positions are read first, the new ones after
+  // all changes (one layout each), and every moved tab glides from the former to the latter (FLIP). This also works
+  // while other tabs enter or leave: both reads include the running animations.
+  const orderKey = state.tabs.map((tab) => `${tab.id}${tab.isPinned ? "p" : ""}`).join(",");
+  const sameTabs = state.tabs.length === tabButtons.size && state.tabs.every((tab) => tabButtons.has(tab.id));
+  let flipFrom: Map<number, DOMRect> | null = null;
+  if (animate && sameTabs && orderKey !== lastTabOrderKey && vertical === lastRenderVertical) {
+    flipFrom = new Map();
+    for (const [id, button] of tabButtons) flipFrom.set(id, button.getBoundingClientRect());
+    for (const anims of flipAnimations.values()) anims.forEach((anim) => anim.cancel());
+    flipAnimations.clear();
+  }
+  lastTabOrderKey = orderKey;
+  lastRenderVertical = vertical;
+  const activeIndex = state.tabs.findIndex((tab) => tab.id === state.activeTabId);
+  const forward = activeIndex >= lastActiveIndex;
+  lastActiveIndex = activeIndex;
+
+  // Closed tabs: collapse in place (or vanish at once without animations / on a Space switch).
+  const present = new Set(state.tabs.map((tab) => tab.id));
+  for (const [id, button] of [...tabButtons]) {
+    if (present.has(id)) continue;
+    tabButtons.delete(id);
+    tabSignatures.delete(id);
+    window.clearTimeout(indicatorTimers.get(id));
+    indicatorTimers.delete(id);
+    flipAnimations.get(id)?.forEach((anim) => anim.cancel());
+    flipAnimations.delete(id);
+    if (animate) retireTabButton(button, dur);
+    else button.remove();
+  }
+  if (workspaceSwitched) {
+    for (const ghost of tabGhosts) { ghost.getAnimations().forEach((anim) => anim.cancel()); ghost.remove(); }
+    tabGhosts.clear();
+  }
+  document.body.classList.toggle("has-pinned", vertical && state.tabs.some((tab) => tab.isPinned));
+
+  const wanted = { list: [] as HTMLElement[], pinned: [] as HTMLElement[] };
+  const entering: { button: HTMLElement; sideways: boolean }[] = [];
+  const resized: { button: HTMLElement; width: number }[] = [];
+  state.tabs.forEach((tab, tabIndex) => {
     const isActive = tab.id === state.activeTabId;
-    const button = document.createElement("button");
-    button.dataset.tabId = String(tab.id);
-    // A tab whose active state just changed is built in its old look and flips next frame, so the CSS transition plays.
-    if (animate && previousActive.has(tab.id) && previousActive.get(tab.id) !== isActive) activeChanged.set(tab.id, { wasActive: !isActive, at: now });
-    const pendingFlip = animate ? activeChanged.get(tab.id) : undefined;
-    const shownActive = pendingFlip && now - pendingFlip.at < dur ? pendingFlip.wasActive : isActive;
+    let button = tabButtons.get(tab.id);
+    const isNew = !button;
+    if (!button) {
+      button = createTabButton(tab.id);
+      tabButtons.set(tab.id, button);
+      if (animate) entering.push({ button, sideways: vertical && !tab.isPinned });
+    }
+    const classes = button.classList;
     // Split view: members are marked; the pair is joined when the tabs are adjacent in the bar.
-    const tabIndex = state.tabs.indexOf(tab);
     const inSplit = tab.splitGroupId !== undefined && tab.splitGroupId !== null;
     const joinsNext = inSplit && state.tabs[tabIndex + 1]?.splitGroupId === tab.splitGroupId;
     const joinsPrev = inSplit && state.tabs[tabIndex - 1]?.splitGroupId === tab.splitGroupId;
-    button.className = `tab-btn${inSplit ? " split-member" : ""}${joinsNext ? " split-join-next" : ""}${joinsPrev ? " split-join-prev" : ""}${shownActive ? " active" : ""}${tab.isLoading ? " loading" : ""}${tab.isPinned ? " pinned" : ""}${tab.isMuted ? " muted" : ""}${tab.isSleeping ? " sleeping" : ""}${tab.isPrivate ? " private" : ""}`;
-    button.type = "button";
-    button.title = tab.isSleeping
-      ? `${tab.title || tab.url} — ${copy.sleeping}`
-      : (tab.title || tab.url);
-    if (tab.isPrivate) {
-      button.title = `${button.title} — ${copy.privateTab}`;
+    const wasActive = classes.contains("active");
+    const wasLoading = classes.contains("loading");
+    const pinChanged = !isNew && classes.contains("pinned") !== Boolean(tab.isPinned);
+    if (animate && !isNew && wasActive !== isActive) {
+      // The active indicator (a CSS transition on the persistent button) grows/shrinks towards the side of the tab it is travelling to or from.
+      const fromStart = forward === isActive; // growing: enters from the start side when moving forward; shrinking: leaves towards the end
+      const origin = vertical && !tab.isPinned ? (fromStart ? "center top" : "center bottom") : (fromStart ? "left center" : "right center");
+      button.style.setProperty("--ind-origin", origin);
+      window.clearTimeout(indicatorTimers.get(tab.id));
+      const target = button;
+      indicatorTimers.set(tab.id, window.setTimeout(() => { target.style.removeProperty("--ind-origin"); indicatorTimers.delete(tab.id); }, dur + 60));
     }
-
-    // Loading spinner
-    const spinner = document.createElement("span");
-    spinner.className = "tab-loading";
-
-    const status = document.createElement("span");
-    status.className = "tab-status";
-    if (tab.isPrivate) {
-      status.innerHTML += `<svg viewBox="0 0 16 16" aria-hidden="true"><path d="M1 7h14v1.5H1V7Zm2.5-3.5L5 2h6l1.5 1.5L13 7H3l.5-3.5ZM4.5 14a2 2 0 1 1 0-4 2 2 0 0 1 2 2c0 .5.5.75 1.5.75s1.5-.25 1.5-.75a2 2 0 1 1 2 2 2 2 0 0 1-2-1.5 5 5 0 0 0-3 0A2 2 0 0 1 4.5 14Z"/></svg>`;
+    classes.toggle("split-member", inSplit);
+    classes.toggle("split-join-next", joinsNext);
+    classes.toggle("split-join-prev", joinsPrev);
+    classes.toggle("active", isActive);
+    classes.toggle("loading", Boolean(tab.isLoading));
+    classes.toggle("pinned", Boolean(tab.isPinned));
+    classes.toggle("muted", Boolean(tab.isMuted));
+    classes.toggle("sleeping", Boolean(tab.isSleeping));
+    classes.toggle("private", Boolean(tab.isPrivate));
+    // The loading sweep starts at the global phase, so it stays in step with the spinners.
+    if (tab.isLoading && !wasLoading) button.style.setProperty("--pw", `-${Math.round(now % 1200)}ms`);
+    if (pinChanged && !vertical && flipFrom) resized.push({ button, width: flipFrom.get(tab.id)?.width ?? 0 });
+    const title = tab.isSleeping ? `${tab.title || tab.url} — ${copy.sleeping}` : (tab.title || tab.url);
+    const fullTitle = tab.isPrivate ? `${title} — ${copy.privateTab}` : title;
+    if (button.title !== fullTitle) button.title = fullTitle;
+    const signature = [state.language, tab.title, tab.url, tab.favicon ?? "", tab.isPrivate, tab.isSleeping, tab.keepAwake, tab.isPinned, tab.isAudible, tab.isMuted].join("\u0001");
+    if (tabSignatures.get(tab.id) !== signature) {
+      tabSignatures.set(tab.id, signature);
+      fillTabButton(button, tab, copy, now);
     }
-    if (tab.isSleeping) {
-      status.innerHTML += `<svg viewBox="0 0 24 24" aria-hidden="true"><path d="M21 12.79A9 9 0 1 1 11.21 3 7 7 0 0 0 21 12.79Z"/></svg>`;
-    }
-    if (tab.keepAwake) {
-      // "Never sleep": a small lightning bolt.
-      status.innerHTML += `<svg viewBox="0 0 16 16" aria-hidden="true"><path d="M9.5 1.5 3.5 9h4l-1 5.5 6-7.5h-4l1-5.5Z"/></svg>`;
-    }
-    if (tab.isPinned) {
-      status.innerHTML += `<svg viewBox="0 0 16 16" aria-hidden="true"><path d="M5 2.5h6l-1 3 2 2v1H8.75v4.75L8 14l-.75-.75V8.5H4v-1l2-2-1-3Z"/></svg>`;
-    }
-    // Speaker icon: audio playing or tab muted; a click toggles mute.
-    let audio: HTMLSpanElement | null = null;
-    if (tab.isAudible || tab.isMuted) {
-      audio = document.createElement("span");
-      audio.className = "tab-audio";
-      audio.setAttribute("role", "button");
-      audio.title = tab.isMuted ? copy.unmuteTab : copy.muteTab;
-      audio.setAttribute("aria-label", audio.title);
-      audio.innerHTML = tab.isMuted
-        ? `<svg viewBox="0 0 16 16" aria-hidden="true"><path d="M2 6h2l3-2.5v9L4 10H2V6Zm7.2-.8 1.3 1.3 1.3-1.3 1 1-1.3 1.3 1.3 1.3-1 1-1.3-1.3L9.2 9l-1-1 1.3-1.3-1.3-1.3 1-1Z"/></svg>`
-        : `<svg viewBox="0 0 16 16" aria-hidden="true"><path d="M2 6h2l3-2.5v9L4 10H2V6Zm8.1-.4a3.4 3.4 0 0 1 0 4.8l-.9-.9a2.1 2.1 0 0 0 0-3l.9-.9Zm2-2a6.2 6.2 0 0 1 0 8.8l-.9-.9a4.9 4.9 0 0 0 0-7l.9-.9Z"/></svg>`;
-      const toggleMute = (event: Event): void => {
-        event.stopPropagation();
-        event.preventDefault();
-        void window.browserApi.toggleTabMute(tab.id);
-      };
-      audio.addEventListener("click", toggleMute);
-      audio.addEventListener("mousedown", (event) => event.stopPropagation());
-      audio.addEventListener("dblclick", (event) => event.stopPropagation());
-    }
-
-    let favicon: HTMLImageElement | SVGElement | null = null;
-    const internalIcon = tab.favicon?.startsWith(INTERNAL_ICON_PREFIX)
-      ? createInternalTabIcon(tab.favicon.slice(INTERNAL_ICON_PREFIX.length))
-      : (!tab.favicon && tab.url === DEFAULT_URL ? createInternalTabIcon("new-tab") : null);
-    if (internalIcon) {
-      favicon = internalIcon;
-    } else if (tab.favicon && !tab.favicon.startsWith(INTERNAL_ICON_PREFIX)) {
-      favicon = document.createElement("img");
-      favicon.className = "tab-favicon";
-      favicon.alt = "";
-      favicon.draggable = false;
-      favicon.src = tab.favicon;
-      const imageFavicon = favicon;
-      favicon.addEventListener("error", () => {
-        imageFavicon.remove();
-        button.classList.add("no-icon");
-      });
-    } else {
-      button.classList.add("no-icon");
-    }
-
-    const title = document.createElement("span");
-    title.className = "tab-title";
-    title.textContent = !tab.title || tab.title === "New Tab" || tab.title === "Nowa karta"
-      ? copy.newTab
-      : tab.title;
-
-    // Icon-only modes (pinned, collapsed sidebar) show the first letter when there is no favicon.
-    const letter = document.createElement("span");
-    letter.className = "tab-letter";
-    letter.textContent = tileLetterFor(tab.url, title.textContent || "");
-
-    const close = document.createElement("button");
-    close.className = "close-tab";
-    close.type = "button";
-    close.title = copy.closeTab;
-    close.innerHTML = `<svg viewBox="0 0 16 16" width="10" height="10" fill="currentColor"><path d="M3.72 3.72a.75.75 0 0 1 1.06 0L8 6.94l3.22-3.22a.75.75 0 1 1 1.06 1.06L9.06 8l3.22 3.22a.75.75 0 1 1-1.06 1.06L8 9.06l-3.22 3.22a.75.75 0 0 1-1.06-1.06L6.94 8 3.72 4.78a.75.75 0 0 1 0-1.06Z"/></svg>`;
-
-    close.addEventListener("click", async (event) => {
-      event.stopPropagation();
-      await window.browserApi.closeTab(tab.id);
-    });
-
-    button.addEventListener("click", async () => {
-      await window.browserApi.switchTab(tab.id);
-    });
-    button.addEventListener("mousedown", (event) => {
-      if (event.button === 1) event.preventDefault();
-    });
-    button.addEventListener("auxclick", async (event) => {
-      if (event.button !== 1) return;
-      event.preventDefault();
-      event.stopPropagation();
-      await window.browserApi.closeTab(tab.id);
-    });
-
-    button.draggable = true;
-    button.addEventListener("dragstart", (event) => {
-      draggedTabId = tab.id;
-      lastTabDropTarget = null;
-      tabDropDone = false;
-      window.browserApi.notifyTabDrag(tab.id);
-      event.dataTransfer?.setData("text/plain", String(tab.id));
-      if (event.dataTransfer) event.dataTransfer.effectAllowed = "move";
-      requestAnimationFrame(() => button.classList.add("dragging"));
-    });
-    button.addEventListener("dragend", () => {
-      // No `drop` arrived (e.g. only one dragover fired): finish the move from the last pointer position seen.
-      if (!tabDropDone && draggedTabId === tab.id) commitTabDrop(lastTabDropTarget);
-      lastTabDropTarget = null;
-      tabDropDone = false;
-      draggedTabId = null;
-      clearTabDropMarks();
-      window.browserApi.notifyTabDrag(null);
-      if (renderDeferredByDrag) {
-        renderDeferredByDrag = false;
-        scheduleRender();
-      }
-      button.classList.remove("dragging");
-    });
-
-    button.addEventListener("contextmenu", async (event) => {
-      event.preventDefault();
-      await window.browserApi.openTabContextMenu(tab.id, {
-        x: Math.round(event.clientX),
-        y: Math.round(event.clientY),
-      });
-    });
-
-    button.append(spinner, ...(favicon ? [favicon] : []), letter, status, ...(audio ? [audio] : []), title, close);
-    (isVertical() && tab.isPinned ? pinnedContainer : tabsContainer).append(button);
-    if (shownActive !== isActive) {
-      requestAnimationFrame(() => requestAnimationFrame(() => button.classList.toggle("active", isActive)));
-    }
-    if (animate && tabsRenderedOnce && !knownTabIds.has(tab.id)) enterStarted.set(tab.id, now);
-    const enteredAt = enterStarted.get(tab.id);
-    if (animate && enteredAt !== undefined) {
-      const elapsed = now - enteredAt;
-      if (elapsed < dur) {
-        const from = isVertical() && !tab.isPinned ? (isSidebarRight() ? "translateX(8px)" : "translateX(-8px)") : "translateY(-4px) scale(.96)";
-        button.animate([{ opacity: 0, transform: from }, { opacity: 1, transform: "none" }], { duration: dur, delay: -elapsed, easing: EASE, fill: "backwards" });
-      } else {
-        enterStarted.delete(tab.id);
-      }
-    }
+    (vertical && tab.isPinned ? wanted.pinned : wanted.list).push(button);
   });
+  placeTabButtons(pinnedContainer, wanted.pinned);
+  placeTabButtons(tabsContainer, wanted.list);
 
-  // Removed tabs collapse in place (only in the first render after the removal and while their animation runs).
-  const present = new Set(state.tabs.map((tab) => tab.id));
-  oldButtons.forEach(({ el, parent, index }, id) => {
-    if (present.has(id)) return;
-    const ghost = el.cloneNode(true) as HTMLElement;
-    ghost.classList.add("tab-ghost");
-    ghost.classList.remove("active");
-    ghost.removeAttribute("data-tab-id");
-    ghost.setAttribute("aria-hidden", "true");
-    ghost.tabIndex = -1;
-    ghost.style.cssText = "overflow:hidden;pointer-events:none";
-    tabGhosts.push({ el: ghost, parent, index, start: now, dur, vertical: isVertical() && !el.classList.contains("pinned") });
-  });
-  for (const ghost of [...tabGhosts].sort((a, b) => a.index - b.index)) {
-    ghost.parent.insertBefore(ghost.el, ghost.parent.children[ghost.index] ?? null);
-    runGhost(ghost);
+  // A new tab grows into its slot (width in the strip, height in the sidebar) while it fades/slides in.
+  for (const { button, sideways } of entering) {
+    const from = sideways ? `translateX(${isSidebarRight() ? shift : -shift}px)` : "translateY(-4px) scale(.96)";
+    button.animate([{ opacity: 0, transform: from }, { opacity: 1, transform: "none" }], { duration: dur, easing: spring, fill: "backwards" });
+    button.animate([{ ...collapsedTabStyle(sideways), offset: 0 }], { duration: slow, easing: EASE, fill: "backwards" });
   }
-  state.tabs.forEach((tab) => { knownTabIds.add(tab.id); previousActive.set(tab.id, tab.id === state.activeTabId); });
-  for (const id of [...knownTabIds]) if (!present.has(id)) { knownTabIds.delete(id); previousActive.delete(id); enterStarted.delete(id); activeChanged.delete(id); }
+  // Pinning / unpinning in the strip: the tile animates its width from the old size (neighbours follow through the layout).
+  for (const { button, width } of resized) {
+    if (width <= 0) continue;
+    button.animate([{ width: `${width}px`, minWidth: `${width}px`, flexBasis: `${width}px`, offset: 0 }], { duration: slow, easing: EASE });
+  }
+
+  // Reordered tabs glide from their old slot to the new one. All reads first, then all writes.
+  if (flipFrom) {
+    const moves: { id: number; button: HTMLElement; dx: number; dy: number }[] = [];
+    for (const [id, button] of tabButtons) {
+      const before = flipFrom.get(id);
+      if (!before) continue;
+      const after = button.getBoundingClientRect();
+      const dx = before.left - after.left;
+      const dy = before.top - after.top;
+      if (Math.abs(dx) > 0.5 || Math.abs(dy) > 0.5) moves.push({ id, button, dx, dy });
+    }
+    for (const { id, button, dx, dy } of moves) {
+      const anim = button.animate([{ translate: `${dx}px ${dy}px` }, { translate: "0px 0px" }], { duration: slow, easing: EASE });
+      flipAnimations.set(id, [anim]);
+      anim.addEventListener("finish", () => { if (flipAnimations.get(id)?.[0] === anim) flipAnimations.delete(id); });
+    }
+  }
   tabsRenderedOnce = true;
 };
 
@@ -1380,6 +1515,9 @@ const wireEvents = (): void => {
   });
 
   // Focus moved into a page (WebContentsView): the field gets no blur of its own, so drop focus and selection here.
+  // An overlay view (menu, prompt, palette, notes...) is open above the window: the shell stops being a window drag region
+  // (Windows reports drag regions as the title bar even under child views; see body.overlay-open in index.html).
+  window.browserApi.onOverlayOpen((open) => document.body.classList.toggle("overlay-open", open));
   window.browserApi.onBlurAddress(() => {
     if (document.activeElement === addressInput) addressInput.blur();
     addressInput.setSelectionRange(0, 0);

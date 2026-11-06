@@ -6,7 +6,7 @@ import {
 import { findHighlightCss, UI_BASE_END_CSS, UI_BASE_START_CSS } from "./ui-base-css.js";
 import { INTERACTION_VARS_CSS } from "./interaction-css.js";
 import { normalizeSettingsTab, type SettingsTab } from "./settings-tabs.js";
-import { app, BrowserWindow, clipboard, dialog, ipcMain, nativeTheme, screen, systemPreferences, session, Menu, webContents, shell, WebContentsView, MenuItemConstructorOptions } from "electron";
+import { app, BrowserWindow, clipboard, dialog, ipcMain, nativeTheme, screen, systemPreferences, session, Menu, webContents, shell, View, WebContentsView, MenuItemConstructorOptions } from "electron";
 import type { DownloadItem, IpcMainEvent, IpcMainInvokeEvent, WebContents } from "electron";
 import crypto from "node:crypto";
 import fsSync from "node:fs";
@@ -18,8 +18,9 @@ import {
   privatePartitionFor, removeInstalledExtension, setExtensionAllowedInPrivate, setExtensionEnabled, startExtensions,
   getExtensionMenuItems, getExtensionToolbarInfo, setExtensionPinned,
 } from "./extensions.js";
-import { closeInWindowPopupFromOutside, closeInWindowPopup } from "./extension-popup.js";
-import { isExtensionId, type ExtensionToolbarInfo } from "./extension-toolbar.js";
+import { closeInWindowPopupFromOutside, closeInWindowPopup, setInWindowPopupListener } from "./extension-popup.js";
+import { createOverlayTracker } from "./shell-overlay.js";
+import { extensionRunBlock, isExtensionId, type ExtensionToolbarInfo } from "./extension-toolbar.js";
 import { renderExtensionsPageHtml } from "./extensions-page.js";
 import { ElectronBlocker, fullLists } from "@ghostery/adblocker-electron";
 import { autoUpdater, CancellationToken } from "electron-updater";
@@ -41,7 +42,7 @@ import { createSplitFrame, type SplitFrame, type SplitFrameState } from "./split
 import { computeSplitLayout, ratioFromPointer, type Rect as SplitRect, type SplitSide } from "./split-layout.js";
 import { createSplitRegistry, type SplitGroup } from "./split-state.js";
 import { computeEmulation, createPreviewRegistry, DEFAULT_PREVIEW_WIDTH, DEVICE_PRESETS, emulationKey, isMobileWidth, toMobileUserAgent, type EmulationParams } from "./responsive-preview.js";
-import { compactViewportTop, titleBarOverlayFor, usesNativeControlsOverlay, windowControlsRect } from "./titlebar.js";
+import { CONTROLS_POLL_MS, WINDOW_CONTROLS_FALLBACK_WIDTH, autoHidesControls, compactViewportTop, controlsFrameIndex, clipLeftOfControls, controlsFrameRect, keepBelowControls, minViewportTop, nextControlsReveal, pointInControlsZone, resolveTitleBarOverlay, sanitizeControlsWidth, usesNativeControlsOverlay, windowControlsRect, type ControlsRevealState } from "./titlebar.js";
 import { computePopupGeometry, resizePopupBounds, type PopupPlacement, type PopupRect } from "./popup-placement.js";
 import { buildStoredSplits, matchStoredSplits, normalizeStoredSplits } from "./split-session.js";
 import { buildSessionData, normalizeSessionData, pushClosedTab, type ClosedTab, type SessionData } from "./session-store.js";
@@ -54,7 +55,7 @@ import {
   renderWorkspaceDeleteHtml, renderWorkspaceEditorHtml, renderWorkspaceMenuHtml, renderWorkspaceSwitcherHtml,
   type PopupContext as WorkspacePopupContext,
 } from "./workspace-popups.js";
-import { DEFAULT_ANIMATION_SETTINGS, areAnimationsEffective, normalizeAnimationSettings, resolveAnimationsEffective, setAnimationsEffective, type AnimationSettings } from "./animation-settings.js";
+import { DEFAULT_ANIMATION_SETTINGS, areAnimationsEffective, normalizeAnimationSettings, overlayFadeOutMs, resolveAnimationsEffective, setAnimationsEffective, type AnimationSettings } from "./animation-settings.js";
 import { DEFAULT_STARTUP_SETTINGS, normalizeStartupSettings, type StartupSettings } from "./startup-settings.js";
 import { clampZoom, normalizeZoomStore, stepZoom, withZoomEntry, zoomOriginKey, type ZoomStore } from "./zoom-utils.js";
 import { resolveDropTargets } from "./drop-utils.js";
@@ -1142,6 +1143,11 @@ const renderStartPageHtml = (): string => {
     h1 { max-width:640px; margin:0 0 34px; font-family:"Bebas Neue",Impact,sans-serif; font-size:clamp(54px,7vw,96px); font-weight:400; line-height:.9; letter-spacing:1px; text-transform:uppercase; }
     form { display:grid; grid-template-columns:minmax(0,1fr) auto; border:2px solid var(--sp-box-text); background:var(--sp-field-bg); transition:transform var(--mb-dur,150ms), box-shadow var(--mb-dur,150ms); }
     form:focus-within { transform:translate(-4px,-4px); box-shadow:6px 6px 0 var(--accent); }
+    /* Entrance: the blocks rise one after another (mb-rise comes from the shared animation CSS; backwards fill keeps hover transforms working). */
+    .brand { animation:mb-rise var(--mb-dur-slow,320ms) var(--mb-ease,ease) backwards; }
+    .version { animation:mb-fade-in var(--mb-dur-slow,320ms) var(--mb-ease,ease) calc(var(--mb-stagger,0ms) * 3) backwards; }
+    .search-panel h1 { animation:mb-rise var(--mb-dur-slow,320ms) var(--mb-ease,ease) var(--mb-stagger,0ms) backwards; }
+    .search-panel form { animation:mb-rise var(--mb-dur-slow,320ms) var(--mb-ease,ease) calc(var(--mb-stagger,0ms) * 2) backwards; }
     input { min-width:0; height:62px; padding:0 18px; border:0; outline:0; background:transparent; color:var(--sp-box-text); font:14px ui-monospace,"Cascadia Mono","Courier New",monospace; }
     input::placeholder { color:var(--mb-muted); opacity:1; }
     button { min-width:132px; height:62px; padding:0 22px; border:0; border-left:2px solid var(--sp-box-text); background:var(--sp-box-text); color:var(--mb-bg); font:700 10px ui-monospace,"Cascadia Mono","Courier New",monospace; letter-spacing:.22em; text-transform:uppercase; cursor:pointer; }
@@ -1480,6 +1486,7 @@ const broadcastTabsState = (): void => {
       mainWindow.webContents.send("tabs:state", payload);
     }
     compactChrome?.getContents()?.send("tabs:state", payload);
+    shellOverlay.refresh();
     // Nakładki nie wyświetlają favikon – nie wysyłamy im dużych data URL.
     const lightPayload = {
       ...payload,
@@ -1630,16 +1637,38 @@ const loadLayoutSettings = async (): Promise<void> => {
 
 const setLayoutSettings = async (patch: unknown): Promise<LayoutSettings> => {
   layoutSettings = mergeLayoutSettings(layoutSettings, patch);
-  await writeJsonAtomically(layoutSettingsFilePath, layoutSettings);
-  compactChrome?.setEnabled(layoutSettings.compactMode);
+  // Windows can refuse the atomic rename (antivirus, a concurrent write): the in-memory state is already applied, so
+  // the shell and the open Settings page must still hear about it; the next successful save persists it.
+  try {
+    await writeJsonAtomically(layoutSettingsFilePath, layoutSettings);
+  } catch (error) {
+    console.warn("[layout] could not save the layout settings:", error);
+    showToast(appLanguage === "pl" ? "Nie udało się zapisać ustawień" : "Could not save the settings");
+  }
+  try {
+    compactChrome?.setEnabled(layoutSettings.compactMode);
+  } catch (error) {
+    console.warn("[layout] could not apply compact mode:", error);
+  }
+  // Notify the shell, the compact overlay and the Settings tab(s) (checkbox, layout radios) - also when the change
+  // came from the Ctrl+Shift+C shortcut or the toolbar button rather than from the Settings page itself.
+  broadcastLayoutSettings();
+  compactChrome?.refresh();
+  // Windows: the lowest page top depends on the layout (vertical: 0) and the controls' height too.
+  if (mainWindow && !mainWindow.isDestroyed()) {
+    applyEffectiveViewport();
+    relayoutViews();
+  }
+  return { ...layoutSettings };
+};
+
+const broadcastLayoutSettings = (): void => {
   const targets = [mainWindow?.webContents, compactChrome?.getContents(), ...getInternalTabs("settings").map((tab) => getTabContents(tab))];
   for (const target of targets) {
     if (target && !target.isDestroyed()) {
       target.send("layout:changed", { ...layoutSettings });
     }
   }
-  compactChrome?.refresh();
-  return { ...layoutSettings };
 };
 
 const toggleCompactMode = (): void => {
@@ -1649,7 +1678,7 @@ const toggleCompactMode = (): void => {
 const refreshAnimationsEffective = (): void => {
   let reduced = false;
   try { reduced = systemPreferences.getAnimationSettings().prefersReducedMotion; } catch { reduced = false; }
-  setAnimationsEffective(resolveAnimationsEffective(animationSettings, reduced, process.env.MB_NO_ANIM === "1"));
+  setAnimationsEffective(resolveAnimationsEffective(animationSettings, reduced, process.env.MB_NO_ANIM === "1"), animationSettings.level);
 };
 
 const loadAnimationSettings = async (): Promise<void> => {
@@ -2662,6 +2691,20 @@ const getDownloadStatePayload = (): DownloadStatePayload => ({
 
 let downloadProgressHideTimer: NodeJS.Timeout | null = null;
 
+// Windows: rect of the native window controls (measured width, real overlay height) in window content coordinates, or
+// null when they are not drawn. Popups avoid it; overlays hanging from the top of the page area move below it.
+const getControlsRect = (contentWidth?: number): Electron.Rectangle | null => {
+  if (!mainWindow || mainWindow.isDestroyed()) return null;
+  return windowControlsRect(
+    process.platform,
+    contentWidth ?? mainWindow.getContentSize()[0],
+    isCompactMode(),
+    mainWindow.isFullScreen(),
+    windowControlsWidth,
+    layoutSettings.tabBarLayout === "vertical",
+  );
+};
+
 const positionDownloadProgressView = (): void => {
   if (!mainWindow || mainWindow.isDestroyed() || !downloadProgressView || downloadProgressView.webContents.isDestroyed()) {
     return;
@@ -2679,12 +2722,33 @@ const positionDownloadProgressView = (): void => {
   });
 };
 
+const isPageView = (view: WebContentsView): boolean => {
+  for (const tab of tabs.values()) if (tab.view === view) return true;
+  return false;
+};
+
 const isViewAttached = (view: WebContentsView): boolean =>
   Boolean(mainWindow && !mainWindow.isDestroyed() && mainWindow.contentView.children.includes(view));
+
+// Overlay views above the window (menu popup, extension popup, prompt, palette, notes, find, glance...): while any is open
+// the shell drops its window drag regions, else Windows treats clicks on the overlay as a title-bar drag (shell-overlay.ts).
+const shellOverlay = createOverlayTracker<WebContentsView>(
+  (open) => {
+    if (mainWindow && !mainWindow.isDestroyed()) mainWindow.webContents.send("overlay:open", open);
+    compactChrome?.getContents()?.send("overlay:open", open);
+  },
+  (view) => !view.webContents.isDestroyed() && isViewAttached(view),
+);
+setInWindowPopupListener((open) => shellOverlay.setFlag("extension-popup", open));
+const syncPopupOverlayFlag = (): void => shellOverlay.setFlag("menu-popup", activePopup !== null);
 
 const attachViewOnTop = (view: WebContentsView): void => {
   if (!mainWindow || mainWindow.isDestroyed()) return;
   mainWindow.contentView.addChildView(view);
+  // Small passive overlays (toast, download progress, outline of the window controls) never take clicks away from the shell.
+  if (!isPageView(view) && view !== toastView && view !== downloadProgressView && view !== controlsFrameView) shellOverlay.addView(view);
+  // A page view just went on top of the window controls' outline (Windows, vertical layout): put the outline back above it.
+  if (controlsFrameView && view !== controlsFrameView && isPageView(view)) raiseControlsFrame();
   if (view !== toastView) hideToast();
   // Menu popup overlay: any other view attaching (tab switch, palette, notes,
   // find bar) dismisses it, except the small download toast which just
@@ -2702,6 +2766,7 @@ const detachView = (view: WebContentsView): void => {
   if (mainWindow && !mainWindow.isDestroyed() && isViewAttached(view)) {
     mainWindow.contentView.removeChildView(view);
   }
+  shellOverlay.removeView(view);
 };
 
 const attachDownloadProgressView = (): void => {
@@ -2712,22 +2777,26 @@ const attachDownloadProgressView = (): void => {
   attachViewOnTop(downloadProgressView);
   downloadProgressView.setVisible(true);
   downloadProgressVisible = true;
+  downloadProgressView.webContents.executeJavaScript("document.body.classList.remove('mb-out');document.body.classList.add('mb-in')", true).catch(() => undefined);
 };
 
 const hideDownloadProgressView = (): void => {
   downloadProgressVisible = false;
   const view = downloadProgressView;
   if (view) {
-    detachView(view);
-    // A re-attached WebContentsView can stay composited-hidden (Electron bug
-    // family around removeChildView + addChildView), so destroy on hide and
-    // let the next broadcast recreate it.
-    if (!view.webContents.isDestroyed()) {
-      view.webContents.close();
-    }
     if (downloadProgressView === view) {
       downloadProgressView = null;
     }
+    // Slides out first (retireOverlayView), then the view is removed.
+    retireOverlayView(view, () => {
+      detachView(view);
+      // A re-attached WebContentsView can stay composited-hidden (Electron bug
+      // family around removeChildView + addChildView), so destroy on hide and
+      // let the next broadcast recreate it.
+      if (!view.webContents.isDestroyed()) {
+        view.webContents.close();
+      }
+    });
   }
 };
 
@@ -2749,7 +2818,10 @@ const createDownloadProgressView = async (): Promise<WebContentsView | null> => 
   });
   downloadProgressView.setBackgroundColor("#00000000");
   trackThemedContents(downloadProgressView.webContents);
-  downloadProgressView.webContents.on("destroyed", () => {
+  const createdView = downloadProgressView;
+  createdView.webContents.on("destroyed", () => {
+    // A view retired by hideDownloadProgressView may be destroyed after a newer one was created.
+    if (downloadProgressView !== createdView) return;
     downloadProgressView = null;
     downloadProgressVisible = false;
   });
@@ -4026,10 +4098,11 @@ const renderSettingsPageHtml = (): string => {
     layoutHorizontal: "Poziomy", layoutHorizontalDescription: "Kompaktowy pasek z nawigacją, adresem i kartami w jednym rzędzie.",
     sidebarSideHeading: "Strona paska kart", sidebarSideLeft: "Lewa", sidebarSideLeftDescription: "Panel boczny przy lewej krawędzi okna.", sidebarSideRight: "Prawa", sidebarSideRightDescription: "Panel boczny przy prawej krawędzi okna.",
     layoutVertical: "Pionowy", layoutVerticalDescription: "Panel boczny z adresem, przypiętymi kartami i listą kart.",
+    hideControlsEnable: "Ukrywaj przyciski okna w układzie pionowym", hideControlsHint: "Przyciski minimalizacji, maksymalizacji i zamknięcia pojawiają się dopiero po najechaniu kursorem na prawy górny róg okna.",
     compactEnable: "Tryb kompaktowy", compactHint: "Ukrywa pasek (lub panel boczny), a strona wypełnia okno. Najedź kursorem na górną (lub boczną) krawędź, aby go pokazać. Skrót: Ctrl+Shift+C.",
     glanceHeading: "Glance", glanceDescription: "Szybki podgląd linków bez otwierania ich w nowej karcie", glanceEnable: "Włącz Glance",
     glanceTriggerLabel: "Sposób wywołania", glanceAlt: "Alt + klik", glanceCtrl: "Ctrl + klik", glanceShift: "Shift + klik", glanceLongPress: "Długie przytrzymanie",
-    animHeading: "Animacje", animDescription: "Płynne przejścia menu, kart i paneli. Wyłączane też automatycznie, gdy system prosi o ograniczenie ruchu.", animOn: "Włączone", animOff: "Wyłączone", animOnHint: "Płynne przejścia menu i kart.", animOffHint: "Zmiany natychmiast, bez ruchu.",
+    animHeading: "Animacje", animDescription: "Płynne przejścia menu, kart i paneli. Wyłączane też automatycznie, gdy system prosi o ograniczenie ruchu.", animOn: "Pełne", animSubtle: "Subtelne", animOff: "Wyłączone", animOnHint: "Sprężysty ruch kart, menu i paneli.", animSubtleHint: "Krótsze, spokojniejsze przejścia, bez efektów sprężyny.", animOffHint: "Zmiany natychmiast, bez ruchu.",
     toolbarHeading: "Pasek narzędzi", toolbarDescription: "Wybierz funkcje, które mają mieć własny przycisk na pasku narzędzi. Zmiana działa od razu.", toolbarNames: { notes: "Notatki", downloads: "Pobieranie", history: "Historia", bookmarks: "Zakładka bieżącej strony", "new-private-tab": "Karta prywatna", "dev-tools": "Narzędzia deweloperskie", "compact-toggle": "Tryb kompaktowy" } as Record<ToolbarActionId, string>,
     languageHeading: "Język", languageDescription: "Język interfejsu przeglądarki. Zmiana działa od razu.", languagePolishDescription: "Interfejs w języku polskim.", languageEnglishDescription: "Interface in English.",
     startupHeading: "Przy starcie", startupDescription: "Wybierz, co ma się otworzyć po uruchomieniu przeglądarki. Zmiana działa od razu.",
@@ -4070,10 +4143,11 @@ const renderSettingsPageHtml = (): string => {
     layoutHorizontal: "Horizontal", layoutHorizontalDescription: "Compact bar with navigation, address and tabs in one row.",
     sidebarSideHeading: "Tab bar side", sidebarSideLeft: "Left", sidebarSideLeftDescription: "Side panel on the left edge of the window.", sidebarSideRight: "Right", sidebarSideRightDescription: "Side panel on the right edge of the window.",
     layoutVertical: "Vertical", layoutVerticalDescription: "Side panel with the address bar, pinned tabs and a tab list.",
+    hideControlsEnable: "Hide window buttons in the vertical layout", hideControlsHint: "The minimize, maximize and close buttons appear only when you move the pointer to the top-right corner of the window.",
     compactEnable: "Compact mode", compactHint: "Hides the toolbar (or sidebar) so the page fills the window. Move the pointer to the top (or side) edge to reveal it. Shortcut: Ctrl+Shift+C.",
     glanceHeading: "Glance", glanceDescription: "Get a quick overview of your links without opening them in a new tab", glanceEnable: "Enable Glance",
     glanceTriggerLabel: "Trigger method", glanceAlt: "Alt + click", glanceCtrl: "Ctrl + click", glanceShift: "Shift + click", glanceLongPress: "Long press",
-    animHeading: "Animations", animDescription: "Smooth transitions for menus, tabs and panels. Also turned off automatically when the system asks for reduced motion.", animOn: "On", animOff: "Off", animOnHint: "Smooth menu and tab transitions.", animOffHint: "Instant changes, no motion.",
+    animHeading: "Animations", animDescription: "Smooth transitions for menus, tabs and panels. Also turned off automatically when the system asks for reduced motion.", animOn: "Full", animSubtle: "Subtle", animOff: "Off", animOnHint: "Springy motion for tabs, menus and panels.", animSubtleHint: "Shorter, calmer transitions without spring effects.", animOffHint: "Instant changes, no motion.",
     toolbarHeading: "Toolbar", toolbarDescription: "Choose which functions get their own button on the toolbar. Changes apply immediately.", toolbarNames: { notes: "Notes", downloads: "Downloads", history: "History", bookmarks: "Bookmark current page", "new-private-tab": "Private tab", "dev-tools": "Developer tools", "compact-toggle": "Compact mode" } as Record<ToolbarActionId, string>,
     languageHeading: "Language", languageDescription: "Language of the browser interface. Changes apply immediately.", languagePolishDescription: "Interface in Polish.", languageEnglishDescription: "Interface in English.",
     startupHeading: "On startup", startupDescription: "Choose what opens when the browser starts. Changes apply immediately.",
@@ -4231,6 +4305,7 @@ ${UI_BASE_END_CSS}
           <label class="engine"><input type="radio" name="sidebar-side" value="right"><span class="engine-body"><span class="engine-name"><i class="engine-mark"></i>${copy.sidebarSideRight}</span><span class="engine-copy">${copy.sidebarSideRightDescription}</span></span></label>
         </div>
       </div>
+      ${process.platform === "win32" ? `<div id="hide-controls-group" class="field" style="margin-top:12px" hidden><label class="checkbox-row" for="hide-controls"><input id="hide-controls" type="checkbox" checked>${copy.hideControlsEnable}</label><span class="hint">${copy.hideControlsHint}</span></div>` : ""}
       <div class="field" style="margin-top:12px"><label class="checkbox-row" for="compact-mode"><input id="compact-mode" type="checkbox">${copy.compactEnable}</label><span class="hint">${copy.compactHint}</span></div>
     </section>
     <section class="card" id="glance-card">
@@ -4329,8 +4404,9 @@ ${UI_BASE_END_CSS}
     <section class="card"><h2>${copy.themeHeading}</h2><p class="description">${copy.themeDescription}</p><div id="theme-grid" class="theme-grid"></div><div class="actions"><span id="theme-message" class="hint" role="status"></span><button type="button" class="secondary" id="theme-reset">${copy.themeReset}</button></div></section>
     <section class="card" id="animations-card">
       <h2>${copy.animHeading}</h2><p class="description">${copy.animDescription}</p>
-      <div class="engines" style="grid-template-columns:repeat(2,1fr)">
-        <label class="engine"><input type="radio" name="animations" value="on"><span class="engine-body"><span class="engine-name"><i class="engine-mark"></i>${copy.animOn}</span><span class="engine-copy">${copy.animOnHint}</span></span></label>
+      <div class="engines" style="grid-template-columns:repeat(3,1fr)">
+        <label class="engine"><input type="radio" name="animations" value="full"><span class="engine-body"><span class="engine-name"><i class="engine-mark"></i>${copy.animOn}</span><span class="engine-copy">${copy.animOnHint}</span></span></label>
+        <label class="engine"><input type="radio" name="animations" value="subtle"><span class="engine-body"><span class="engine-name"><i class="engine-mark"></i>${copy.animSubtle}</span><span class="engine-copy">${copy.animSubtleHint}</span></span></label>
         <label class="engine"><input type="radio" name="animations" value="off"><span class="engine-body"><span class="engine-name"><i class="engine-mark"></i>${copy.animOff}</span><span class="engine-copy">${copy.animOffHint}</span></span></label>
       </div>
     </section>
@@ -4483,6 +4559,8 @@ ${UI_BASE_END_CSS}
   const showLayout = (value) => {
     layoutInputs.forEach((input) => { input.checked = input.value === value; });
     document.getElementById('sidebar-side-group').hidden = value !== 'vertical';
+    const hideControlsGroup = document.getElementById('hide-controls-group');
+    if (hideControlsGroup) hideControlsGroup.hidden = value !== 'vertical';
   };
   const sideInputs = Array.from(document.querySelectorAll('input[name=sidebar-side]'));
   const showSide = (value) => sideInputs.forEach((input) => { input.checked = input.value === value; });
@@ -4493,19 +4571,28 @@ ${UI_BASE_END_CSS}
     if (input.checked) showLayout((await window.browserApi.setLayoutSettings({ tabBarLayout: input.value })).tabBarLayout);
   }));
   const compactInput = document.getElementById('compact-mode');
-  const showCompact = (layout) => { compactInput.checked = layout.compactMode === true; };
+  const showCompact = (layout) => { compactInput.checked = layout.compactMode === true; showHideControls(layout); };
+  const hideControlsInput = document.getElementById('hide-controls');
+  const showHideControls = (layout) => { if (hideControlsInput) hideControlsInput.checked = layout.hideWindowControls !== false; };
+  if (hideControlsInput) hideControlsInput.addEventListener('change', async () => {
+    showHideControls(await window.browserApi.setLayoutSettings({ hideWindowControls: hideControlsInput.checked }));
+  });
   compactInput.addEventListener('change', async () => {
     showCompact(await window.browserApi.setLayoutSettings({ compactMode: compactInput.checked }));
   });
-  window.browserApi.getLayoutSettings().then((layout) => { showLayout(layout.tabBarLayout); showSide(layout.verticalTabBarSide); showCompact(layout); }).catch(() => undefined);
+  const syncLayoutInputs = () => window.browserApi.getLayoutSettings().then((layout) => { showLayout(layout.tabBarLayout); showSide(layout.verticalTabBarSide); showCompact(layout); }).catch(() => undefined);
+  syncLayoutInputs();
   window.browserApi.onLayoutChanged((layout) => { showLayout(layout.tabBarLayout); showSide(layout.verticalTabBarSide); showCompact(layout); });
+  // Compact mode can be toggled from outside this page (Ctrl+Shift+C, toolbar): re-read the saved state whenever the page is shown again.
+  window.addEventListener('focus', syncLayoutInputs);
+  document.addEventListener('visibilitychange', () => { if (!document.hidden) syncLayoutInputs(); });
 
   const animInputs = Array.from(document.querySelectorAll('input[name=animations]'));
-  const showAnim = (enabled) => animInputs.forEach((input) => { input.checked = (input.value === 'on') === enabled; });
+  const showAnim = (settings) => animInputs.forEach((input) => { input.checked = input.value === (settings.enabled ? settings.level : 'off'); });
   animInputs.forEach((input) => input.addEventListener('change', async () => {
-    if (input.checked) showAnim((await window.browserApi.setAnimationSettings({ enabled: input.value === 'on' })).enabled);
+    if (input.checked) showAnim(await window.browserApi.setAnimationSettings(input.value === 'off' ? { enabled: false } : { enabled: true, level: input.value }));
   }));
-  window.browserApi.getAnimationSettings().then((settings) => showAnim(settings.enabled)).catch(() => undefined);
+  window.browserApi.getAnimationSettings().then(showAnim).catch(() => undefined);
 
   const languageInputs = Array.from(document.querySelectorAll('input[name=app-language]'));
   languageInputs.forEach((input) => input.addEventListener('change', () => { if (input.checked) void window.browserApi.setLanguage(input.value); }));
@@ -5343,7 +5430,7 @@ const POPUP_MENU_STYLES = `
   details { border:0; }
   summary { list-style:none; }
   summary::-webkit-details-marker { display:none; }
-  summary::after { content:""; flex:0 0 auto; width:6px; height:6px; margin:-3px 3px 0 auto; border-right:2px solid currentColor; border-bottom:2px solid currentColor; transform:rotate(-45deg); transition:transform var(--mb-dur,160ms) var(--mb-ease,ease); }
+  summary::after { content:""; flex:0 0 auto; width:6px; height:6px; margin:-3px 3px 0 auto; border-right:2px solid currentColor; border-bottom:2px solid currentColor; transform:rotate(-45deg); transition:transform var(--mb-dur,180ms) var(--mb-spring,var(--mb-ease,ease)); }
   summary:has(.summary-count)::after { margin-left:0; }
   .summary-count { margin-left:auto; color:inherit; font-size:11px; font-weight:700; font-variant-numeric:tabular-nums; opacity:.75; }
   details[open] > summary { background:var(--mb-surface-2); color:var(--black); border-bottom-color:transparent; }
@@ -5399,12 +5486,24 @@ const POPUP_MENU_STYLES = `
   .ctx-nav .menu-item { flex:1 1 0; justify-content:center; height:32px; padding:0; font-size:17px; font-weight:400; letter-spacing:0; }
   .ctx-nav .menu-item.disabled { opacity:.3; }
   .ctx-sep { height:1px; margin:4px 8px; background:var(--black); }
-  /* Show/hide animation: the main process adds mb-in right after the view becomes visible and mb-out before hiding it. */
-  @keyframes mb-popup-in { from { opacity:0; transform:translateY(-4px) scale(.98); } }
+  /* Show/hide animation: the main process adds mb-in right after the view becomes visible and mb-out before hiding it.
+     --mb-origin (set by the main process) is the point of the popup closest to its anchor button, so it grows out of the button. */
+  @keyframes mb-popup-in { from { opacity:0; transform:translateY(calc(var(--mb-shift,8px) * -.5)) scale(var(--mb-scale-from,.96)); } }
+  @keyframes mb-popup-in-up { from { opacity:0; transform:translateY(calc(var(--mb-shift,8px) * .5)) scale(var(--mb-scale-from,.96)); } }
+  @keyframes mb-item-in { from { opacity:0; transform:translateY(calc(var(--mb-shift,8px) * .5)); } }
+  @keyframes mb-sub-in { from { opacity:0; transform:translateY(calc(var(--mb-shift,8px) * -.5)); } }
   body:not(.mb-in) .popup { opacity:0; }
-  body.mb-in .popup { animation:mb-popup-in var(--mb-dur,160ms) var(--mb-ease,ease) backwards; transform-origin:top center; }
-  body.mb-out .popup { opacity:0; transform:translateY(-4px) scale(.98); transition:opacity var(--mb-dur,160ms) var(--mb-ease,ease), transform var(--mb-dur,160ms) var(--mb-ease,ease); }
-  .menu-item, .info-action { transition:background-color var(--mb-dur,160ms) var(--mb-ease,ease), color var(--mb-dur,160ms) var(--mb-ease,ease), transform var(--mb-dur,160ms) var(--mb-ease,ease); }
+  body.mb-in .popup { animation:mb-popup-in var(--mb-dur,180ms) var(--mb-spring,var(--mb-ease,ease)) backwards; transform-origin:var(--mb-origin,top center); }
+  body.mb-in.mb-grow-up .popup { animation-name:mb-popup-in-up; }
+  body.mb-out .popup { opacity:0; transform:translateY(calc(var(--mb-shift,8px) * -.25)) scale(.985); transform-origin:var(--mb-origin,top center); transition:opacity var(--mb-dur-fast,120ms) var(--mb-ease-in,ease), transform var(--mb-dur-fast,120ms) var(--mb-ease-in,ease); }
+  body.mb-out.mb-grow-up .popup { transform:translateY(calc(var(--mb-shift,8px) * .25)) scale(.985); }
+  /* Items cascade in (first rows only, skipped when the stagger is 0); submenus slide down from their header. */
+  body.mb-in :is(.nav-menu,.ctx-menu) > :nth-child(-n+8) { animation:mb-item-in var(--mb-dur,180ms) var(--mb-ease,ease) backwards; animation-delay:calc(var(--mb-i,0) * var(--mb-stagger,0ms)); }
+  :is(.nav-menu,.ctx-menu) > :nth-child(1) { --mb-i:0; } :is(.nav-menu,.ctx-menu) > :nth-child(2) { --mb-i:1; } :is(.nav-menu,.ctx-menu) > :nth-child(3) { --mb-i:2; } :is(.nav-menu,.ctx-menu) > :nth-child(4) { --mb-i:3; }
+  :is(.nav-menu,.ctx-menu) > :nth-child(5) { --mb-i:4; } :is(.nav-menu,.ctx-menu) > :nth-child(6) { --mb-i:5; } :is(.nav-menu,.ctx-menu) > :nth-child(7) { --mb-i:6; } :is(.nav-menu,.ctx-menu) > :nth-child(8) { --mb-i:7; }
+  details[open] > .submenu { animation:mb-sub-in var(--mb-dur,180ms) var(--mb-ease,ease) backwards; }
+  body.mb-grow-up details[open] > .submenu { animation-name:mb-item-in; }
+  .menu-item, .info-action { transition:background-color var(--mb-dur-fast,120ms) var(--mb-ease,ease), color var(--mb-dur-fast,120ms) var(--mb-ease,ease), transform var(--mb-dur-fast,120ms) var(--mb-ease,ease); }
 `;
 
 /** Reports the real content height of a `.nav-popup` page so the popup is sized to its content (no empty band). */
@@ -5460,17 +5559,32 @@ const isPopupVisible = (): boolean => activePopup !== null;
 // Hides the popup overlay (the view itself is kept, attached and reused).
 // restoreFocus is true for Escape / chosen action, false when the user moved
 // focus elsewhere (outside click) or another overlay took over.
-const POPUP_FADE_OUT_MS = 120;
-/** Fades an overlay view out (class mb-out), then runs `remove`. Without animations `remove` runs at once. */
+/** Starts an overlay's exit (class mb-out). An element that is still running its enter animation leaves from its current look
+ *  (opacity/transform are frozen, the animation dropped, then the exit transition runs from there), so a quick close does not jump. */
+const OVERLAY_EXIT_SCRIPT = `(() => {
+  const held = [];
+  for (const el of document.querySelectorAll('.popup,.toast,.card,[data-mb-overlay]')) {
+    if (!el.getAnimations().length) continue;
+    const look = getComputedStyle(el);
+    held.push([el, look.opacity, look.transform]);
+  }
+  for (const [el, opacity, transform] of held) { el.getAnimations().forEach((a) => a.cancel()); el.style.opacity = opacity; el.style.transform = transform; }
+  if (held.length) void document.body.offsetWidth;
+  document.body.classList.add('mb-out');
+  for (const [el] of held) { el.style.opacity = ''; el.style.transform = ''; }
+})()`;
+/** Fades an overlay view out (class mb-out), then runs `remove` once the exit transition (--mb-dur-fast of the current level) is over. Without animations `remove` runs at once. */
 const retireOverlayView = (view: WebContentsView, remove: () => void): void => {
-  if (!areAnimationsEffective() || view.webContents.isDestroyed()) { remove(); return; }
-  view.webContents.executeJavaScript("document.body.classList.add('mb-out')", true).catch(() => undefined);
-  setTimeout(remove, POPUP_FADE_OUT_MS);
+  const fadeMs = overlayFadeOutMs();
+  if (fadeMs <= 0 || view.webContents.isDestroyed()) { remove(); return; }
+  view.webContents.executeJavaScript(OVERLAY_EXIT_SCRIPT, true).catch(() => undefined);
+  setTimeout(remove, fadeMs);
 };
 const closePopup = (restoreFocus = false, animate = true): void => {
   const active = activePopup;
   if (!active) return;
   activePopup = null;
+  syncPopupOverlayFlag();
   // Bump only for a real close: a no-op close (the toggle press right after a blur dismissal)
   // must not invalidate the pending fade-out hide, or the invisible popup keeps catching the mouse.
   popupToken += 1;
@@ -5483,8 +5597,8 @@ const closePopup = (restoreFocus = false, animate = true): void => {
     // Fade out first; a newer popup (token bump) or an instant replace cancels the delayed hide.
     if (animate && active.shown && areAnimationsEffective()) {
       const hideToken = popupToken;
-      popupView.webContents.executeJavaScript("document.body.classList.add('mb-out')", true).catch(() => undefined);
-      setTimeout(() => { if (activePopup === null && popupToken === hideToken) hideNow(); }, POPUP_FADE_OUT_MS);
+      popupView.webContents.executeJavaScript(OVERLAY_EXIT_SCRIPT, true).catch(() => undefined);
+      setTimeout(() => { if (activePopup === null && popupToken === hideToken) hideNow(); }, overlayFadeOutMs());
     } else {
       hideNow();
     }
@@ -5626,6 +5740,14 @@ const ensurePopupView = (): WebContentsView | null => {
   return view;
 };
 
+/** CSS transform-origin for a popup's show/hide animation: the edge/corner nearest the button that opened it. */
+const popupTransformOrigin = (bounds: Electron.Rectangle, anchor: PopupAnchor, growUp: boolean): string => {
+  const placement = anchor.placement;
+  const centerX = anchor.rect ? anchor.rect.x + anchor.rect.width / 2 : anchor.x;
+  const percentX = placement === "right" ? 0 : placement === "left" ? 100 : Math.max(0, Math.min(100, Math.round(((centerX - bounds.x) / Math.max(1, bounds.width)) * 100)));
+  return `${percentX}% ${growUp ? "100%" : "0%"}`;
+};
+
 const openStyledPopup = async (
   kind: PopupKind,
   anchor: PopupAnchor,
@@ -5662,7 +5784,7 @@ const openStyledPopup = async (
     anchor, rect: anchor.rect, placement: anchor.placement, width, preferredHeight, contentWidth, contentHeight,
     // Context popups opened by a control (they bring a rect) follow the placement logic; the rest hang from the pointer.
     clampInside: kind === "context" && !anchor.rect,
-    avoid: windowControlsRect(process.platform, contentWidth, isCompactMode(), mainWindow.isFullScreen()),
+    avoid: getControlsRect(contentWidth),
   });
 
   const token = ++popupToken;
@@ -5671,6 +5793,7 @@ const openStyledPopup = async (
   // Claim the slot synchronously so a quickly repeated open toggles/replaces
   // instead of racing the async load below. The view stays hidden until loaded.
   activePopup = { kind, token, bounds, fixedEdge: geometry.fixedEdge, edgeY: geometry.edgeY, minTop: geometry.minTop, preferredHeight, shown: false, shownAt: 0, restoreFocusTo };
+  syncPopupOverlayFlag();
   view.setBounds(bounds);
 
   try {
@@ -5697,7 +5820,8 @@ const openStyledPopup = async (
   view.setVisible(true);
   // A fade-out script queued by closePopup for the previous popup page can land in this new page: clear it.
   const growUp = activePopup.fixedEdge === "bottom";
-  view.webContents.executeJavaScript(`document.body.classList.remove('mb-out');document.body.classList.add('mb-in');document.body.classList.toggle('mb-grow-up', ${growUp})`, true).catch(() => undefined);
+  const origin = popupTransformOrigin(activePopup.bounds, anchor, growUp);
+  view.webContents.executeJavaScript(`document.body.style.setProperty('--mb-origin', ${JSON.stringify(origin)});document.body.classList.remove('mb-out');document.body.classList.add('mb-in');document.body.classList.toggle('mb-grow-up', ${growUp})`, true).catch(() => undefined);
   view.webContents.invalidate();
   view.webContents.focus();
   return true;
@@ -5913,8 +6037,11 @@ const openExtensionsMenu = async (anchor: unknown, shell: WebContents): Promise<
   };
   const items = getExtensionMenuItems();
   const tab = getActiveTab();
-  const pageUsable = Boolean(tab && !tab.internalKind && tab.view && !tab.view.webContents.isDestroyed());
-  const canRun = (item: { allowedInPrivate: boolean }): boolean => pageUsable && (!tab?.isPrivate || (privateExtensionsReady() && item.allowedInPrivate));
+  // Running needs a normal web page (internal monobrowser:// pages have no extension tab); pin/unpin works everywhere.
+  const tabInfo = tab ? { internal: Boolean(tab.internalKind), isPrivate: tab.isPrivate, hasLiveView: Boolean(tab.view && !tab.view.webContents.isDestroyed()) } : null;
+  const runBlock = (item: { allowedInPrivate: boolean }): ReturnType<typeof extensionRunBlock> => extensionRunBlock(tabInfo, privateExtensionsReady(), item.allowedInPrivate);
+  const pageUsable = runBlock({ allowedInPrivate: true }) !== "no-page";
+  const canRun = (item: { allowedInPrivate: boolean }): boolean => runBlock(item) === null;
   const pinLabel = (pinned: boolean): string => (pinned ? copy.unpin : copy.pin);
   const rows = items.map((item) => {
     const icon = item.iconDataUrl
@@ -6563,12 +6690,12 @@ const positionFindView = (): void => {
   const pane = getActivePaneRect() ?? { x: viewportLeft, y: viewportTop, width: contentWidth - viewportLeft - viewportRight, height: contentHeight - viewportTop };
   const width = Math.min(560, Math.max(320, pane.width - margin * 2));
   const height = 48;
-  findView.setBounds({
+  findView.setBounds(keepBelowControls({
     x: pane.x + margin,
     y: Math.max(pane.y, pane.y + pane.height - height - margin),
     width,
     height,
-  });
+  }, getControlsRect(contentWidth)));
 };
 
 const hideFindWindow = async (): Promise<void> => {
@@ -6701,12 +6828,12 @@ const positionToast = (): void => {
   const area = getHudPageArea();
   if (!area) return;
   const width = Math.max(200, Math.min(TOAST_WIDTH, area.width - 24));
-  toastView.setBounds({
+  toastView.setBounds(keepBelowControls({
     x: Math.round(area.x + (area.width - width) / 2),
     y: Math.max(area.top, Math.round(area.bottom - TOAST_HEIGHT - 14)),
     width,
     height: TOAST_HEIGHT,
-  });
+  }, getControlsRect()));
 };
 
 const showToast = (message: string, action?: { label: string; run: () => void }): void => {
@@ -6733,8 +6860,9 @@ const showToast = (message: string, action?: { label: string; run: () => void })
   * { box-sizing:border-box; }
   html,body { width:100%; height:100%; margin:0; overflow:hidden; background:transparent; user-select:none; }
   body { padding:6px 9px 9px 6px; }
-  @keyframes toast-in { from { opacity:0; transform:translateY(8px); } }
-  .toast { height:100%; display:flex; align-items:center; gap:12px; padding:0 8px 0 14px; border:2px solid var(--black); background:var(--mb-surface,var(--white)); color:var(--black); box-shadow:4px 4px 0 var(--accent); font-size:13px; line-height:1.3; animation:toast-in var(--mb-dur,160ms) var(--mb-ease,ease) backwards; }
+  @keyframes toast-in { from { opacity:0; transform:translateY(calc(var(--mb-shift,8px) * 1.5)) scale(.98); } }
+  body.mb-out .toast { opacity:0; transform:translateY(calc(var(--mb-shift,8px) * .75)); transition:opacity var(--mb-dur-fast,120ms) var(--mb-ease-in,ease), transform var(--mb-dur-fast,120ms) var(--mb-ease-in,ease); }
+  .toast { height:100%; display:flex; align-items:center; gap:12px; padding:0 8px 0 14px; border:2px solid var(--black); background:var(--mb-surface,var(--white)); color:var(--black); box-shadow:4px 4px 0 var(--accent); font-size:13px; line-height:1.3; animation:toast-in var(--mb-dur-slow,320ms) var(--mb-spring,var(--mb-ease,ease)) backwards; }
   .toast-text { flex:1 1 auto; min-width:0; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; font-weight:700; }
   .toast a { flex:0 0 auto; color:inherit; text-decoration:none; }
   .toast-action { padding:7px 12px; border:2px solid var(--black); background:var(--black); color:var(--white)!important; font-size:11px; font-weight:700; letter-spacing:.1em; text-transform:uppercase; cursor:pointer; }
@@ -6852,12 +6980,12 @@ const positionHudViews = (): void => {
   if (!area) return;
   const htmlFullscreen = htmlFullscreenTabId !== null && htmlFullscreenTabId === activeTabId;
   if (isHudViewAlive(hudProgressView)) {
-    hudProgressView.setBounds({
+    hudProgressView.setBounds(clipLeftOfControls({
       x: area.x,
       y: area.top,
       width: area.width,
       height: HUD_PROGRESS_HEIGHT,
-    });
+    }, getControlsRect()));
   }
   if (isHudViewAlive(hudStatusView) && hudStatusText) {
     const margin = 12;
@@ -6988,12 +7116,12 @@ const positionPaletteView = (): void => {
   const width = Math.min(520, Math.max(300, areaWidth - margin * 2));
   const maxHeight = Math.max(120, contentHeight - viewportTop - margin * 2);
   const height = Math.max(96, Math.min(paletteViewHeight, maxHeight));
-  paletteView.setBounds({
+  paletteView.setBounds(keepBelowControls({
     x: Math.max(0, viewportLeft + Math.round((areaWidth - width) / 2)),
     y: viewportTop + margin,
     width,
     height,
-  });
+  }, getControlsRect(contentWidth)));
 };
 
 const hidePalette = (): void => {
@@ -7264,12 +7392,12 @@ const positionNotesView = (): void => {
   const [contentWidth, contentHeight] = mainWindow.getContentSize();
   const width = Math.min(NOTES_WIDTH, Math.max(240, contentWidth - viewportLeft - viewportRight - 40 - NOTES_SCROLLBAR_INSET));
   const height = Math.max(120, contentHeight - viewportTop);
-  notesView.setBounds({
+  notesView.setBounds(keepBelowControls({
     x: Math.max(0, contentWidth - viewportRight - width - NOTES_SCROLLBAR_INSET),
     y: viewportTop,
     width,
     height,
-  });
+  }, getControlsRect(contentWidth)));
 };
 
 const saveNotesContent = async (value: unknown): Promise<boolean> => {
@@ -7861,19 +7989,201 @@ const isCompactMode = (): boolean => Boolean(compactChrome?.isEnabled());
 
 // In compact mode the page fills the window; the chrome is an overlay and does not take space.
 // Windows: native window controls (titleBarOverlay) on the tab strip, in the chrome's colors; the strip is shorter in compact mode.
+// Vertical layout (option "hide window buttons", on by default): the buttons are drawn fully transparent until the pointer
+// reaches them, see the auto-hide block below. The overlay is always derived from one pure function (resolveTitleBarOverlay).
+const currentTitleBarOverlay = (): ReturnType<typeof resolveTitleBarOverlay> => resolveTitleBarOverlay({
+  platform: process.platform,
+  tokens: getThemeTokens(),
+  compact: isCompactMode(),
+  vertical: layoutSettings.tabBarLayout === "vertical",
+  fullscreen: Boolean(mainWindow && !mainWindow.isDestroyed() && mainWindow.isFullScreen()),
+  hideControls: layoutSettings.hideWindowControls,
+  revealed: controlsReveal.revealed,
+});
+
+const controlsAutoHideActive = (): boolean => Boolean(mainWindow && !mainWindow.isDestroyed()) && autoHidesControls({
+  platform: process.platform,
+  vertical: layoutSettings.tabBarLayout === "vertical",
+  compact: isCompactMode(),
+  fullscreen: Boolean(mainWindow?.isFullScreen()),
+  enabled: layoutSettings.hideWindowControls,
+});
+
+let lastAppliedOverlayKey = "";
+
+/** Overlay for the BrowserWindow constructor (no window yet): resting state, hidden where auto-hide applies. */
+const initialTitleBarOverlay = (): NonNullable<ReturnType<typeof resolveTitleBarOverlay>> | undefined => {
+  controlsReveal = { revealed: false, outsideSince: null };
+  const overlay = resolveTitleBarOverlay({
+    platform: process.platform,
+    tokens: getThemeTokens(),
+    compact: layoutSettings.compactMode,
+    vertical: layoutSettings.tabBarLayout === "vertical",
+    fullscreen: false,
+    hideControls: layoutSettings.hideWindowControls,
+    revealed: false,
+  });
+  lastAppliedOverlayKey = JSON.stringify(overlay);
+  return overlay ?? undefined;
+};
+
 const updateTitleBarOverlay = (): void => {
   if (!usesNativeControlsOverlay(process.platform) || !mainWindow || mainWindow.isDestroyed()) return;
+  // Auto-hide switched off (setting, layout, compact, fullscreen): never stay "revealed" / keep a poll running.
+  if (!controlsAutoHideActive() && (controlsReveal.revealed || controlsPollTimer)) resetControlsReveal();
+  const overlay = currentTitleBarOverlay();
+  const key = JSON.stringify(overlay);
+  if (overlay && key !== lastAppliedOverlayKey) {
+    try {
+      mainWindow.setTitleBarOverlay(overlay);
+      lastAppliedOverlayKey = key;
+    } catch (error) {
+      console.warn("[titlebar] could not update the window controls:", error);
+    }
+  }
+  syncControlsFrame();
+};
+
+// ── Windows: auto-hide of the native window buttons (vertical layout) ──
+// Hidden = transparent colors (the buttons stay in place and clickable; nothing is painted). The pointer reaching the
+// buttons arrives as WM_NCMOUSEMOVE (their area is non-client: hit test HTMINBUTTON / HTMAXBUTTON / HTCLOSE) and reveals
+// them. Hiding must not depend on window messages alone (over the page the pointer may be reported to a child window), so
+// while revealed an interval compares screen.getCursorScreenPoint() with the buttons' rect (+ a few px margin) and the
+// buttons hide after the pointer has stayed outside for CONTROLS_HIDE_DELAY_MS. WM_NCMOUSELEAVE / WM_MOUSEMOVE (hooked
+// only while revealed, so there is no per-mouse-move cost at rest) just trigger that same check earlier. No polling at rest.
+const WM_MOUSEMOVE = 0x0200;
+const WM_NCMOUSEMOVE = 0x00a0;
+const WM_NCMOUSELEAVE = 0x02a2;
+const HT_CONTROL_BUTTONS: ReadonlySet<number> = new Set([8 /* HTMINBUTTON */, 9 /* HTMAXBUTTON */, 20 /* HTCLOSE */]);
+let controlsReveal: ControlsRevealState = { revealed: false, outsideSince: null };
+let controlsPollTimer: NodeJS.Timeout | null = null;
+
+const setControlsHooks = (on: boolean): void => {
+  if (!mainWindow || mainWindow.isDestroyed()) return;
   try {
-    mainWindow.setTitleBarOverlay(titleBarOverlayFor(getThemeTokens(), isCompactMode()));
+    if (on) {
+      mainWindow.hookWindowMessage(WM_NCMOUSELEAVE, checkControlsPointer);
+      mainWindow.hookWindowMessage(WM_MOUSEMOVE, checkControlsPointer);
+    } else {
+      mainWindow.unhookWindowMessage(WM_NCMOUSELEAVE);
+      mainWindow.unhookWindowMessage(WM_MOUSEMOVE);
+    }
+  } catch { /* window going away */ }
+};
+
+const stopControlsPoll = (): void => {
+  if (!controlsPollTimer) return;
+  clearInterval(controlsPollTimer);
+  controlsPollTimer = null;
+  setControlsHooks(false);
+};
+
+const startControlsPoll = (): void => {
+  if (controlsPollTimer) return;
+  controlsPollTimer = setInterval(checkControlsPointer, CONTROLS_POLL_MS);
+  setControlsHooks(true);
+};
+
+/** Back to the hidden resting state (also when auto-hide stops applying); the caller re-applies the overlay. */
+const resetControlsReveal = (): void => {
+  controlsReveal = { revealed: false, outsideSince: null };
+  stopControlsPoll();
+};
+
+const applyControlsReveal = (next: ControlsRevealState): void => {
+  const changed = next.revealed !== controlsReveal.revealed;
+  controlsReveal = next;
+  if (next.revealed) startControlsPoll(); else stopControlsPoll();
+  if (changed) updateTitleBarOverlay();
+};
+
+/** Is the pointer on / near the buttons? Position in window content coordinates (DIP), like the controls rect. */
+const isPointerInControlsZone = (): boolean => {
+  const win = mainWindow;
+  if (!win || win.isDestroyed() || !win.isVisible() || win.isMinimized()) return false;
+  const point = screen.getCursorScreenPoint();
+  const bounds = win.getContentBounds();
+  return pointInControlsZone({ x: point.x - bounds.x, y: point.y - bounds.y }, getControlsRect(bounds.width));
+};
+
+function checkControlsPointer(): void {
+  if (!controlsAutoHideActive()) {
+    if (controlsReveal.revealed || controlsPollTimer) { resetControlsReveal(); updateTitleBarOverlay(); }
+    return;
+  }
+  applyControlsReveal(nextControlsReveal(controlsReveal, isPointerInControlsZone(), Date.now()));
+}
+
+const onControlsNcMouseMove = (wParam: Buffer): void => {
+  if (!controlsAutoHideActive()) return;
+  const hitTest = wParam.length >= 4 ? wParam.readUInt32LE(0) & 0xffff : -1;
+  // The hit-test code is the primary signal; the pointer position confirms it when the code is not the expected one.
+  if (HT_CONTROL_BUTTONS.has(hitTest) || isPointerInControlsZone()) applyControlsReveal(nextControlsReveal(controlsReveal, true, Date.now()));
+};
+
+const installControlsAutoHide = (win: BrowserWindow): void => {
+  if (!usesNativeControlsOverlay(process.platform)) return;
+  win.hookWindowMessage(WM_NCMOUSEMOVE, onControlsNcMouseMove);
+};
+
+// Windows, vertical layout: the native window controls float over the page (a WebContentsView), so the shell DOM cannot
+// outline them. A bare native View (no renderer process) in the border color, 1 px larger than the controls, sits just
+// above the page views and below every overlay; the opaque controls cover its inside, leaving the left and bottom
+// lines. Horizontal / compact layout draw the line in the shell DOM (index.html). The View has no web contents: it
+// handles no input itself, it is only a 1 px dead strip next to the controls.
+let controlsFrameView: View | null = null;
+let windowControlsWidth = WINDOW_CONTROLS_FALLBACK_WIDTH;
+
+const raiseControlsFrame = (): void => {
+  const frame = controlsFrameView;
+  if (!frame || !mainWindow || mainWindow.isDestroyed()) return;
+  const pages = new Set<unknown>();
+  for (const tab of tabs.values()) if (tab.view) pages.add(tab.view);
+  const index = controlsFrameIndex<unknown>(mainWindow.contentView.children, pages, frame);
+  if (index === null) return;
+  try {
+    if (mainWindow.contentView.children.includes(frame)) mainWindow.contentView.removeChildView(frame);
+    mainWindow.contentView.addChildView(frame, index);
   } catch (error) {
-    console.warn("[titlebar] could not update the window controls:", error);
+    console.warn("[titlebar] could not place the window controls outline:", error);
+  }
+};
+
+const syncControlsFrame = (): void => {
+  if (!usesNativeControlsOverlay(process.platform) || !mainWindow || mainWindow.isDestroyed()) return;
+  try {
+    const [contentWidth] = mainWindow.getContentSize();
+    const rect = controlsFrameRect({
+      platform: process.platform,
+      vertical: layoutSettings.tabBarLayout === "vertical",
+      compact: isCompactMode(),
+      fullscreen: mainWindow.isFullScreen(),
+      controlsWidth: windowControlsWidth,
+      contentWidth,
+      controlsHidden: controlsAutoHideActive() && !controlsReveal.revealed,
+    });
+    if (!rect) {
+      if (controlsFrameView) {
+        controlsFrameView.setVisible(false);
+        if (mainWindow.contentView.children.includes(controlsFrameView)) mainWindow.contentView.removeChildView(controlsFrameView);
+      }
+      return;
+    }
+    if (!controlsFrameView) controlsFrameView = new View();
+    controlsFrameView.setBackgroundColor(getThemeTokens().border);
+    controlsFrameView.setBounds(rect);
+    controlsFrameView.setVisible(true);
+    raiseControlsFrame();
+  } catch (error) {
+    console.warn("[titlebar] could not update the window controls outline:", error);
   }
 };
 
 const applyEffectiveViewport = (): void => {
   viewportLeft = isCompactMode() ? 0 : reportedViewportLeft;
   // Compact mode: the page fills the window, except under the thin title strip kept for the native controls (Windows).
-  viewportTop = isCompactMode() ? compactViewportTop(process.platform) : reportedViewportTop;
+  // Windows: whatever the shell reports, the page never starts inside the strip with the native controls (titlebar.ts).
+  viewportTop = Math.max(isCompactMode() ? compactViewportTop(process.platform) : reportedViewportTop, minViewportTop(process.platform, isCompactMode(), layoutSettings.tabBarLayout === "vertical"));
   viewportRight = isCompactMode() ? 0 : reportedViewportRight;
   updateTitleBarOverlay();
 };
@@ -10125,6 +10435,15 @@ const registerIpc = (): void => {
     relayoutViews();
     return true;
   });
+  // Width of the native window controls as measured by the shell (getTitlebarAreaRect; follows DPI scaling).
+  onTrusted("window:controls-width", (event, width: unknown) => {
+    if (compactChrome?.getContents()?.id === event.sender.id) return;
+    const next = sanitizeControlsWidth(width);
+    if (next === windowControlsWidth) return;
+    windowControlsWidth = next;
+    syncControlsFrame();
+    relayoutViews(); // overlays keep clear of the controls' real width
+  });
   handleTrusted("layout:sidebar-dragging", (_event, dragging: unknown) => {
     sidebarDragging = dragging === true;
     applyActiveViewBounds();
@@ -10544,7 +10863,7 @@ const createMainWindow = async (
     icon: path.join(app.getAppPath(), "assets", "icon.png"),
     // Windows: no title bar of its own; the native controls are drawn over the tab strip (see titlebar.ts).
     ...(usesNativeControlsOverlay(process.platform)
-      ? { titleBarStyle: "hidden" as const, titleBarOverlay: titleBarOverlayFor(getThemeTokens(), layoutSettings.compactMode) }
+      ? { titleBarStyle: "hidden" as const, titleBarOverlay: initialTitleBarOverlay() }
       : {}),
     webPreferences: {
       // The shell preload = preload.js + the <browser-action-list> bridge of electron-chrome-extensions (bundled).
@@ -10621,11 +10940,13 @@ const createMainWindow = async (
       if (target && !target.isDestroyed()) target.send("window:fullscreen", fullscreen);
     }
   };
-  mainWindow.on("enter-full-screen", () => sendFullscreen(true));
-  mainWindow.on("leave-full-screen", () => sendFullscreen(false));
+  mainWindow.on("enter-full-screen", () => { sendFullscreen(true); updateTitleBarOverlay(); relayoutViews(); });
+  mainWindow.on("leave-full-screen", () => { sendFullscreen(false); updateTitleBarOverlay(); relayoutViews(); });
+  installControlsAutoHide(mainWindow);
 
   mainWindow.on("resize", () => {
     closePopup(false, false);
+    syncControlsFrame();
     applyActiveViewBounds();
     compactChrome?.refresh();
     positionDownloadProgressView();
@@ -10658,6 +10979,9 @@ const createMainWindow = async (
     splitSavingEnabled = false;
   });
   mainWindow.on("closed", () => {
+    controlsFrameView = null;
+    resetControlsReveal();
+    lastAppliedOverlayKey = "";
     promptOverlay?.dispose();
     promptOverlay = null;
     compactChrome?.dispose();
@@ -10697,6 +11021,7 @@ const createMainWindow = async (
     notesVisible = false;
     closeGlance(false);
     activePopup = null;
+    syncPopupOverlayFlag();
     if (popupView && !popupView.webContents.isDestroyed()) popupView.webContents.close();
     popupView = null;
     mainWindow = null;
@@ -10968,7 +11293,7 @@ const bootstrap = async (): Promise<void> => {
     },
     getLanguage: () => (appLanguage === "pl" ? "pl" : "en"),
     getShellOrigin: () => (compactChrome?.isEnabled() ? compactChrome.getOrigin() : { x: 0, y: 0 }),
-    getAvoidRect: (contentWidth) => windowControlsRect(process.platform, contentWidth, isCompactMode(), Boolean(mainWindow?.isFullScreen())),
+    getAvoidRect: (contentWidth) => getControlsRect(contentWidth),
     onChanged: () => {
       syncAdblockWithExtensions();
       notifyExtensionsChanged();
