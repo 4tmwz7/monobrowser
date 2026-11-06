@@ -1,7 +1,7 @@
 // Unified browser theme: one token set shared by the shell, overlays, internal pages and popup menus.
 // Pure module (no Electron imports) so it can be unit-tested.
 
-import { animationCss, areAnimationsEffective } from "./animation-settings.js";
+import { animationCss, areAnimationsEffective, getAnimationLevel } from "./animation-settings.js";
 
 export type ThemeTokenKey = "bg" | "surface" | "surface2" | "fg" | "muted" | "accent" | "onAccent" | "border" | "danger";
 
@@ -219,7 +219,7 @@ export const migrateLegacyColors = (legacy: unknown): ThemeSettings => {
 /** `:root{...}` block with all tokens and color-scheme. */
 export const themeCss = (tokens: ThemeTokens): string => {
   const vars = THEME_TOKEN_KEYS.map((key) => `${THEME_CSS_VARS[key]}:${tokens[key]}`).join(";");
-  return `:root{color-scheme:${tokens.scheme};${vars}}${animationCss(areAnimationsEffective())}`;
+  return `:root{color-scheme:${tokens.scheme};${vars}}${animationCss(areAnimationsEffective(), getAnimationLevel())}`;
 };
 
 export const THEME_STYLE_ID = "mb-theme";

@@ -63,8 +63,10 @@ type LayoutSettings = {
   verticalTabBarCollapsed: boolean;
   verticalTabBarSide: "left" | "right";
   compactMode: boolean;
+  hideWindowControls: boolean;
 };
 type StartupSettings = { startupMode: "restore" | "newtab" };
+type TabSleepSettings = { afterMinutes: number; neverSleepSites: string[] };
 type GlanceSettings = { enabled: boolean; trigger: "alt" | "ctrl" | "shift" | "longpress" };
 type GlanceViewState = {
   title: string;
@@ -217,6 +219,12 @@ const browserApi = {
   setCompactPointer: (inside: boolean): void => ipcRenderer.send("compact:pointer", inside),
   // Split view: a tab drag started/ended (page area turns into left/right drop zones).
   notifyTabDrag: (tabId: number | null): void => ipcRenderer.send("split:tab-drag", tabId),
+  // An overlay view (menu popup, prompt, palette, notes, find, glance, extension popup) opened/closed above the window.
+  onOverlayOpen: (callback: (open: boolean) => void): (() => void) => {
+    const listener = (_event: Electron.IpcRendererEvent, open: boolean) => callback(Boolean(open));
+    ipcRenderer.on("overlay:open", listener);
+    return () => ipcRenderer.removeListener("overlay:open", listener);
+  },
   // Toolbar pins: menu functions pinned as icon buttons (see toolbar-pins.ts).
   getToolbarPins: (): Promise<unknown> => ipcRenderer.invoke("toolbar:get"),
   runToolbarAction: (id: string): Promise<boolean> => ipcRenderer.invoke("toolbar:run", id),
@@ -237,6 +245,10 @@ const browserApi = {
   getExperimentalSettings: (): Promise<unknown> => ipcRenderer.invoke("experimental:get"),
   setExperimentalSettings: (patch: Record<string, unknown>): Promise<unknown> =>
     ipcRenderer.invoke("experimental:set", patch),
+  getTabSleepSettings: (): Promise<TabSleepSettings> => ipcRenderer.invoke("tab-sleep:get"),
+  setTabSleepSettings: (patch: Partial<TabSleepSettings>): Promise<TabSleepSettings> => ipcRenderer.invoke("tab-sleep:set", patch),
+  addTabSleepSite: (site: string): Promise<{ ok: boolean; reason?: "invalid" | "limit"; settings: TabSleepSettings }> => ipcRenderer.invoke("tab-sleep:site-add", site),
+  removeTabSleepSite: (site: string): Promise<{ ok: boolean; settings: TabSleepSettings }> => ipcRenderer.invoke("tab-sleep:site-remove", site),
   getGlanceSettings: (): Promise<GlanceSettings> => ipcRenderer.invoke("glance:get"),
   setGlanceSettings: (patch: Partial<GlanceSettings>): Promise<GlanceSettings> =>
     ipcRenderer.invoke("glance:set", patch),
@@ -342,8 +354,8 @@ const browserApi = {
   getLicenses: (): Promise<string> => ipcRenderer.invoke("about:get-licenses"),
   setOnboardingStep: (index: number): Promise<boolean> => ipcRenderer.invoke("onboarding:set-step", index),
   finishOnboarding: (): Promise<boolean> => ipcRenderer.invoke("onboarding:finish"),
-  getAnimationSettings: (): Promise<{ enabled: boolean }> => ipcRenderer.invoke("animations:get"),
-  setAnimationSettings: (patch: { enabled: boolean }): Promise<{ enabled: boolean }> => ipcRenderer.invoke("animations:set", patch),
+  getAnimationSettings: (): Promise<{ enabled: boolean; level: "subtle" | "full" }> => ipcRenderer.invoke("animations:get"),
+  setAnimationSettings: (patch: { enabled?: boolean; level?: "subtle" | "full" }): Promise<{ enabled: boolean; level: "subtle" | "full" }> => ipcRenderer.invoke("animations:set", patch),
   getStartupSettings: (): Promise<StartupSettings> => ipcRenderer.invoke("startup:get"),
   rememberSettingsTab: (tab: string): void => ipcRenderer.send("settings:remember-tab", tab),
   setStartupSettings: (patch: Partial<StartupSettings>): Promise<StartupSettings> =>
@@ -357,7 +369,31 @@ const browserApi = {
   openExtensionsFolder: (): Promise<boolean> => ipcRenderer.invoke("extensions:open-folder"),
   loadUnpackedExtension: (): Promise<unknown> => ipcRenderer.invoke("extensions:load-unpacked"),
   openExtensionStore: (): Promise<boolean> => ipcRenderer.invoke("extensions:open-store"),
-  getExtensionActionsInfo: (): Promise<{ privatePartition: string | null }> => ipcRenderer.invoke("extensions:actions-info"),
+  setExtensionPinned: (key: string, pinned: boolean): Promise<unknown> => ipcRenderer.invoke("extensions:set-pinned", key, pinned),
+  getExtensionActionsInfo: (): Promise<unknown> => ipcRenderer.invoke("extensions:actions-info"),
+  openExtensionsMenu: (anchor: { x: number; y: number; rect?: { x: number; y: number; width: number; height: number }; placement?: "below" | "above" | "right" | "left" }): Promise<boolean> =>
+    ipcRenderer.invoke("extensions-menu:open", anchor),
+  onExtensionToolbarChanged: (callback: (info: unknown) => void): (() => void) => {
+    const listener = (_event: Electron.IpcRendererEvent, info: unknown) => callback(info);
+    ipcRenderer.on("extensions:toolbar-changed", listener);
+    return () => ipcRenderer.removeListener("extensions:toolbar-changed", listener);
+  },
+  /** The Extensions menu chose an extension: the shell activates its action, anchored to the Extensions button. */
+  onExtensionActivate: (callback: (payload: { id: string }) => void): (() => void) => {
+    const listener = (_event: Electron.IpcRendererEvent, payload: { id: string }) => callback(payload);
+    ipcRenderer.on("extensions:activate", listener);
+    return () => ipcRenderer.removeListener("extensions:activate", listener);
+  },
+  // Window chrome: "win32" gets native window controls overlaid on the tab strip (see titlebar.ts).
+  platform: process.platform,
+  onWindowFullscreen: (callback: (fullscreen: boolean) => void): (() => void) => {
+    const listener = (_event: Electron.IpcRendererEvent, fullscreen: boolean) => callback(fullscreen === true);
+    ipcRenderer.on("window:fullscreen", listener);
+    return () => ipcRenderer.removeListener("window:fullscreen", listener);
+  },
+  isWindowFullscreen: (): Promise<boolean> => ipcRenderer.invoke("window:is-fullscreen"),
+  // Windows: measured width of the native window controls, so the main process can outline them (titlebar.ts).
+  reportWindowControlsWidth: (width: number): void => ipcRenderer.send("window:controls-width", width),
   onExtensionsChanged: (callback: () => void): (() => void) => {
     const listener = () => callback();
     ipcRenderer.on("extensions:changed", listener);

@@ -26,9 +26,14 @@ export type ExtensionsState = {
   privateAllowed: string[];
   /** Folders registered with "Load unpacked…" (kept where they are, never deleted by the browser). */
   external: string[];
+  /**
+   * Keys of extensions pinned to the toolbar. null = never recorded (state file of a version without pinning):
+   * `migratePinned` pins everything installed at that moment, so existing users see no change.
+   */
+  pinned: string[] | null;
 };
 
-export const EMPTY_EXTENSIONS_STATE: ExtensionsState = { disabled: [], privateAllowed: [], external: [] };
+export const EMPTY_EXTENSIONS_STATE: ExtensionsState = { disabled: [], privateAllowed: [], external: [], pinned: null };
 
 const stringList = (value: unknown): string[] => {
   if (!Array.isArray(value)) return [];
@@ -45,7 +50,30 @@ export const normalizeExtensionsState = (value: unknown): ExtensionsState => {
     disabled: stringList(raw.disabled),
     privateAllowed: stringList(raw.privateAllowed),
     external: stringList(raw.external).filter((entry) => path.isAbsolute(entry)),
+    pinned: Array.isArray(raw.pinned) ? stringList(raw.pinned) : null,
   };
+};
+
+/** First start with pinning: everything already installed stays pinned; later installs start unpinned (like Chrome). */
+export const migratePinned = (state: ExtensionsState, installedKeys: readonly string[]): ExtensionsState =>
+  state.pinned === null ? { ...state, pinned: [...new Set(installedKeys)] } : state;
+
+export const isPinned = (state: Pick<ExtensionsState, "pinned">, key: string): boolean => state.pinned?.includes(key) ?? false;
+
+/**
+ * Extension ids (the ids <browser-action-list> buttons carry) of the pinned extensions that are currently loaded,
+ * in the order of `items`. Unloaded/disabled extensions (id null) are skipped.
+ */
+export const resolvePinnedIds = (
+  items: ReadonlyArray<{ key: string; id: string | null; enabled: boolean }>,
+  pinned: readonly string[] | null,
+): string[] => items.filter((item) => item.enabled && item.id && pinned?.includes(item.key)).map((item) => item.id as string);
+
+/** Whether the manifest declares a toolbar action (MV3 `action`, MV2 `browser_action`): those get a toolbar button. */
+export const hasToolbarAction = (manifest: Record<string, unknown> | null | undefined): boolean => {
+  if (!manifest) return false;
+  const action = manifest.manifest_version === 3 ? manifest.action : manifest.manifest_version === 2 ? manifest.browser_action : undefined;
+  return typeof action === "object" && action !== null;
 };
 
 /** Adds or removes `key` (no duplicates); returns a new list. */

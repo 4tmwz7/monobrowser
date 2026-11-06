@@ -22,10 +22,17 @@
       .name { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-size: 11px; font-weight: 700; }
       .value { color: var(--mb-muted, #b5b4ae); font-size: 10px; white-space: nowrap; }
       .track { height: 7px; margin-top: 10px; border: 1px solid var(--mb-fg, #f0efe9); background: var(--mb-surface-2, #242421); overflow: hidden; }
-      .fill { width: 0; height: 100%; background: var(--mb-fg, #f0efe9); transition: width var(--mb-dur, 120ms) linear; }
+      .fill { width: 0; height: 100%; background: var(--mb-fg, #f0efe9); transition: width var(--mb-dur-slow, 320ms) var(--mb-ease, ease-out); }
+      /* The main process adds mb-in when the view is attached and mb-out before it is removed. */
+      @keyframes card-in { from { opacity: 0; transform: translateX(calc(var(--mb-shift, 8px) * 2.5)); } }
+      body:not(.mb-in) .card { opacity: 0; }
+      body.mb-in .card { animation: card-in var(--mb-dur-slow, 320ms) var(--mb-spring, var(--mb-ease, ease)) backwards; }
+      body.mb-out .card { opacity: 0; transform: translateX(calc(var(--mb-shift, 8px) * 1.5)); transition: opacity var(--mb-dur-fast, 120ms) var(--mb-ease-in, ease), transform var(--mb-dur-fast, 120ms) var(--mb-ease-in, ease); }
       .track.indeterminate .fill { width: 38%; animation: sweep 1.1s linear infinite; }
       .meta { display: flex; justify-content: space-between; gap: 10px; margin-top: 7px; color: var(--mb-muted, #9c9b95); font-size: 8px; text-transform: uppercase; letter-spacing: 0.08em; }
       @keyframes sweep { from { transform: translateX(-110%); } to { transform: translateX(280%); } }
+      /* Reduced motion: an unknown-size download shows a static half-filled bar instead of a sweeping one. */
+      @media (prefers-reduced-motion: reduce) { .track.indeterminate .fill { animation: none; width: 50%; } }
     </style>
   </head>
   <body>
@@ -35,6 +42,7 @@
       <div class="meta"><span id="status">Pobieranie</span><span id="bytes"></span></div>
     </section>
     <script>
+      setTimeout(() => document.body.classList.add("mb-in"), 1500);
       const api = window.downloadProgressApi;
       const nameElement = document.getElementById("name");
       const valueElement = document.getElementById("value");

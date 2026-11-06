@@ -10,6 +10,8 @@ export type LayoutSettings = {
   verticalTabBarSide: VerticalTabBarSide;
   /** Compact mode: the chrome (toolbar / sidebar) is hidden and revealed from the screen edge. */
   compactMode: boolean;
+  /** Windows, vertical layout: the native window buttons (_ □ ✕) are hidden until the pointer reaches the top-right corner. */
+  hideWindowControls: boolean;
 };
 
 export const MIN_VERTICAL_TAB_BAR_WIDTH = 180;
@@ -21,6 +23,7 @@ export const DEFAULT_LAYOUT_SETTINGS: LayoutSettings = {
   verticalTabBarCollapsed: false,
   verticalTabBarSide: "left",
   compactMode: false,
+  hideWindowControls: true,
 };
 
 export const clampVerticalTabBarWidth = (value: unknown): number => {
@@ -50,6 +53,7 @@ export const mergeLayoutSettings = (current: LayoutSettings, patch: unknown): La
       ? raw.verticalTabBarSide
       : current.verticalTabBarSide,
     compactMode: typeof raw.compactMode === "boolean" ? raw.compactMode : current.compactMode,
+    hideWindowControls: typeof raw.hideWindowControls === "boolean" ? raw.hideWindowControls : current.hideWindowControls,
   };
 };
 

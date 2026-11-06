@@ -40,6 +40,7 @@ Notes:
 - The vertical tab sidebar can sit on the left or right edge of the window (Settings → Browsing → Tab bar side).
 - "Never sleep this tab" in the tab menu excludes a tab from automatic sleeping and the RAM limiter.
 - Links opened with a middle click open in a background tab.
+- Inactive background tabs are put to sleep to free memory. In Settings → Browsing choose the idle time (never, 5 min … 4 h) and a list of sites that never sleep (a site covers its subdomains); the tab menu also has "Never sleep this site".
 
 ## Security notes
 

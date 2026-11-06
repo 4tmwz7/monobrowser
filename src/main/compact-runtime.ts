@@ -9,7 +9,7 @@
 import { ipcMain, WebContentsView } from "electron";
 import type { BrowserWindow, IpcMainEvent, WebContents } from "electron";
 import {
-  INITIAL_COMPACT_STATE, chromeOverlayRect, hotStripRect, sidebarWidthFor, stepCompact,
+  INITIAL_COMPACT_STATE, chromeOverlayRect, hotStripRect, pollHotRect, rectContains, sidebarWidthFor, stepCompact,
   type CompactGeometry, type CompactState,
 } from "./compact-layout.js";
 import type { LayoutSettings } from "./layout-settings.js";
@@ -40,6 +40,14 @@ export type CompactDeps = {
   isSidebarDragging: () => boolean;
   /** Hands keyboard focus back to the page when the chrome hides. */
   restoreFocus: () => void;
+  /** Height of the title strip that stays above the page in compact mode (Windows: native controls), 0 elsewhere. */
+  getTopInset?: () => number;
+  /**
+   * Pointer position in window content coordinates (null: outside / window inactive). When given, the pointer is
+   * tracked by polling instead of by the hot strip / overlay events: on Windows the title strip is a window drag
+   * region, which swallows pointer events.
+   */
+  getCursor?: () => { x: number; y: number } | null;
 };
 
 export type CompactChrome = {
@@ -88,7 +96,7 @@ export const createCompactChrome = (deps: CompactDeps): CompactChrome => {
     if (!win || win.isDestroyed()) return null;
     const [contentWidth, contentHeight] = win.getContentSize();
     const layout = deps.getLayout();
-    return { kind: layout.tabBarLayout, contentWidth, contentHeight, sidebarWidth: sidebarWidthFor(layout), side: layout.verticalTabBarSide };
+    return { kind: layout.tabBarLayout, contentWidth, contentHeight, sidebarWidth: sidebarWidthFor(layout), side: layout.verticalTabBarSide, topInset: deps.getTopInset?.() ?? 0 };
   };
 
   const keepOpen = (now: number): boolean =>
@@ -165,8 +173,15 @@ export const createCompactChrome = (deps: CompactDeps): CompactChrome => {
       return;
     }
     const now = Date.now();
-    if (pointerInside && !pointerConfirmed && now - revealedAt > 700) pointerInside = false;
-    setRevealed(stepCompact(state, { hot, inside: pointerInside, keepOpen: keepOpen(now), now }), hot);
+    let hotNow = hot;
+    if (deps.getCursor) {
+      const geo = geometry();
+      const cursor = geo ? deps.getCursor() : null;
+      hotNow = hot || Boolean(geo && cursor && rectContains(pollHotRect(geo), cursor));
+      pointerInside = Boolean(geo && cursor && state.revealed && rectContains(chromeOverlayRect(geo), cursor));
+      pointerConfirmed = true;
+    } else if (pointerInside && !pointerConfirmed && now - revealedAt > 700) pointerInside = false;
+    setRevealed(stepCompact(state, { hot: hotNow, inside: pointerInside, keepOpen: keepOpen(now), now }), hotNow);
   };
 
   const startTimer = (): void => {
@@ -280,6 +295,7 @@ export const createCompactChrome = (deps: CompactDeps): CompactChrome => {
       if (typeof flags.tabDrag === "boolean") tabDragging = flags.tabDrag;
     },
     setPointerInside: (inside) => {
+      if (deps.getCursor) return; // polled instead (see CompactDeps.getCursor)
       pointerInside = inside;
       if (inside) pointerConfirmed = true;
       if (enabled && state.revealed) step(false);

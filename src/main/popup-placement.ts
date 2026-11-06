@@ -17,6 +17,8 @@ export type PopupGeometryInput = {
   contentHeight: number;
   /** Context-style popups are clamped inside the window instead of hanging from the anchor. */
   clampInside?: boolean;
+  /** An area that stays free of popups (the native window controls drawn over the top-right corner on Windows). */
+  avoid?: PopupRect | null;
 };
 
 export type PopupGeometry = {
@@ -25,13 +27,38 @@ export type PopupGeometry = {
   fixedEdge: "top" | "bottom";
   /** y of the fixed edge. */
   edgeY: number;
+  /** Lowest allowed top edge when a popup hanging from the bottom edge had to keep clear of `avoid`. */
+  minTop?: number;
 };
 
 const MIN_HEIGHT = 180;
 const GAP = 7;
 const MARGIN = 4;
 
-export const computePopupGeometry = (input: PopupGeometryInput): PopupGeometry => {
+/**
+ * Moves a popup that would overlap `avoid` (horizontally and vertically) below it; no-op when it does not.
+ * With `contentHeight` a popup hanging from the top is shortened again so that it still ends inside the window.
+ */
+export const keepClearOf = (geometry: PopupGeometry, avoid: PopupRect | null | undefined, contentHeight?: number): PopupGeometry => {
+  if (!avoid) return geometry;
+  const { bounds } = geometry;
+  const clearY = avoid.y + avoid.height;
+  const overlapsX = bounds.x < avoid.x + avoid.width && bounds.x + bounds.width > avoid.x;
+  if (!overlapsX || bounds.y >= clearY || bounds.y + bounds.height <= avoid.y) return geometry;
+  if (geometry.fixedEdge === "top") {
+    const room = contentHeight === undefined ? bounds.height : contentHeight - MARGIN - clearY;
+    const height = Math.min(bounds.height, Math.max(MIN_HEIGHT, room));
+    return { ...geometry, bounds: { ...bounds, y: clearY, height }, edgeY: clearY };
+  }
+  // Hanging from the bottom edge: the bottom stays, the popup becomes shorter.
+  const bottom = bounds.y + bounds.height;
+  const height = Math.max(MIN_HEIGHT, bottom - clearY);
+  return { ...geometry, bounds: { ...bounds, y: bottom - height, height }, minTop: clearY };
+};
+
+export const computePopupGeometry = (input: PopupGeometryInput): PopupGeometry => keepClearOf(computeRawPopupGeometry(input), input.avoid, input.contentHeight);
+
+const computeRawPopupGeometry = (input: PopupGeometryInput): PopupGeometry => {
   const { anchor, rect, width, preferredHeight, contentWidth, contentHeight } = input;
   const popupWidth = Math.min(width, Math.max(260, contentWidth - 16));
 
@@ -88,11 +115,51 @@ export const resizePopupBounds = (
   edgeY: number,
   requestedHeight: number,
   contentHeight: number,
+  minTop: number = MARGIN,
 ): { bounds: PopupRect; heightLimited: boolean } => {
+  const top = Math.max(MARGIN, minTop);
   const maximum = fixedEdge === "bottom"
-    ? Math.max(MIN_HEIGHT, edgeY - GAP)
+    ? Math.max(MIN_HEIGHT, edgeY - Math.max(GAP, top))
     : Math.max(MIN_HEIGHT, contentHeight - edgeY - GAP);
   const height = Math.max(MIN_HEIGHT, Math.min(Math.ceil(requestedHeight), maximum));
-  const y = fixedEdge === "bottom" ? Math.max(MARGIN, edgeY - height) : bounds.y;
+  const y = fixedEdge === "bottom" ? Math.max(top, edgeY - height) : bounds.y;
   return { bounds: { ...bounds, y, height }, heightLimited: requestedHeight > maximum };
+};
+
+export type AnchoredPopupInput = {
+  /** The button the popup hangs from (window content coordinates). */
+  anchor: PopupRect;
+  /** Same words electron-chrome-extensions uses: "bottom left" (default) hangs below, right-aligned to the button; "right" starts at the button's left edge; "top" opens above it. */
+  alignment?: string;
+  width: number;
+  height: number;
+  contentWidth: number;
+  contentHeight: number;
+  avoid?: PopupRect | null;
+};
+
+const ANCHORED_PADDING = 5;
+
+/**
+ * Bounds of an extension action popup hosted inside the window: placed like the library's own popup (below or above the
+ * button), flipped when it does not fit on that side, then clamped into the window and kept clear of `avoid`.
+ */
+export const computeAnchoredPopupBounds = (input: AnchoredPopupInput): PopupRect => {
+  const { anchor, contentWidth, contentHeight } = input;
+  const width = Math.max(1, Math.min(Math.round(input.width), contentWidth - 2 * MARGIN));
+  const height = Math.max(1, Math.min(Math.round(input.height), contentHeight - 2 * MARGIN));
+  const alignment = input.alignment ?? "";
+  const x = alignment.includes("right") ? anchor.x : anchor.x + anchor.width - width;
+  const below = anchor.y + anchor.height + ANCHORED_PADDING;
+  const above = anchor.y - height - ANCHORED_PADDING;
+  let y = alignment.includes("top") ? above : below;
+  if (y < MARGIN && below + height <= contentHeight - MARGIN) y = below;
+  else if (y + height > contentHeight - MARGIN && above >= MARGIN) y = above;
+  const bounds: PopupRect = {
+    x: Math.round(Math.max(MARGIN, Math.min(x, contentWidth - width - MARGIN))),
+    y: Math.round(Math.max(MARGIN, Math.min(y, contentHeight - height - MARGIN))),
+    width,
+    height,
+  };
+  return keepClearOf({ bounds, fixedEdge: "top", edgeY: bounds.y }, input.avoid, contentHeight).bounds;
 };
