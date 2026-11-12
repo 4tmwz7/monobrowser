@@ -1,5 +1,5 @@
 /**
- * Generates assets/icon.png — a 256×256 black-and-white two-squares icon.
+ * Generates assets/icon.png — a 256×256 black-and-white "M" tile icon.
  * No external dependencies — pure Node.js stdlib (zlib + fs).
  */
 import { deflateSync } from "node:zlib";
@@ -10,7 +10,7 @@ import { fileURLToPath } from "node:url";
 const __dirname = dirname(fileURLToPath(import.meta.url));
 const W = 256,
   H = 256;
-const SCALE = W / 32;
+const SCALE = W / 64;
 
 // CRC32 lookup table
 const crcTable = new Uint32Array(256);
@@ -36,29 +36,45 @@ function pngChunk(type, data) {
 }
 
 // ── Icon design ─────────────────────────────────────────────────────────────
-// Two squares, diagonally offset, designed on a 32x32 grid and scaled up:
-//   • White filled square — top-left  (2..18, 2..18)
-//   • Black filled square — bottom-right (14..30, 14..30)
-//     with a 1-px white outline so it reads against the black background
-// The black square sits "on top" — the overlap region goes black.
+// Designed on a 64x64 grid and scaled up (same artwork as the website favicon):
+//   • White tile (4..50, 4..50) with a black "M" cut into it
+//   • Hatched hard shadow cast 10 units down-right from the tile
+//   • Black background
 
-function isWhite(x, y) {
-  const nx = (x + 0.5) / SCALE;
-  const ny = (y + 0.5) / SCALE;
+const M = [
+  [9, 44], [9, 10], [18, 10], [27, 25], [36, 10], [45, 10],
+  [45, 44], [36, 44], [36, 26], [27, 41], [18, 26], [18, 44],
+];
+const SHADOW = [[50, 4], [60, 14], [60, 60], [14, 60], [4, 50]];
 
-  const inWhiteSq = nx >= 2 && nx <= 18 && ny >= 2 && ny <= 18;
-  const inBlackSq = nx >= 14 && nx <= 30 && ny >= 14 && ny <= 30;
-  const onBlackSqBorder =
-    inBlackSq &&
-    (Math.abs(nx - 14) <= 0.6 ||
-      Math.abs(nx - 30) <= 0.6 ||
-      Math.abs(ny - 14) <= 0.6 ||
-      Math.abs(ny - 30) <= 0.6);
+function inPolygon(poly, x, y) {
+  let inside = false;
+  for (let i = 0, j = poly.length - 1; i < poly.length; j = i++) {
+    const [xi, yi] = poly[i];
+    const [xj, yj] = poly[j];
+    if (yi > y !== yj > y && x < ((xj - xi) * (y - yi)) / (yj - yi) + xi) inside = !inside;
+  }
+  return inside;
+}
 
-  if (onBlackSqBorder) return true; // white outline of black square
-  if (inBlackSq) return false; // black square on top
-  if (inWhiteSq) return true; // white square (where not covered)
-  return false; // background = black
+function isWhite(nx, ny) {
+  if (nx >= 4 && nx < 50 && ny >= 4 && ny < 50) return !inPolygon(M, nx, ny); // tile minus the M
+  if (!inPolygon(SHADOW, nx, ny)) return false; // background = black
+  // 45° stripes: 3 units wide (measured along x−y), repeating every 6
+  const d = (((nx - ny) % 6) + 6) % 6;
+  return d <= 1.5 || d >= 4.5;
+}
+
+// Supersample each pixel so the diagonals come out anti-aliased
+const SS = 4;
+function shade(x, y) {
+  let hits = 0;
+  for (let sy = 0; sy < SS; sy++) {
+    for (let sx = 0; sx < SS; sx++) {
+      if (isWhite((x + (sx + 0.5) / SS) / SCALE, (y + (sy + 0.5) / SS) / SCALE)) hits++;
+    }
+  }
+  return Math.round((hits / (SS * SS)) * 255);
 }
 
 // Build raw RGB scanlines with filter-byte 0 (None) prefix per row
@@ -66,7 +82,7 @@ const raw = [];
 for (let y = 0; y < H; y++) {
   raw.push(0); // PNG filter byte
   for (let x = 0; x < W; x++) {
-    const v = isWhite(x, y) ? 255 : 0;
+    const v = shade(x, y);
     raw.push(v, v, v);
   }
 }
@@ -94,4 +110,4 @@ const png = Buffer.concat([
 const outDir = join(__dirname, "..", "assets");
 mkdirSync(outDir, { recursive: true });
 writeFileSync(join(outDir, "icon.png"), png);
-console.log("Generated assets/icon.png (256×256 two-squares, black & white)");
+console.log("Generated assets/icon.png (256×256 M tile, black & white)");
