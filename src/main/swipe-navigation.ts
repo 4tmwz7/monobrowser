@@ -23,11 +23,14 @@ export type SwipeNavigationDetector = {
  * Jeden gest wykonuje nawigację najwyżej raz, nawet jeśli po palcach płynie inercja.
  */
 export const createSwipeNavigationDetector = (options: SwipeNavigationOptions): SwipeNavigationDetector => {
-  const threshold = options.threshold ?? 120;
+  const threshold = options.threshold ?? 220;
   const idleMs = options.idleMs ?? 350;
   const now = options.now ?? Date.now;
 
+  // Stała wewnątrz funkcji: jej kod jest wstrzykiwany do strony przez toString().
+  const VERTICAL_LOCK_PX = 40;
   let accumulated = 0;
+  let accumulatedY = 0;
   let lastEventAt = Number.NEGATIVE_INFINITY;
   let fired = false;
 
@@ -35,6 +38,7 @@ export const createSwipeNavigationDetector = (options: SwipeNavigationOptions): 
     const timestamp = now();
     if (timestamp - lastEventAt > idleMs) {
       accumulated = 0;
+      accumulatedY = 0;
       fired = false;
     }
     lastEventAt = timestamp;
@@ -48,13 +52,23 @@ export const createSwipeNavigationDetector = (options: SwipeNavigationOptions): 
     },
     handleWheel: (deltaX, deltaY) => {
       touch();
+      if (fired || !Number.isFinite(deltaX)) return;
+      if (Number.isFinite(deltaY)) accumulatedY += deltaY;
+
+      // Gest, który zaczął się (lub w większości jest) przewijaniem w pionie, nie nawiguje do swojego końca:
+      // ukośne przewijanie strony nie może przypadkiem cofnąć.
+      if (Math.abs(accumulatedY) > VERTICAL_LOCK_PX && Math.abs(accumulatedY) > Math.abs(accumulated)) {
+        if (accumulated !== 0) options.onProgress?.(0);
+        fired = true;
+        return;
+      }
 
       // Pionowe przewijanie zostawiamy stronie; liczy się tylko wyraźnie poziomy ruch.
-      if (fired || !Number.isFinite(deltaX) || Math.abs(deltaX) <= Math.abs(deltaY)) return;
+      if (Math.abs(deltaX) <= Math.abs(deltaY)) return;
 
       accumulated += deltaX;
       options.onProgress?.(Math.max(-1, Math.min(1, accumulated / threshold)));
-      if (Math.abs(accumulated) < threshold) return;
+      if (Math.abs(accumulated) < threshold || Math.abs(accumulated) < Math.abs(accumulatedY) * 2) return;
 
       fired = true;
       options.onSwipe(accumulated < 0 ? "back" : "forward");

@@ -1,4 +1,5 @@
 import { displayUrl } from "../main/url-utils.js";
+import { createSwipeNavigationDetector } from "../main/swipe-navigation.js";
 import { TITLEBAR_HEIGHT, shellViewport, windowControlsReserve } from "../main/titlebar.js";
 import { nearestTabDrop, planTabMove, rectContainsPoint, trustedDragEndPoint } from "../main/tab-drop.js";
 import { EMPTY_TOOLBAR_INFO, normalizeToolbarInfo, pinnedActionsCss, type ExtensionToolbarInfo } from "../main/extension-toolbar.js";
@@ -1443,16 +1444,18 @@ const wireEvents = (): void => {
   // "+" creates the space and the main process opens its editor right away, next to this button.
   wsAdd.addEventListener("click", () => { void window.browserApi.createWorkspace(workspacePopupAnchor(wsAdd)); });
 
-  // Horizontal swipe / scroll over the sidebar switches to the next/previous workspace (throttled).
-  let lastWorkspaceWheel = 0;
+  // Horizontal two-finger swipe over the sidebar switches to the next/previous workspace, once per gesture.
+  const workspaceSwipe = createSwipeNavigationDetector({
+    threshold: 180,
+    onSwipe: (direction) => {
+      const index = state.workspaces.findIndex((workspace) => workspace.id === state.currentWorkspaceId);
+      const next = state.workspaces[(index + (direction === "forward" ? 1 : -1) + state.workspaces.length) % state.workspaces.length];
+      if (next && next.id !== state.currentWorkspaceId) void window.browserApi.switchWorkspace(next.id);
+    },
+  });
   chromeBar.addEventListener("wheel", (event) => {
-    if (!isVertical() || Math.abs(event.deltaX) <= Math.abs(event.deltaY) || Math.abs(event.deltaX) < 30) return;
-    const now = Date.now();
-    if (now - lastWorkspaceWheel < 450) return;
-    lastWorkspaceWheel = now;
-    const index = state.workspaces.findIndex((workspace) => workspace.id === state.currentWorkspaceId);
-    const next = state.workspaces[(index + (event.deltaX > 0 ? 1 : -1) + state.workspaces.length) % state.workspaces.length];
-    if (next && next.id !== state.currentWorkspaceId) void window.browserApi.switchWorkspace(next.id);
+    if (!isVertical() || event.ctrlKey || event.deltaMode !== 0) return;
+    workspaceSwipe.handleWheel(event.deltaX, event.deltaY);
   }, { passive: true });
 
   tabScroll.addEventListener("scroll", updateTabFade, { passive: true });

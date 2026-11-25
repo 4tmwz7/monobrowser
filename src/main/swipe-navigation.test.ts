@@ -44,6 +44,30 @@ test("vertical scrolling never navigates", () => {
   assert.deepEqual(swipes, []);
 });
 
+test("a gesture that starts as vertical scrolling never navigates", () => {
+  const { swipes, wheel } = setup();
+  wheel(0, 50, 0);
+  wheel(-150, 10, 16);
+  assert.deepEqual(swipes, [], "diagonal drift after scrolling down must not go back");
+  wheel(-150, 0, 1000);
+  assert.deepEqual(swipes, ["back"]);
+});
+
+test("a mostly diagonal gesture does not navigate", () => {
+  const { swipes, wheel } = setup();
+  for (let i = 0; i < 4; i++) wheel(-40, 30, i * 16);
+  assert.deepEqual(swipes, []);
+});
+
+test("the default threshold needs a deliberate swipe", () => {
+  const swipes: SwipeDirection[] = [];
+  const detector = createSwipeNavigationDetector({ now: () => 0, onSwipe: (direction) => swipes.push(direction) });
+  detector.handleWheel(-150, 0);
+  assert.deepEqual(swipes, []);
+  detector.handleWheel(-100, 0);
+  assert.deepEqual(swipes, ["back"]);
+});
+
 test("a pause resets the gesture", () => {
   const { swipes, wheel } = setup();
   wheel(-60, 0, 0);
